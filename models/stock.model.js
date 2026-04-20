@@ -13,6 +13,10 @@ export async function getWarehouseStock(warehouseId) {
       p.sku,
       p.category,
       p.unit,
+      p.stock_unit,
+      p.product_type,
+      p.pack_size,
+      p.pack_unit,
       p.alert_threshold,
       w.name AS warehouse_name,
       w.city AS warehouse_city
@@ -38,6 +42,10 @@ export async function getAllStockSummary() {
       p.sku,
       p.category,
       p.unit,
+      p.stock_unit,
+      p.product_type,
+      p.pack_size,
+      p.pack_unit,
       p.alert_threshold,
       w.name AS warehouse_name,
       w.city AS warehouse_city
@@ -149,6 +157,10 @@ export async function getStockMovements({ warehouseId, productId, limit = 100 })
       sm.*,
       p.name AS product_name,
       p.sku,
+      p.stock_unit,
+      p.product_type,
+      p.pack_size,
+      p.pack_unit,
       w.name AS warehouse_name,
       w.city AS warehouse_city
     FROM stock_movements sm
@@ -224,7 +236,11 @@ export async function getStockTransferById(transferId) {
       sti.unit_cost,
       p.name AS product_name,
       p.sku,
-      p.unit
+      p.unit,
+      p.stock_unit,
+      p.product_type,
+      p.pack_size,
+      p.pack_unit
     FROM stock_transfer_items sti
     INNER JOIN products p ON p.id = sti.product_id
     WHERE sti.transfer_id = $1
@@ -523,8 +539,7 @@ export async function performStockTransfer(data) {
         throw error;
       }
 
-      const newSourceQty =
-        Number(sourceStock.quantity) - Number(item.quantity);
+      const newSourceQty = Number(sourceStock.quantity) - Number(item.quantity);
 
       await updateStockQuantity(
         client,
@@ -578,12 +593,7 @@ export async function performStockTransfer(data) {
         VALUES ($1,$2,$3,$4)
         RETURNING *;
         `,
-        [
-          transfer.id,
-          item.product_id,
-          item.quantity,
-          item.unit_cost ?? 0
-        ]
+        [transfer.id, item.product_id, item.quantity, item.unit_cost ?? 0]
       );
 
       items.push(itemResult.rows[0]);
