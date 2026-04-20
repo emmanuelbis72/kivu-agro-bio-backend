@@ -4,6 +4,8 @@ import {
   getProductIntelligenceScoring
 } from "../services/ai/kabotScoring.service.js";
 
+console.log("✅ kabot.controller.js chargé - version GitHub corrigée");
+
 export async function getKabotAlertsHandler(req, res, next) {
   try {
     const result = await getKabotAlerts();
