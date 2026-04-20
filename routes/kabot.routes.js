@@ -1,11 +1,13 @@
 import express from "express";
-import {
+import kabotController from "../controllers/kabot.controller.js";
+
+const router = express.Router();
+
+const {
   getKabotAlertsHandler,
   getKabotCustomerScoringHandler,
   getKabotProductScoringHandler
-} from "../controllers/kabot.controller.js";
-
-const router = express.Router();
+} = kabotController;
 
 /* ================= KABOT PHASE 2 ================= */
 router.get("/alerts", getKabotAlertsHandler);
