@@ -15,7 +15,7 @@ function isPositiveInteger(value) {
 }
 
 function isNonNegativeNumber(value) {
-  return !isNaN(value) && Number(value) >= 0;
+  return !Number.isNaN(Number(value)) && Number(value) >= 0;
 }
 
 function addDays(dateString, days) {
@@ -69,6 +69,17 @@ export async function createInvoiceHandler(req, res, next) {
       });
     }
 
+    if (
+      customer.warehouse_id !== undefined &&
+      customer.warehouse_id !== null &&
+      Number(customer.warehouse_id) !== warehouse_id
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Le dépôt sélectionné ne correspond pas au dépôt lié à ce client."
+      });
+    }
+
     let subtotal = 0;
     const normalizedItems = [];
 
@@ -108,7 +119,6 @@ export async function createInvoiceHandler(req, res, next) {
       }
 
       const line_total = Number(quantity) * Number(unit_price);
-
       subtotal += line_total;
 
       normalizedItems.push({
@@ -137,7 +147,22 @@ export async function createInvoiceHandler(req, res, next) {
       });
     }
 
+    if (discount_amount > subtotal) {
+      return res.status(400).json({
+        success: false,
+        message: "La remise ne peut pas être supérieure au sous-total."
+      });
+    }
+
     const total_amount = subtotal - discount_amount + tax_amount;
+
+    if (total_amount < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Le total de la facture est invalide."
+      });
+    }
+
     const due_date =
       req.body.due_date || addDays(invoice_date, customer.payment_terms_days);
     const invoice_number = await getNextInvoiceNumber();
@@ -165,17 +190,24 @@ export async function createInvoiceHandler(req, res, next) {
       reason: "Aucune tentative de comptabilisation."
     };
 
-    try {
-      accounting = await autoPostInvoiceEntry({
-        invoice,
-        accounting: req.body.accounting || {},
-        created_by: req.body.created_by ? Number(req.body.created_by) : null
-      });
-    } catch (accountingError) {
+    if (invoice.accounting_entry_id) {
       accounting = {
-        status: "error",
-        reason: accountingError.message
+        status: "skipped",
+        reason: "Facture déjà comptabilisée."
       };
+    } else {
+      try {
+        accounting = await autoPostInvoiceEntry({
+          invoice,
+          accounting: req.body.accounting || {},
+          created_by: req.body.created_by ? Number(req.body.created_by) : null
+        });
+      } catch (accountingError) {
+        accounting = {
+          status: "error",
+          reason: accountingError.message
+        };
+      }
     }
 
     await persistAccountingStatus({

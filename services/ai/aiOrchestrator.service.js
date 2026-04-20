@@ -17,6 +17,7 @@ import {
   isPriorityCity
 } from "./businessRules.service.js";
 import { runDeepseekReasoning } from "./deepseekReasoner.service.js";
+import { getActiveCompanyKnowledge } from "./companyKnowledge.service.js";
 
 const aiHistory = [];
 
@@ -26,11 +27,27 @@ const quickQuestions = [
   "Quels sont mes clients les plus risqués ?",
   "Quelles dépenses pèsent le plus ce mois ?",
   "Quelle est ma situation de trésorerie ?",
-  "Résume-moi la situation comptable actuelle."
+  "Résume-moi la situation comptable actuelle.",
+  "Donne-moi un brief CEO global de KIVU AGRO BIO.",
+  "Quels sont les risques les plus urgents pour KIVU AGRO BIO ?",
+  "Quelles opportunités dois-je exploiter ce mois ?"
 ];
 
 function round2(value) {
   return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function compactCompanyKnowledge(rows = []) {
+  return rows.map((row) => ({
+    knowledge_key: row.knowledge_key,
+    title: row.title,
+    category: row.category,
+    content: row.content,
+    tags: row.tags || [],
+    priority_level: row.priority_level,
+    source_type: row.source_type,
+    source_reference: row.source_reference
+  }));
 }
 
 async function buildReasoningContextData() {
@@ -42,16 +59,21 @@ async function buildReasoningContextData() {
     expenses,
     invoices,
     accounting,
-    recentEntries
+    recentEntries,
+    companyKnowledge
   ] = await Promise.all([
     getGlobalStats(),
     getStockAlerts(),
-    getTopProducts(5),
-    getTopCustomers(5),
+    getTopProducts(10),
+    getTopCustomers(10),
     getAllExpenses(),
     getAllInvoices(),
     getAccountingGlobalStats(),
-    getRecentJournalEntries(5)
+    getRecentJournalEntries(10),
+    getActiveCompanyKnowledge({
+      categories: ["company_profile", "strategy", "products", "distribution", "operations", "finance", "market", "investor_notes", "founder_notes"],
+      limit: 100
+    })
   ]);
 
   return {
@@ -62,7 +84,8 @@ async function buildReasoningContextData() {
     expenses,
     invoices,
     accounting,
-    recentEntries
+    recentEntries,
+    companyKnowledge: compactCompanyKnowledge(companyKnowledge)
   };
 }
 
@@ -512,10 +535,18 @@ export async function askAIQuestion({ question, context = {} }) {
     try {
       const contextData = await buildReasoningContextData();
 
+      const mergedContextData =
+        context && typeof context === "object" && Object.keys(context).length > 0
+          ? {
+              ...contextData,
+              userContext: context
+            }
+          : contextData;
+
       const reasoning = await runDeepseekReasoning({
         question,
         businessRules,
-        contextData
+        contextData: mergedContextData
       });
 
       const response = {
@@ -524,16 +555,17 @@ export async function askAIQuestion({ question, context = {} }) {
         source_module: "ai_ceo",
         summary: reasoning.summary || "",
         answer: reasoning.analysis || "",
-        metrics: {},
+        metrics: reasoning.metrics || {},
         drivers: [
           ...(reasoning.risks || []).map((item) => `Risque: ${item}`),
           ...(reasoning.opportunities || []).map(
             (item) => `Opportunité: ${item}`
           )
         ],
-        recommendations: reasoning.recommendations || [],
+        recommendations:
+          reasoning.actions || reasoning.recommendations || [],
         priority_level: reasoning.priority_level || "MEDIUM",
-        confidence_score: 0.95,
+        confidence_score: reasoning.confidence_score || 0.95,
         generated_at: new Date().toISOString()
       };
 

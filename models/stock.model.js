@@ -163,6 +163,107 @@ export async function getStockMovements({ warehouseId, productId, limit = 100 })
   return result.rows;
 }
 
+export async function getStockTransfers(limit = 100) {
+  const query = `
+    SELECT
+      st.id,
+      st.transfer_number,
+      st.source_warehouse_id,
+      st.destination_warehouse_id,
+      st.transfer_date,
+      st.status,
+      st.notes,
+      st.created_by,
+      st.created_at,
+      st.updated_at,
+      sw.name AS source_warehouse_name,
+      sw.city AS source_warehouse_city,
+      dw.name AS destination_warehouse_name,
+      dw.city AS destination_warehouse_city,
+      COALESCE(COUNT(sti.id), 0)::int AS items_count,
+      COALESCE(SUM(sti.quantity), 0) AS total_quantity
+    FROM stock_transfers st
+    INNER JOIN warehouses sw ON sw.id = st.source_warehouse_id
+    INNER JOIN warehouses dw ON dw.id = st.destination_warehouse_id
+    LEFT JOIN stock_transfer_items sti ON sti.transfer_id = st.id
+    GROUP BY
+      st.id,
+      sw.name,
+      sw.city,
+      dw.name,
+      dw.city
+    ORDER BY st.created_at DESC
+    LIMIT $1;
+  `;
+
+  const result = await pool.query(query, [limit]);
+  return result.rows;
+}
+
+export async function getStockTransferById(transferId) {
+  const headerQuery = `
+    SELECT
+      st.*,
+      sw.name AS source_warehouse_name,
+      sw.city AS source_warehouse_city,
+      dw.name AS destination_warehouse_name,
+      dw.city AS destination_warehouse_city
+    FROM stock_transfers st
+    INNER JOIN warehouses sw ON sw.id = st.source_warehouse_id
+    INNER JOIN warehouses dw ON dw.id = st.destination_warehouse_id
+    WHERE st.id = $1
+    LIMIT 1;
+  `;
+
+  const itemsQuery = `
+    SELECT
+      sti.id,
+      sti.transfer_id,
+      sti.product_id,
+      sti.quantity,
+      sti.unit_cost,
+      p.name AS product_name,
+      p.sku,
+      p.unit
+    FROM stock_transfer_items sti
+    INNER JOIN products p ON p.id = sti.product_id
+    WHERE sti.transfer_id = $1
+    ORDER BY sti.id ASC;
+  `;
+
+  const [headerResult, itemsResult] = await Promise.all([
+    pool.query(headerQuery, [transferId]),
+    pool.query(itemsQuery, [transferId])
+  ]);
+
+  const transfer = headerResult.rows[0] || null;
+
+  if (!transfer) {
+    return null;
+  }
+
+  return {
+    ...transfer,
+    items: itemsResult.rows
+  };
+}
+
+export async function generateNextTransferNumber(client) {
+  const year = new Date().getFullYear();
+
+  const result = await client.query(
+    `
+    SELECT COUNT(*)::int AS count
+    FROM stock_transfers
+    WHERE EXTRACT(YEAR FROM created_at) = $1;
+    `,
+    [year]
+  );
+
+  const nextNumber = Number(result.rows[0]?.count || 0) + 1;
+  return `TRF-${year}-${String(nextNumber).padStart(5, "0")}`;
+}
+
 export async function performStockEntry(data) {
   const client = await pool.connect();
 
@@ -349,6 +450,178 @@ export async function performStockAdjustment(data) {
     return {
       stock: updatedStock,
       movement
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function performStockTransfer(data) {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const transferNumber = await generateNextTransferNumber(client);
+
+    const headerResult = await client.query(
+      `
+      INSERT INTO stock_transfers (
+        transfer_number,
+        source_warehouse_id,
+        destination_warehouse_id,
+        transfer_date,
+        status,
+        notes,
+        created_by
+      )
+      VALUES ($1,$2,$3,$4,'completed',$5,$6)
+      RETURNING *;
+      `,
+      [
+        transferNumber,
+        data.source_warehouse_id,
+        data.destination_warehouse_id,
+        data.transfer_date,
+        data.notes || null,
+        data.created_by || null
+      ]
+    );
+
+    const transfer = headerResult.rows[0];
+    const items = [];
+
+    for (const item of data.items) {
+      const sourceStockResult = await client.query(
+        `
+        SELECT *
+        FROM warehouse_stock
+        WHERE warehouse_id = $1 AND product_id = $2
+        LIMIT 1;
+        `,
+        [data.source_warehouse_id, item.product_id]
+      );
+
+      const sourceStock = sourceStockResult.rows[0] || null;
+
+      if (!sourceStock) {
+        const error = new Error(
+          `Aucun stock trouvé pour le produit ID ${item.product_id} dans le dépôt source.`
+        );
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (Number(sourceStock.quantity) < Number(item.quantity)) {
+        const error = new Error(
+          `Stock insuffisant pour le produit ID ${item.product_id} dans le dépôt source.`
+        );
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const newSourceQty =
+        Number(sourceStock.quantity) - Number(item.quantity);
+
+      await updateStockQuantity(
+        client,
+        data.source_warehouse_id,
+        item.product_id,
+        newSourceQty
+      );
+
+      let destinationStockResult = await client.query(
+        `
+        SELECT *
+        FROM warehouse_stock
+        WHERE warehouse_id = $1 AND product_id = $2
+        LIMIT 1;
+        `,
+        [data.destination_warehouse_id, item.product_id]
+      );
+
+      let destinationStock = destinationStockResult.rows[0] || null;
+
+      if (!destinationStock) {
+        const createdDestination = await client.query(
+          `
+          INSERT INTO warehouse_stock (warehouse_id, product_id, quantity)
+          VALUES ($1, $2, 0)
+          RETURNING *;
+          `,
+          [data.destination_warehouse_id, item.product_id]
+        );
+        destinationStock = createdDestination.rows[0];
+      }
+
+      const newDestinationQty =
+        Number(destinationStock.quantity) + Number(item.quantity);
+
+      await updateStockQuantity(
+        client,
+        data.destination_warehouse_id,
+        item.product_id,
+        newDestinationQty
+      );
+
+      const itemResult = await client.query(
+        `
+        INSERT INTO stock_transfer_items (
+          transfer_id,
+          product_id,
+          quantity,
+          unit_cost
+        )
+        VALUES ($1,$2,$3,$4)
+        RETURNING *;
+        `,
+        [
+          transfer.id,
+          item.product_id,
+          item.quantity,
+          item.unit_cost ?? 0
+        ]
+      );
+
+      items.push(itemResult.rows[0]);
+
+      await createStockMovement(client, {
+        product_id: item.product_id,
+        warehouse_id: data.source_warehouse_id,
+        movement_type: "OUT",
+        quantity: item.quantity,
+        unit_cost: item.unit_cost ?? 0,
+        reference_type: "transfer",
+        reference_id: transfer.id,
+        notes:
+          item.notes ||
+          `Transfert ${transferNumber} vers dépôt ${data.destination_warehouse_id}`,
+        created_by: data.created_by
+      });
+
+      await createStockMovement(client, {
+        product_id: item.product_id,
+        warehouse_id: data.destination_warehouse_id,
+        movement_type: "IN",
+        quantity: item.quantity,
+        unit_cost: item.unit_cost ?? 0,
+        reference_type: "transfer",
+        reference_id: transfer.id,
+        notes:
+          item.notes ||
+          `Transfert ${transferNumber} depuis dépôt ${data.source_warehouse_id}`,
+        created_by: data.created_by
+      });
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      ...transfer,
+      items
     };
   } catch (error) {
     await client.query("ROLLBACK");

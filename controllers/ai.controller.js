@@ -10,6 +10,9 @@ import {
   validateBusinessRuleValue
 } from "../services/ai/businessRules.service.js";
 
+// 🔥 NOUVEAU IMPORT CEO
+import { getCEOBRIEF } from "../services/ai/ceoReasoning.service.js";
+
 /* ================= IA CHAT ================= */
 
 export async function askAIHandler(req, res, next) {
@@ -63,6 +66,21 @@ export async function getAIHistoryHandler(req, res, next) {
       success: true,
       count: history.length,
       data: history
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/* ================= CEO REASONING ================= */
+
+export async function getCEOBRIEFHandler(req, res, next) {
+  try {
+    const result = await getCEOBRIEF();
+
+    return res.status(200).json({
+      success: true,
+      data: result
     });
   } catch (error) {
     next(error);

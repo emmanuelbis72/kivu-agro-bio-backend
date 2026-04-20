@@ -155,6 +155,34 @@ async function resolvePaymentAccount(paymentMethod, overrides = {}) {
   return resolvePostableAccount(envMapping[method] || null);
 }
 
+async function resolveCogsAccount(overrides = {}) {
+  const overrideAccount = await resolvePostableAccount(
+    overrides.cogs_account_number || null
+  );
+
+  if (overrideAccount) {
+    return overrideAccount;
+  }
+
+  return resolvePostableAccount(
+    process.env.ACCOUNTING_COGS_ACCOUNT_NUMBER || null
+  );
+}
+
+async function resolveInventoryAccount(overrides = {}) {
+  const overrideAccount = await resolvePostableAccount(
+    overrides.inventory_account_number || null
+  );
+
+  if (overrideAccount) {
+    return overrideAccount;
+  }
+
+  return resolvePostableAccount(
+    process.env.ACCOUNTING_INVENTORY_ACCOUNT_NUMBER || null
+  );
+}
+
 async function createAndPostEntry({
   entry_date,
   journal_code,
@@ -232,9 +260,7 @@ export async function autoPostInvoiceEntry({
       };
     }
 
-    const currentAmount = Number(
-      salesGroups.get(salesAccount.id)?.amount || 0
-    );
+    const currentAmount = Number(salesGroups.get(salesAccount.id)?.amount || 0);
     const nextAmount = roundAmount(
       currentAmount + Number(item.line_total || 0)
     );
@@ -282,7 +308,7 @@ export async function autoPostInvoiceEntry({
     }
   }
 
-  const lines = [
+  const salesLines = [
     {
       account_id: customerAccount.id,
       description: "Débit client",
@@ -294,7 +320,7 @@ export async function autoPostInvoiceEntry({
   ];
 
   for (const group of salesGroups.values()) {
-    lines.push({
+    salesLines.push({
       account_id: group.account.id,
       description: `Crédit vente ${group.account.account_number}`,
       debit: 0,
@@ -305,7 +331,7 @@ export async function autoPostInvoiceEntry({
   }
 
   if (taxAmount > 0) {
-    lines.push({
+    salesLines.push({
       account_id: taxAccount.id,
       description: "Crédit taxe",
       debit: 0,
@@ -315,7 +341,7 @@ export async function autoPostInvoiceEntry({
     });
   }
 
-  const result = await createAndPostEntry({
+  const salesResult = await createAndPostEntry({
     entry_date: invoice.invoice_date,
     journal_code: "VE",
     description: `Vente liée à la facture ${invoice.invoice_number}`,
@@ -324,13 +350,83 @@ export async function autoPostInvoiceEntry({
     source_module: "invoice",
     created_by,
     validated_by: created_by,
-    lines
+    lines: salesLines
   });
+
+  const hasCogsData = Array.isArray(invoice.items) && invoice.items.some(
+    (item) => Number(item.quantity || 0) > 0 && Number(item.unit_cost || 0) > 0
+  );
+
+  if (!hasCogsData) {
+    return {
+      status: "posted",
+      journal_entry_id: salesResult.entry.id,
+      entry_number: salesResult.entry.entry_number,
+      cogs_status: "skipped",
+      cogs_reason: "Aucun coût unitaire exploitable pour générer le coût des ventes."
+    };
+  }
+
+  const cogsAccount = await resolveCogsAccount(accounting);
+  const inventoryAccount = await resolveInventoryAccount(accounting);
+
+  if (!cogsAccount || !inventoryAccount) {
+    return {
+      status: "posted",
+      journal_entry_id: salesResult.entry.id,
+      entry_number: salesResult.entry.entry_number,
+      cogs_status: "skipped",
+      cogs_reason:
+        "Comptes COGS / stock manquants ou invalides. Vente comptabilisée sans coût des ventes."
+    };
+  }
+
+  const totalCogs = roundAmount(
+    (invoice.items || []).reduce((sum, item) => {
+      return (
+        sum +
+        Number(item.quantity || 0) * Number(item.unit_cost || 0)
+      );
+    }, 0)
+  );
+
+  if (totalCogs > 0) {
+    await createAndPostEntry({
+      entry_date: invoice.invoice_date,
+      journal_code: "ST",
+      description: `Coût des ventes lié à la facture ${invoice.invoice_number}`,
+      reference_type: "invoice",
+      reference_id: invoice.id,
+      source_module: "invoice_cogs",
+      created_by,
+      validated_by: created_by,
+      lines: [
+        {
+          account_id: cogsAccount.id,
+          description: "Débit coût des ventes",
+          debit: totalCogs,
+          credit: 0,
+          partner_type: "customer",
+          partner_id: invoice.customer_id
+        },
+        {
+          account_id: inventoryAccount.id,
+          description: "Crédit stock",
+          debit: 0,
+          credit: totalCogs,
+          partner_type: "customer",
+          partner_id: invoice.customer_id
+        }
+      ]
+    });
+  }
 
   return {
     status: "posted",
-    journal_entry_id: result.entry.id,
-    entry_number: result.entry.entry_number
+    journal_entry_id: salesResult.entry.id,
+    entry_number: salesResult.entry.entry_number,
+    cogs_status: totalCogs > 0 ? "posted" : "skipped",
+    cogs_amount: totalCogs
   };
 }
 

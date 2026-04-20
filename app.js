@@ -20,6 +20,9 @@ import accountingReportRoutes from "./routes/accountingReport.routes.js";
 import accountingSettingsRoutes from "./routes/accountingSettings.routes.js";
 import aiRoutes from "./routes/ai.routes.js";
 import aiScoringRoutes from "./routes/aiScoring.routes.js";
+import kabotRoutes from "./routes/kabot.routes.js";
+import companyKnowledgeRoutes from "./routes/companyKnowledge.routes.js";
+import productionRoutes from "./routes/production.routes.js";
 import { notFoundHandler, errorHandler } from "./middlewares/errorHandler.js";
 
 dotenv.config();
@@ -61,6 +64,15 @@ app.use("/api/accounting-reports", accountingReportRoutes);
 app.use("/api/accounting-settings", accountingSettingsRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/ai-scoring", aiScoringRoutes);
+
+/* ================= KABOT ================= */
+app.use("/api/kabot", kabotRoutes);
+
+/* ================= COMPANY KNOWLEDGE ================= */
+app.use("/api/company-knowledge", companyKnowledgeRoutes);
+
+/* ================= PRODUCTION ================= */
+app.use("/api/production", productionRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

@@ -8,7 +8,7 @@ function isPositiveInteger(value) {
 }
 
 function isPositiveNumber(value) {
-  return !isNaN(value) && Number(value) > 0;
+  return !Number.isNaN(Number(value)) && Number(value) > 0;
 }
 
 export async function createPaymentHandler(req, res, next) {
@@ -41,6 +41,20 @@ export async function createPaymentHandler(req, res, next) {
       });
     }
 
+    if (String(invoice.status || "").trim().toLowerCase() === "paid") {
+      return res.status(400).json({
+        success: false,
+        message: "Cette facture est déjà entièrement payée."
+      });
+    }
+
+    if (Number(invoice.balance_due) <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Cette facture ne présente plus de solde à payer."
+      });
+    }
+
     if (Number(amount) > Number(invoice.balance_due)) {
       return res.status(400).json({
         success: false,
@@ -65,18 +79,25 @@ export async function createPaymentHandler(req, res, next) {
       reason: "Aucune tentative de comptabilisation."
     };
 
-    try {
-      accounting = await autoPostPaymentEntry({
-        payment,
-        invoice,
-        accounting: req.body.accounting || {},
-        created_by: req.body.received_by ? Number(req.body.received_by) : null
-      });
-    } catch (accountingError) {
+    if (payment.accounting_entry_id) {
       accounting = {
-        status: "error",
-        reason: accountingError.message
+        status: "skipped",
+        reason: "Paiement déjà comptabilisé."
       };
+    } else {
+      try {
+        accounting = await autoPostPaymentEntry({
+          payment,
+          invoice,
+          accounting: req.body.accounting || {},
+          created_by: req.body.received_by ? Number(req.body.received_by) : null
+        });
+      } catch (accountingError) {
+        accounting = {
+          status: "error",
+          reason: accountingError.message
+        };
+      }
     }
 
     await persistAccountingStatus({

@@ -43,32 +43,56 @@ function extractFirstJsonObject(text) {
   return input.slice(firstBrace, lastBrace + 1);
 }
 
+function normalizePriorityLevel(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+
+  if (["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(normalized)) {
+    return normalized;
+  }
+
+  return "MEDIUM";
+}
+
+function normalizeConfidenceScore(value) {
+  const numeric = Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return 0.85;
+  }
+
+  if (numeric < 0) return 0;
+  if (numeric > 1) return 1;
+
+  return Math.round(numeric * 100) / 100;
+}
+
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
 function normalizeReasoningPayload(payload, rawText = "") {
+  const recommendations = normalizeStringArray(payload?.recommendations);
+  const actions = normalizeStringArray(payload?.actions);
+
   return {
     summary:
-      typeof payload?.summary === "string"
+      typeof payload?.summary === "string" && payload.summary.trim()
         ? payload.summary.trim()
         : "Analyse stratégique générée.",
     analysis:
-      typeof payload?.analysis === "string"
+      typeof payload?.analysis === "string" && payload.analysis.trim()
         ? payload.analysis.trim()
         : rawText || "Aucune analyse détaillée renvoyée.",
-    risks: Array.isArray(payload?.risks)
-      ? payload.risks.map((item) => String(item).trim()).filter(Boolean)
-      : [],
-    opportunities: Array.isArray(payload?.opportunities)
-      ? payload.opportunities.map((item) => String(item).trim()).filter(Boolean)
-      : [],
-    recommendations: Array.isArray(payload?.recommendations)
-      ? payload.recommendations
-          .map((item) => String(item).trim())
-          .filter(Boolean)
-      : [],
-    priority_level: ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(
-      String(payload?.priority_level || "").toUpperCase()
-    )
-      ? String(payload.priority_level).toUpperCase()
-      : "MEDIUM"
+    risks: normalizeStringArray(payload?.risks),
+    opportunities: normalizeStringArray(payload?.opportunities),
+    recommendations,
+    actions: actions.length > 0 ? actions : recommendations,
+    priority_level: normalizePriorityLevel(payload?.priority_level),
+    confidence_score: normalizeConfidenceScore(payload?.confidence_score)
   };
 }
 
@@ -100,7 +124,9 @@ function safeParseReasoningContent(content) {
       risks: [],
       opportunities: [],
       recommendations: [],
-      priority_level: "MEDIUM"
+      actions: [],
+      priority_level: "MEDIUM",
+      confidence_score: 0.7
     },
     cleaned
   );
@@ -139,8 +165,10 @@ FORMAT JSON OBLIGATOIRE
   "analysis": "analyse détaillée et stratégique",
   "risks": ["risque 1", "risque 2"],
   "opportunities": ["opportunité 1", "opportunité 2"],
-  "recommendations": ["action 1", "action 2", "action 3"],
-  "priority_level": "LOW | MEDIUM | HIGH | CRITICAL"
+  "recommendations": ["recommandation 1", "recommandation 2"],
+  "actions": ["action prioritaire 1", "action prioritaire 2", "action prioritaire 3"],
+  "priority_level": "LOW | MEDIUM | HIGH | CRITICAL",
+  "confidence_score": 0.0
 }
 `.trim();
 }

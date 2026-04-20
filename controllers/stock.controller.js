@@ -4,9 +4,12 @@ import {
   getWarehouseStock,
   getAllStockSummary,
   getStockMovements,
+  getStockTransfers,
+  getStockTransferById,
   performStockEntry,
   performStockExit,
-  performStockAdjustment
+  performStockAdjustment,
+  performStockTransfer
 } from "../models/stock.model.js";
 
 function isPositiveInteger(value) {
@@ -14,7 +17,7 @@ function isPositiveInteger(value) {
 }
 
 function isNonNegativeInteger(value) {
-  return Number.isInteger(Number(value)) && Number(value) >= 0;
+  return Number.isFinite(Number(value)) && Number(value) >= 0;
 }
 
 async function validateWarehouseAndProduct(warehouseId, productId) {
@@ -158,7 +161,7 @@ export async function createStockAdjustmentHandler(req, res, next) {
     if (!isNonNegativeInteger(new_quantity)) {
       return res.status(400).json({
         success: false,
-        message: "Le champ 'new_quantity' doit être un entier >= 0."
+        message: "Le champ 'new_quantity' doit être un nombre >= 0."
       });
     }
 
@@ -178,6 +181,110 @@ export async function createStockAdjustmentHandler(req, res, next) {
     return res.status(201).json({
       success: true,
       message: "Ajustement de stock enregistré avec succès.",
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createStockTransferHandler(req, res, next) {
+  try {
+    const source_warehouse_id = Number(req.body.source_warehouse_id);
+    const destination_warehouse_id = Number(req.body.destination_warehouse_id);
+    const transfer_date = String(
+      req.body.transfer_date || new Date().toISOString().split("T")[0]
+    ).trim();
+
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
+
+    if (!isPositiveInteger(source_warehouse_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le champ 'source_warehouse_id' doit être un entier positif."
+      });
+    }
+
+    if (!isPositiveInteger(destination_warehouse_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le champ 'destination_warehouse_id' doit être un entier positif."
+      });
+    }
+
+    if (source_warehouse_id === destination_warehouse_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Le dépôt source doit être différent du dépôt destination."
+      });
+    }
+
+    if (!items.length) {
+      return res.status(400).json({
+        success: false,
+        message: "Le transfert doit contenir au moins une ligne."
+      });
+    }
+
+    const sourceWarehouse = await getWarehouseById(source_warehouse_id);
+    if (!sourceWarehouse) {
+      return res.status(404).json({
+        success: false,
+        message: "Dépôt source introuvable."
+      });
+    }
+
+    const destinationWarehouse = await getWarehouseById(destination_warehouse_id);
+    if (!destinationWarehouse) {
+      return res.status(404).json({
+        success: false,
+        message: "Dépôt destination introuvable."
+      });
+    }
+
+    const normalizedItems = [];
+
+    for (const rawItem of items) {
+      const product_id = Number(rawItem.product_id);
+      const quantity = Number(rawItem.quantity);
+      const unit_cost = Number(rawItem.unit_cost ?? 0);
+
+      if (!isPositiveInteger(product_id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Chaque ligne doit contenir un 'product_id' valide."
+        });
+      }
+
+      if (!isPositiveInteger(quantity)) {
+        return res.status(400).json({
+          success: false,
+          message: "Chaque ligne doit contenir une 'quantity' entière positive."
+        });
+      }
+
+      await validateWarehouseAndProduct(source_warehouse_id, product_id);
+
+      normalizedItems.push({
+        product_id,
+        quantity,
+        unit_cost,
+        notes: rawItem.notes?.trim() || null
+      });
+    }
+
+    const result = await performStockTransfer({
+      source_warehouse_id,
+      destination_warehouse_id,
+      transfer_date,
+      notes: req.body.notes?.trim() || null,
+      created_by: req.body.created_by ? Number(req.body.created_by) : null,
+      items: normalizedItems
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Transfert inter-dépôts enregistré avec succès.",
       data: result
     });
   } catch (error) {
@@ -274,6 +381,58 @@ export async function getStockMovementsHandler(req, res, next) {
       success: true,
       count: movements.length,
       data: movements
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getStockTransfersHandler(req, res, next) {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 100;
+
+    if (!isPositiveInteger(limit)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le paramètre 'limit' doit être un entier positif."
+      });
+    }
+
+    const rows = await getStockTransfers(limit);
+
+    return res.status(200).json({
+      success: true,
+      count: rows.length,
+      data: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getStockTransferByIdHandler(req, res, next) {
+  try {
+    const transferId = Number(req.params.id);
+
+    if (!isPositiveInteger(transferId)) {
+      return res.status(400).json({
+        success: false,
+        message: "ID transfert invalide."
+      });
+    }
+
+    const transfer = await getStockTransferById(transferId);
+
+    if (!transfer) {
+      return res.status(404).json({
+        success: false,
+        message: "Transfert introuvable."
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: transfer
     });
   } catch (error) {
     next(error);

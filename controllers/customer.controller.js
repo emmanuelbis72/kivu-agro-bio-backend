@@ -40,6 +40,16 @@ function validateCustomerPayload(body) {
     );
   }
 
+  if (
+    body.warehouse_id !== undefined &&
+    body.warehouse_id !== null &&
+    body.warehouse_id !== "" &&
+    (!Number.isInteger(Number(body.warehouse_id)) ||
+      Number(body.warehouse_id) <= 0)
+  ) {
+    errors.push("Le champ 'warehouse_id' doit être un entier positif ou nul.");
+  }
+
   return errors;
 }
 
@@ -73,7 +83,13 @@ export async function createCustomerHandler(req, res, next) {
         req.body.receivable_account_id === null ||
         req.body.receivable_account_id === ""
           ? null
-          : Number(req.body.receivable_account_id)
+          : Number(req.body.receivable_account_id),
+      warehouse_id:
+        req.body.warehouse_id === undefined ||
+        req.body.warehouse_id === null ||
+        req.body.warehouse_id === ""
+          ? null
+          : Number(req.body.warehouse_id)
     });
 
     return res.status(201).json({
@@ -184,7 +200,13 @@ export async function updateCustomerHandler(req, res, next) {
         mergedPayload.receivable_account_id === null ||
         mergedPayload.receivable_account_id === ""
           ? null
-          : Number(mergedPayload.receivable_account_id)
+          : Number(mergedPayload.receivable_account_id),
+      warehouse_id:
+        mergedPayload.warehouse_id === undefined ||
+        mergedPayload.warehouse_id === null ||
+        mergedPayload.warehouse_id === ""
+          ? null
+          : Number(mergedPayload.warehouse_id)
     });
 
     return res.status(200).json({

@@ -14,9 +14,10 @@ export async function createCustomer(data) {
       credit_limit,
       notes,
       is_active,
-      receivable_account_id
+      receivable_account_id,
+      warehouse_id
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
     RETURNING *;
   `;
 
@@ -32,7 +33,8 @@ export async function createCustomer(data) {
     data.credit_limit ?? 0,
     data.notes || null,
     data.is_active ?? true,
-    data.receivable_account_id || null
+    data.receivable_account_id || null,
+    data.warehouse_id || null
   ];
 
   const result = await pool.query(query, values);
@@ -44,9 +46,12 @@ export async function getAllCustomers() {
     SELECT
       c.*,
       a.account_number AS receivable_account_number,
-      a.account_name AS receivable_account_name
+      a.account_name AS receivable_account_name,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city
     FROM customers c
     LEFT JOIN accounts a ON a.id = c.receivable_account_id
+    LEFT JOIN warehouses w ON w.id = c.warehouse_id
     ORDER BY c.created_at DESC;
   `;
   const result = await pool.query(query);
@@ -58,9 +63,12 @@ export async function getCustomerById(id) {
     SELECT
       c.*,
       a.account_number AS receivable_account_number,
-      a.account_name AS receivable_account_name
+      a.account_name AS receivable_account_name,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city
     FROM customers c
     LEFT JOIN accounts a ON a.id = c.receivable_account_id
+    LEFT JOIN warehouses w ON w.id = c.warehouse_id
     WHERE c.id = $1
     LIMIT 1;
   `;
@@ -84,8 +92,9 @@ export async function updateCustomer(id, data) {
       notes = $10,
       is_active = $11,
       receivable_account_id = $12,
+      warehouse_id = $13,
       updated_at = NOW()
-    WHERE id = $13
+    WHERE id = $14
     RETURNING *;
   `;
 
@@ -102,6 +111,7 @@ export async function updateCustomer(id, data) {
     data.notes || null,
     data.is_active ?? true,
     data.receivable_account_id || null,
+    data.warehouse_id || null,
     id
   ];
 

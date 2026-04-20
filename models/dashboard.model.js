@@ -2,6 +2,23 @@ import { pool } from "../config/db.js";
 
 export async function getGlobalStats() {
   const query = `
+    WITH sales_base AS (
+      SELECT
+        COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+        COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) AS total_net_sales_amount,
+        COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+        COALESCE(SUM(i.balance_due), 0) AS total_receivables
+      FROM invoices i
+      WHERE i.status IN ('issued', 'partial', 'paid')
+    ),
+    cogs_base AS (
+      SELECT
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN products p ON p.id = ii.product_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+    )
     SELECT
       (SELECT COUNT(*)::int FROM products WHERE is_active = TRUE) AS total_products,
       (SELECT COUNT(*)::int FROM customers WHERE is_active = TRUE) AS total_customers,
@@ -10,11 +27,24 @@ export async function getGlobalStats() {
       (SELECT COUNT(*)::int FROM invoices WHERE status = 'paid') AS paid_invoices,
       (SELECT COUNT(*)::int FROM invoices WHERE status = 'partial') AS partial_invoices,
       (SELECT COUNT(*)::int FROM invoices WHERE status = 'issued') AS unpaid_invoices,
-      (SELECT COALESCE(SUM(total_amount), 0) FROM invoices WHERE status IN ('issued', 'partial', 'paid')) AS total_sales_amount,
-      (SELECT COALESCE(SUM(paid_amount), 0) FROM invoices WHERE status IN ('issued', 'partial', 'paid')) AS total_collected_amount,
-      (SELECT COALESCE(SUM(balance_due), 0) FROM invoices WHERE status IN ('issued', 'partial')) AS total_receivables,
+      sales_base.total_sales_amount,
+      sales_base.total_net_sales_amount,
+      sales_base.total_collected_amount,
+      sales_base.total_receivables,
+      cogs_base.total_cogs_amount,
+      (sales_base.total_net_sales_amount - cogs_base.total_cogs_amount) AS gross_profit_amount,
+      CASE
+        WHEN sales_base.total_net_sales_amount > 0
+          THEN ROUND(
+            ((sales_base.total_net_sales_amount - cogs_base.total_cogs_amount)
+              / sales_base.total_net_sales_amount) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent,
       (SELECT COALESCE(SUM(amount), 0) FROM payments) AS total_payments_received,
-      (SELECT COALESCE(SUM(quantity), 0) FROM warehouse_stock) AS total_units_in_stock;
+      (SELECT COALESCE(SUM(quantity), 0) FROM warehouse_stock) AS total_units_in_stock
+    FROM sales_base, cogs_base;
   `;
 
   const result = await pool.query(query);
@@ -53,7 +83,9 @@ export async function getTopProducts(limit = 10) {
       p.sku,
       p.category,
       SUM(ii.quantity)::int AS total_quantity_sold,
-      SUM(ii.line_total) AS total_sales_value
+      SUM(ii.line_total) AS total_sales_value,
+      COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount,
+      COALESCE(SUM(ii.line_total), 0) - COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS gross_profit_amount
     FROM invoice_items ii
     INNER JOIN products p ON p.id = ii.product_id
     INNER JOIN invoices i ON i.id = ii.invoice_id
@@ -90,19 +122,31 @@ export async function getTopCustomers(limit = 10) {
 
 export async function getRecentInvoices(limit = 10) {
   const query = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
     SELECT
       i.id,
       i.invoice_number,
       i.invoice_date,
       i.status,
       i.total_amount,
+      i.tax_amount,
       i.paid_amount,
       i.balance_due,
       c.business_name AS customer_name,
-      w.name AS warehouse_name
+      w.name AS warehouse_name,
+      COALESCE(ic.total_cogs_amount, 0) AS total_cogs_amount,
+      (COALESCE(i.total_amount, 0) - COALESCE(i.tax_amount, 0) - COALESCE(ic.total_cogs_amount, 0)) AS gross_profit_amount
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     INNER JOIN warehouses w ON w.id = i.warehouse_id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
     ORDER BY i.created_at DESC
     LIMIT $1;
   `;
@@ -135,14 +179,20 @@ export async function getRecentPayments(limit = 10) {
 export async function getSalesOverview() {
   const query = `
     SELECT
-      TO_CHAR(invoice_date, 'YYYY-MM') AS period,
-      COUNT(*)::int AS total_invoices,
-      COALESCE(SUM(total_amount), 0) AS total_sales,
-      COALESCE(SUM(paid_amount), 0) AS total_collected,
-      COALESCE(SUM(balance_due), 0) AS total_due
-    FROM invoices
-    WHERE status IN ('issued', 'partial', 'paid')
-    GROUP BY TO_CHAR(invoice_date, 'YYYY-MM')
+      TO_CHAR(i.invoice_date, 'YYYY-MM') AS period,
+      COUNT(DISTINCT i.id)::int AS total_invoices,
+      COALESCE(SUM(DISTINCT i.total_amount), 0) AS total_sales,
+      COALESCE(SUM(DISTINCT (i.total_amount - COALESCE(i.tax_amount, 0))), 0) AS total_net_sales,
+      COALESCE(SUM(DISTINCT i.paid_amount), 0) AS total_collected,
+      COALESCE(SUM(DISTINCT i.balance_due), 0) AS total_due,
+      COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs,
+      COALESCE(SUM(DISTINCT (i.total_amount - COALESCE(i.tax_amount, 0))), 0)
+        - COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS gross_profit
+    FROM invoices i
+    LEFT JOIN invoice_items ii ON ii.invoice_id = i.id
+    LEFT JOIN products p ON p.id = ii.product_id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+    GROUP BY TO_CHAR(i.invoice_date, 'YYYY-MM')
     ORDER BY period ASC;
   `;
 
@@ -152,6 +202,16 @@ export async function getSalesOverview() {
 
 export async function getSalesByWarehouse() {
   const query = `
+    WITH warehouse_invoice_cogs AS (
+      SELECT
+        i.warehouse_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs
+      FROM invoices i
+      LEFT JOIN invoice_items ii ON ii.invoice_id = i.id
+      LEFT JOIN products p ON p.id = ii.product_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+      GROUP BY i.warehouse_id
+    )
     SELECT
       w.id AS warehouse_id,
       w.name AS warehouse_name,
@@ -159,10 +219,13 @@ export async function getSalesByWarehouse() {
       COUNT(i.id)::int AS total_invoices,
       COALESCE(SUM(i.total_amount), 0) AS total_sales,
       COALESCE(SUM(i.paid_amount), 0) AS total_collected,
-      COALESCE(SUM(i.balance_due), 0) AS total_due
+      COALESCE(SUM(i.balance_due), 0) AS total_due,
+      COALESCE(wic.total_cogs, 0) AS total_cogs,
+      COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) - COALESCE(wic.total_cogs, 0) AS gross_profit
     FROM warehouses w
     LEFT JOIN invoices i ON i.warehouse_id = w.id
-    GROUP BY w.id, w.name, w.city
+    LEFT JOIN warehouse_invoice_cogs wic ON wic.warehouse_id = w.id
+    GROUP BY w.id, w.name, w.city, wic.total_cogs
     ORDER BY total_sales DESC, warehouse_name ASC;
   `;
 

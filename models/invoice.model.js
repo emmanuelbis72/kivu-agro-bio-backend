@@ -1,7 +1,17 @@
 import { pool } from "../config/db.js";
+import { performStockExit } from "./stock.model.js";
 
 export async function getInvoiceById(id) {
   const invoiceQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      WHERE ii.invoice_id = $1
+      GROUP BY ii.invoice_id
+    )
     SELECT
       i.id,
       i.invoice_number,
@@ -28,11 +38,19 @@ export async function getInvoiceById(id) {
       c.email AS customer_email,
       c.city AS customer_city,
       c.address AS customer_address,
+      c.warehouse_id AS customer_warehouse_id,
       w.name AS warehouse_name,
-      w.city AS warehouse_city
+      w.city AS warehouse_city,
+      COALESCE(ic.total_cogs_amount, 0) AS total_cogs_amount,
+      (
+        COALESCE(i.total_amount, 0)
+        - COALESCE(i.tax_amount, 0)
+        - COALESCE(ic.total_cogs_amount, 0)
+      ) AS gross_profit_amount
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     INNER JOIN warehouses w ON w.id = i.warehouse_id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
     WHERE i.id = $1
     LIMIT 1;
   `;
@@ -47,7 +65,10 @@ export async function getInvoiceById(id) {
       ii.line_total,
       p.name AS product_name,
       p.sku,
-      p.unit
+      p.unit,
+      p.cost_price,
+      (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
+      (ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))) AS line_gross_profit_amount
     FROM invoice_items ii
     INNER JOIN products p ON p.id = ii.product_id
     WHERE ii.invoice_id = $1
@@ -67,12 +88,23 @@ export async function getInvoiceById(id) {
 
   return {
     ...invoice,
-    items: itemsResult.rows
+    items: itemsResult.rows.map((item) => ({
+      ...item,
+      unit_cost: Number(item.cost_price ?? 0)
+    }))
   };
 }
 
 export async function getAllInvoices() {
   const query = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
     SELECT
       i.id,
       i.invoice_number,
@@ -95,10 +127,18 @@ export async function getAllInvoices() {
       i.created_at,
       i.updated_at,
       c.business_name AS customer_name,
-      w.name AS warehouse_name
+      c.warehouse_id AS customer_warehouse_id,
+      w.name AS warehouse_name,
+      COALESCE(ic.total_cogs_amount, 0) AS total_cogs_amount,
+      (
+        COALESCE(i.total_amount, 0)
+        - COALESCE(i.tax_amount, 0)
+        - COALESCE(ic.total_cogs_amount, 0)
+      ) AS gross_profit_amount
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     INNER JOIN warehouses w ON w.id = i.warehouse_id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
     ORDER BY i.created_at DESC;
   `;
 
@@ -192,72 +232,23 @@ export async function createInvoiceWithItems(data) {
       ];
 
       const itemResult = await client.query(itemQuery, itemValues);
-      insertedItems.push(itemResult.rows[0]);
 
-      const stockResult = await client.query(
-        `
-        SELECT *
-        FROM warehouse_stock
-        WHERE warehouse_id = $1 AND product_id = $2
-        LIMIT 1;
-        `,
-        [data.warehouse_id, item.product_id]
-      );
+      insertedItems.push({
+        ...itemResult.rows[0],
+        unit_cost: Number(item.unit_cost ?? 0)
+      });
 
-      const currentStock = stockResult.rows[0] || null;
-
-      if (!currentStock) {
-        const error = new Error(
-          `Aucun stock trouvé pour le produit ID ${item.product_id} dans ce dépôt.`
-        );
-        error.statusCode = 400;
-        throw error;
-      }
-
-      if (Number(currentStock.quantity) < Number(item.quantity)) {
-        const error = new Error(
-          `Stock insuffisant pour le produit ID ${item.product_id}.`
-        );
-        error.statusCode = 400;
-        throw error;
-      }
-
-      const newQuantity = Number(currentStock.quantity) - Number(item.quantity);
-
-      await client.query(
-        `
-        UPDATE warehouse_stock
-        SET quantity = $1, updated_at = NOW()
-        WHERE warehouse_id = $2 AND product_id = $3;
-        `,
-        [newQuantity, data.warehouse_id, item.product_id]
-      );
-
-      await client.query(
-        `
-        INSERT INTO stock_movements (
-          product_id,
-          warehouse_id,
-          movement_type,
-          quantity,
-          unit_cost,
-          reference_type,
-          reference_id,
-          notes,
-          created_by
-        )
-        VALUES ($1,$2,'OUT',$3,$4,'invoice',$5,$6,$7);
-        `,
-        [
-          item.product_id,
-          data.warehouse_id,
-          item.quantity,
-          item.unit_cost ?? 0,
-          invoice.id,
-          `Sortie liée à la facture ${data.invoice_number}`,
-          data.created_by || null
-        ]
-      );
+      await performStockExit({
+        warehouse_id: data.warehouse_id,
+        product_id: item.product_id,
+        quantity: item.quantity,
+        unit_cost: item.unit_cost ?? 0,
+        reference_type: "invoice",
+        reference_id: invoice.id,
+        notes: `Sortie liée à la facture ${data.invoice_number}`,
+        created_by: data.created_by || null,
+        client
+      });
     }
 
     await client.query("COMMIT");
