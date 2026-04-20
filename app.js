@@ -64,14 +64,8 @@ app.use("/api/accounting-reports", accountingReportRoutes);
 app.use("/api/accounting-settings", accountingSettingsRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/ai-scoring", aiScoringRoutes);
-
-/* ================= KABOT ================= */
 app.use("/api/kabot", kabotRoutes);
-
-/* ================= COMPANY KNOWLEDGE ================= */
 app.use("/api/company-knowledge", companyKnowledgeRoutes);
-
-/* ================= PRODUCTION ================= */
 app.use("/api/production", productionRoutes);
 
 app.use(notFoundHandler);
