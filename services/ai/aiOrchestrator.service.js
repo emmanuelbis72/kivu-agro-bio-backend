@@ -46,8 +46,85 @@ function round2(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function getEnvNumber(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
 function toIsoDate(value) {
   return new Date(value).toISOString().slice(0, 10);
+}
+
+function withTimeout(task, timeoutMs, label) {
+  return Promise.race([
+    task,
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+        error.code = "TIMEOUT";
+        reject(error);
+      }, timeoutMs);
+    })
+  ]);
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1).trim()}…`;
+}
+
+function sanitizeMetrics(metrics = {}) {
+  if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(metrics)
+      .filter(([, value]) =>
+        ["number", "string", "boolean"].includes(typeof value)
+      )
+      .slice(0, 12)
+      .map(([key, value]) => [
+        key,
+        typeof value === "string" ? truncateText(value, 120) : value
+      ])
+  );
+}
+
+function sanitizeReasoningResponse(reasoning = {}, period = "global") {
+  const risks = Array.isArray(reasoning.risks) ? reasoning.risks : [];
+  const opportunities = Array.isArray(reasoning.opportunities)
+    ? reasoning.opportunities
+    : [];
+  const recommendations = Array.isArray(reasoning.actions)
+    ? reasoning.actions
+    : Array.isArray(reasoning.recommendations)
+    ? reasoning.recommendations
+    : [];
+
+  return {
+    intent: "ai_reasoning",
+    period,
+    source_module: "ai_ceo",
+    summary: truncateText(reasoning.summary, 900),
+    answer: truncateText(reasoning.analysis, 5000),
+    metrics: sanitizeMetrics(reasoning.metrics),
+    drivers: [
+      ...risks.slice(0, 5).map((item) => `Risque: ${truncateText(item, 240)}`),
+      ...opportunities
+        .slice(0, 5)
+        .map((item) => `Opportunité: ${truncateText(item, 240)}`)
+    ],
+    recommendations: recommendations
+      .slice(0, 6)
+      .map((item) => truncateText(item, 240))
+      .filter(Boolean),
+    priority_level: reasoning.priority_level || "MEDIUM",
+    confidence_score: reasoning.confidence_score || 0.95,
+    generated_at: new Date().toISOString()
+  };
 }
 
 function getReasoningDateRange(period = "current") {
@@ -1126,6 +1203,10 @@ function pushHistory(item) {
 export async function askAIQuestion({ question, context = {} }) {
   const intentResult = detectIntent(question);
   const businessRules = await getBusinessRulesMap();
+  const assistantBudgetMs = Math.min(
+    getEnvNumber("AI_ASSISTANT_TIMEOUT_MS", 50000),
+    55000
+  );
 
   const useReasoning =
     String(process.env.AI_REASONING_ENABLED || "true")
@@ -1148,12 +1229,16 @@ export async function askAIQuestion({ question, context = {} }) {
             }
           : contextData;
 
-      const reasoning = await runDeepseekReasoning({
-        question,
-        businessRules: compactBusinessRulesForReasoning(businessRules),
-        contextData: mergedContextData,
-        profile: "assistant"
-      });
+      const reasoning = await withTimeout(
+        runDeepseekReasoning({
+          question,
+          businessRules: compactBusinessRulesForReasoning(businessRules),
+          contextData: mergedContextData,
+          profile: "assistant"
+        }),
+        assistantBudgetMs,
+        "Assistant reasoning"
+      );
 
       const response = {
         intent: "ai_reasoning",
@@ -1175,14 +1260,22 @@ export async function askAIQuestion({ question, context = {} }) {
         generated_at: new Date().toISOString()
       };
 
+      const safeResponse = sanitizeReasoningResponse(
+        {
+          ...reasoning,
+          generated_at: response.generated_at
+        },
+        intentResult.period || "global"
+      );
+
       pushHistory({
         question,
-        intent: response.intent,
-        summary: response.summary,
-        created_at: response.generated_at
+        intent: safeResponse.intent,
+        summary: safeResponse.summary,
+        created_at: safeResponse.generated_at
       });
 
-      return response;
+      return safeResponse;
     } catch (error) {
       console.error("DeepSeek failed → fallback to existing engine:", error);
     }

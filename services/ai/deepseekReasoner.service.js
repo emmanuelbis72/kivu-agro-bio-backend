@@ -394,7 +394,11 @@ export async function runDeepseekReasoning({
       ? Math.max(1, configuredRetries)
       : configuredRetries;
   const retryDelayMs = getEnvNumber("DEEPSEEK_RETRY_DELAY_MS", 1500);
-  const baseMaxTokens = Math.min(getEnvNumber("DEEPSEEK_MAX_TOKENS", 1000), 2000);
+  const defaultMaxTokens = profile === "assistant" ? 700 : 1000;
+  const baseMaxTokens = Math.min(
+    getEnvNumber("DEEPSEEK_MAX_TOKENS", defaultMaxTokens),
+    2000
+  );
   const temperature = getEnvNumber("DEEPSEEK_TEMPERATURE", 0.2);
   const debug = getEnvBoolean("DEEPSEEK_DEBUG", false);
 
