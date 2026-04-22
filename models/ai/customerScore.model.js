@@ -4,6 +4,84 @@ function toJson(value, fallback = {}) {
   return JSON.stringify(value === undefined || value === null ? fallback : value);
 }
 
+function isUndefinedTableError(error) {
+  return error?.code === "42P01";
+}
+
+function isConcurrentCreateError(error, relationName) {
+  const message = String(error?.message || "");
+  const detail = String(error?.detail || "");
+
+  return (
+    error?.code === "42P07" ||
+    (error?.code === "23505" &&
+      (message.includes(relationName) || detail.includes(relationName)))
+  );
+}
+
+async function ensureCustomerScoresTable() {
+  const query = `
+    CREATE TABLE IF NOT EXISTS customer_scores (
+      id SERIAL PRIMARY KEY,
+      customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      score_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      source_agent VARCHAR(100) NOT NULL DEFAULT 'customer_scoring',
+      payment_risk_score NUMERIC(5,2),
+      strategic_value_score NUMERIC(5,2),
+      churn_risk_score NUMERIC(5,2),
+      upsell_potential_score NUMERIC(5,2),
+      collection_priority_score NUMERIC(5,2),
+      customer_segment VARCHAR(50),
+      score_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      explanation TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      CONSTRAINT customer_scores_payment_risk_chk CHECK (
+        payment_risk_score IS NULL OR (payment_risk_score >= 0 AND payment_risk_score <= 100)
+      ),
+      CONSTRAINT customer_scores_strategic_value_chk CHECK (
+        strategic_value_score IS NULL OR (strategic_value_score >= 0 AND strategic_value_score <= 100)
+      ),
+      CONSTRAINT customer_scores_churn_risk_chk CHECK (
+        churn_risk_score IS NULL OR (churn_risk_score >= 0 AND churn_risk_score <= 100)
+      ),
+      CONSTRAINT customer_scores_upsell_potential_chk CHECK (
+        upsell_potential_score IS NULL OR (upsell_potential_score >= 0 AND upsell_potential_score <= 100)
+      ),
+      CONSTRAINT customer_scores_collection_priority_chk CHECK (
+        collection_priority_score IS NULL OR (collection_priority_score >= 0 AND collection_priority_score <= 100)
+      )
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_customer_scores_customer_day
+      ON customer_scores (customer_id, score_date);
+
+    CREATE INDEX IF NOT EXISTS idx_customer_scores_score_date
+      ON customer_scores (score_date DESC);
+  `;
+
+  try {
+    await pool.query(query);
+  } catch (error) {
+    if (!isConcurrentCreateError(error, "customer_scores")) {
+      throw error;
+    }
+  }
+}
+
+async function queryWithCustomerScoresSchemaRetry(query, values = []) {
+  try {
+    return await pool.query(query, values);
+  } catch (error) {
+    if (!isUndefinedTableError(error)) {
+      throw error;
+    }
+
+    await ensureCustomerScoresTable();
+    return pool.query(query, values);
+  }
+}
+
 export async function upsertCustomerScore({
   customer_id,
   score_date,
@@ -47,7 +125,7 @@ export async function upsertCustomerScore({
     RETURNING *;
   `;
 
-  const result = await pool.query(query, [
+  const result = await queryWithCustomerScoresSchemaRetry(query, [
     customer_id,
     score_date,
     source_agent,
@@ -84,6 +162,6 @@ export async function getLatestCustomerScores(limit = 100) {
     LIMIT $1;
   `;
 
-  const result = await pool.query(query, [limit]);
+  const result = await queryWithCustomerScoresSchemaRetry(query, [limit]);
   return result.rows;
 }

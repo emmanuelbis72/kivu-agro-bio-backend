@@ -1,7 +1,5 @@
 import fetch from "node-fetch";
 
-const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -18,6 +16,16 @@ function getEnvBoolean(name, fallback = false) {
 
   if (!raw) return fallback;
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function getDeepSeekApiUrl() {
+  const baseUrl = String(
+    process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  return `${baseUrl}/chat/completions`;
 }
 
 function cleanMarkdownFences(text) {
@@ -74,19 +82,36 @@ function normalizeStringArray(value) {
   return value.map((item) => String(item || "").trim()).filter(Boolean);
 }
 
+function normalizeTextBlock(value, fallback = "") {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return fallback;
+}
+
 function normalizeReasoningPayload(payload, rawText = "") {
   const recommendations = normalizeStringArray(payload?.recommendations);
   const actions = normalizeStringArray(payload?.actions);
+  const summary = normalizeTextBlock(
+    payload?.summary,
+    "Analyse stratégique générée."
+  );
+  const analysis = normalizeTextBlock(
+    payload?.analysis,
+    rawText || "Aucune analyse détaillée renvoyée."
+  );
 
   return {
-    summary:
-      typeof payload?.summary === "string" && payload.summary.trim()
-        ? payload.summary.trim()
-        : "Analyse stratégique générée.",
-    analysis:
-      typeof payload?.analysis === "string" && payload.analysis.trim()
-        ? payload.analysis.trim()
-        : rawText || "Aucune analyse détaillée renvoyée.",
+    summary,
+    analysis,
     risks: normalizeStringArray(payload?.risks),
     opportunities: normalizeStringArray(payload?.opportunities),
     recommendations,
@@ -94,6 +119,23 @@ function normalizeReasoningPayload(payload, rawText = "") {
     priority_level: normalizePriorityLevel(payload?.priority_level),
     confidence_score: normalizeConfidenceScore(payload?.confidence_score)
   };
+}
+
+function isWeakReasoningPayload(payload) {
+  const summary = String(payload?.summary || "").trim();
+  const analysis = String(payload?.analysis || "").trim();
+  const recommendations = Array.isArray(payload?.recommendations)
+    ? payload.recommendations.length
+    : 0;
+  const actions = Array.isArray(payload?.actions) ? payload.actions.length : 0;
+
+  return (
+    !summary ||
+    summary === "Analyse stratégique générée." ||
+    !analysis ||
+    analysis.startsWith("{") ||
+    (recommendations === 0 && actions === 0)
+  );
 }
 
 function safeParseReasoningContent(content) {
@@ -132,37 +174,34 @@ function safeParseReasoningContent(content) {
   );
 }
 
-function buildPrompt({ question, businessRules, contextData }) {
+function buildAssistantPrompt({ question, businessRules, contextData }) {
   return `
-Tu es KABOT, une intelligence artificielle de direction pour KIVU AGRO BIO.
+Tu es KABOT, copilote CEO/CFO de KIVU AGRO BIO.
 
-MISSION
-Tu raisonnes comme un CEO, un CFO, un contrôleur de gestion et un directeur commercial.
-Tu analyses l'entreprise avec réalisme, sans flatterie inutile.
+Règles:
+- Utilise seulement les données fournies.
+- N'invente aucun chiffre.
+- Si une donnée manque, dis-le clairement.
+- Réponse courte, niveau direction générale.
+- Priorise les risques et les actions.
+- Maximum 5 éléments par tableau.
+- Retourne uniquement un JSON valide.
+- Pas de markdown.
+- "summary" et "analysis" doivent être des chaînes.
 
-RÈGLES MÉTIER KIVU AGRO BIO
-${JSON.stringify(businessRules, null, 2)}
+Business rules:
+${JSON.stringify(businessRules)}
 
-DONNÉES ACTUELLES
-${JSON.stringify(contextData, null, 2)}
+Contexte:
+${JSON.stringify(contextData)}
 
-QUESTION UTILISATEUR
+Question:
 ${question}
 
-INSTRUCTIONS STRICTES
-- Base-toi uniquement sur les données et règles fournies.
-- Ne suppose pas de chiffres absents.
-- S'il manque des données, dis-le clairement.
-- Explique les causes probables avec logique métier.
-- Priorise les actions.
-- Donne des recommandations concrètes, actionnables et courtes.
-- Réponds comme un dirigeant expérimenté.
-- Retourne UNIQUEMENT un JSON valide.
-
-FORMAT JSON OBLIGATOIRE
+JSON attendu:
 {
-  "summary": "résumé exécutif bref",
-  "analysis": "analyse détaillée et stratégique",
+  "summary": "texte, 3 à 5 phrases",
+  "analysis": "texte concis, 1 à 3 paragraphes courts",
   "risks": ["risque 1", "risque 2"],
   "opportunities": ["opportunité 1", "opportunité 2"],
   "recommendations": ["recommandation 1", "recommandation 2"],
@@ -171,6 +210,46 @@ FORMAT JSON OBLIGATOIRE
   "confidence_score": 0.0
 }
 `.trim();
+}
+
+function buildCEOPrompt({ question, businessRules, contextData }) {
+  return `
+Tu es KABOT, assistant CEO de KIVU AGRO BIO.
+
+Règles:
+- Base-toi uniquement sur les données fournies.
+- N'invente aucun chiffre.
+- Si une donnée manque, dis-le clairement.
+- Réponds en français professionnel, orienté décision.
+- Retourne uniquement un JSON valide.
+
+Business rules:
+${JSON.stringify(businessRules)}
+
+Contexte:
+${JSON.stringify(contextData)}
+
+Question:
+${question}
+
+JSON attendu:
+{
+  "summary": "résumé exécutif en 5 à 8 lignes",
+  "analysis": "analyse détaillée structurée",
+  "risks": ["..."],
+  "opportunities": ["..."],
+  "recommendations": ["..."],
+  "actions": ["..."],
+  "priority_level": "LOW | MEDIUM | HIGH | CRITICAL",
+  "confidence_score": 0.0
+}
+`.trim();
+}
+
+function buildPrompt({ question, businessRules, contextData, profile }) {
+  return profile === "ceo"
+    ? buildCEOPrompt({ question, businessRules, contextData })
+    : buildAssistantPrompt({ question, businessRules, contextData });
 }
 
 async function callDeepSeekOnce({
@@ -185,7 +264,12 @@ async function callDeepSeekOnce({
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(DEEPSEEK_API_URL, {
+    const responseFormat =
+      String(model).trim().toLowerCase() === "deepseek-reasoner"
+        ? undefined
+        : { type: "json_object" };
+
+    const response = await fetch(getDeepSeekApiUrl(), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -201,7 +285,7 @@ async function callDeepSeekOnce({
         ],
         temperature,
         max_tokens: maxTokens,
-        response_format: { type: "json_object" }
+        ...(responseFormat ? { response_format: responseFormat } : {})
       }),
       signal: controller.signal
     });
@@ -228,13 +312,18 @@ async function callDeepSeekOnce({
       throw error;
     }
 
-    const content = data?.choices?.[0]?.message?.content;
+    const choice = data?.choices?.[0];
+    const content = choice?.message?.content;
+    const finishReason = choice?.finish_reason || null;
 
     if (!content || typeof content !== "string") {
       throw new Error("DeepSeek API returned empty content.");
     }
 
-    return safeParseReasoningContent(content);
+    return {
+      payload: safeParseReasoningContent(content),
+      finishReason
+    };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -243,7 +332,8 @@ async function callDeepSeekOnce({
 export async function runDeepseekReasoning({
   question,
   businessRules,
-  contextData
+  contextData,
+  profile = "assistant"
 }) {
   const apiKey = String(process.env.DEEPSEEK_API_KEY || "").trim();
 
@@ -252,21 +342,25 @@ export async function runDeepseekReasoning({
   }
 
   const model = String(
-    process.env.DEEPSEEK_REASONING_MODEL || "deepseek-reasoner"
+    process.env.DEEPSEEK_REASONING_MODEL ||
+      process.env.DEEPSEEK_MODEL ||
+      "deepseek-reasoner"
   ).trim();
 
-  const timeoutMs = getEnvNumber("DEEPSEEK_TIMEOUT_MS", 45000);
-  const maxRetries = getEnvNumber("DEEPSEEK_MAX_RETRIES", 2);
+  const timeoutLimit = profile === "assistant" ? 70000 : 120000;
+  const timeoutMs = Math.min(
+    getEnvNumber("DEEPSEEK_TIMEOUT_MS", 90000),
+    timeoutLimit
+  );
+  const configuredRetries = Math.min(getEnvNumber("DEEPSEEK_MAX_RETRIES", 0), 2);
+  const maxRetries =
+    profile === "assistant" || profile === "ceo"
+      ? Math.max(1, configuredRetries)
+      : configuredRetries;
   const retryDelayMs = getEnvNumber("DEEPSEEK_RETRY_DELAY_MS", 1500);
-  const maxTokens = getEnvNumber("DEEPSEEK_MAX_TOKENS", 1800);
+  const baseMaxTokens = Math.min(getEnvNumber("DEEPSEEK_MAX_TOKENS", 1000), 2000);
   const temperature = getEnvNumber("DEEPSEEK_TEMPERATURE", 0.2);
   const debug = getEnvBoolean("DEEPSEEK_DEBUG", false);
-
-  const prompt = buildPrompt({
-    question,
-    businessRules,
-    contextData
-  });
 
   let lastError = null;
 
@@ -278,6 +372,18 @@ export async function runDeepseekReasoning({
         );
       }
 
+      const maxTokens =
+        profile === "assistant" && attempt > 1
+          ? Math.min(baseMaxTokens + 400, 2200)
+          : baseMaxTokens;
+
+      const prompt = buildPrompt({
+        question,
+        businessRules,
+        contextData,
+        profile
+      });
+
       const result = await callDeepSeekOnce({
         apiKey,
         model,
@@ -287,7 +393,16 @@ export async function runDeepseekReasoning({
         prompt
       });
 
-      return result;
+      if (
+        profile === "assistant" &&
+        (result.finishReason === "length" || isWeakReasoningPayload(result.payload))
+      ) {
+        const error = new Error("DeepSeek assistant payload incomplete.");
+        error.code = "DEEPSEEK_INCOMPLETE_PAYLOAD";
+        throw error;
+      }
+
+      return result.payload;
     } catch (error) {
       lastError = error;
 

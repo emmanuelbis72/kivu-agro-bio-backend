@@ -1,5 +1,6 @@
 import { pool } from "../../config/db.js";
-import { askAIQuestion } from "./aiOrchestrator.service.js";
+import { runDeepseekReasoning } from "./deepseekReasoner.service.js";
+import { getBusinessRulesMap } from "./businessRules.service.js";
 import { getActiveCompanyKnowledge } from "./companyKnowledge.service.js";
 
 function roundAmount(value) {
@@ -192,6 +193,75 @@ Format de sortie JSON strict :
 `;
 }
 
+function buildFallbackCEOResponse(context) {
+  const kpis = context?.kpis || {};
+  const receivables = Array.isArray(context?.receivables)
+    ? context.receivables
+    : [];
+  const stockAlerts = Array.isArray(context?.stock_alerts)
+    ? context.stock_alerts
+    : [];
+  const topProducts = Array.isArray(context?.top_products)
+    ? context.top_products
+    : [];
+
+  const summary =
+    `Ventes ${roundAmount(kpis.total_sales_amount)} USD, encaissements ${roundAmount(
+      kpis.total_collected_amount
+    )} USD, créances ${roundAmount(kpis.total_receivables)} USD. ` +
+    `La direction doit surveiller en priorité la trésorerie, les encours clients et les alertes de stock.`;
+
+  const analysis =
+    `Les encaissements restent faibles par rapport aux ventes, ce qui accroît la tension sur le cash. ` +
+    `Les créances prioritaires et les produits à faible stock doivent être traités immédiatement pour protéger la continuité opérationnelle.`;
+
+  const recommendations = [
+    "Accélérer le recouvrement des créances les plus élevées.",
+    "Sécuriser les produits en alerte de stock.",
+    "Concentrer l'effort commercial sur les meilleures références."
+  ];
+
+  return {
+    intent: "ai_reasoning",
+    period: "global",
+    source_module: "ai_ceo",
+    summary,
+    answer: analysis,
+    metrics: {},
+    drivers: [
+      ...receivables.slice(0, 3).map(
+        (item) => `Risque: créance ${item.customer_name} ${roundAmount(item.balance_due)} USD`
+      ),
+      ...stockAlerts.slice(0, 2).map(
+        (item) => `Risque: stock faible ${item.product_name}`
+      ),
+      ...topProducts.slice(0, 2).map(
+        (item) => `Opportunité: produit porteur ${item.product_name}`
+      )
+    ],
+    recommendations,
+    priority_level: "HIGH",
+    confidence_score: 0.65,
+    generated_at: new Date().toISOString()
+  };
+}
+
+function isWeakCEOReasoning(reasoning) {
+  const summary = String(reasoning?.summary || "").trim();
+  const recommendations = Array.isArray(reasoning?.recommendations)
+    ? reasoning.recommendations.length
+    : 0;
+  const actions = Array.isArray(reasoning?.actions)
+    ? reasoning.actions.length
+    : 0;
+
+  return (
+    !summary ||
+    summary === "Analyse stratégique générée." ||
+    (recommendations === 0 && actions === 0)
+  );
+}
+
 export async function getCEOBRIEF() {
   const [
     globalKpis,
@@ -221,10 +291,58 @@ export async function getCEOBRIEF() {
     top_products: topProducts
   };
 
-  const aiResult = await askAIQuestion({
-    question: buildCEOQuestion(),
-    context
-  });
+  const businessRules = await getBusinessRulesMap();
+  let reasoning;
+
+  try {
+    reasoning = await runDeepseekReasoning({
+      question: buildCEOQuestion(),
+      businessRules,
+      contextData: context,
+      profile: "ceo"
+    });
+  } catch (error) {
+    console.error("DeepSeek CEO profile failed, fallback assistant profile:", error);
+  }
+
+  if (!reasoning || isWeakCEOReasoning(reasoning)) {
+    if (reasoning && isWeakCEOReasoning(reasoning)) {
+      console.error("DeepSeek CEO profile returned weak payload, fallback assistant profile.");
+    }
+
+    try {
+      reasoning = await runDeepseekReasoning({
+        question: buildCEOQuestion(),
+        businessRules,
+        contextData: context,
+        profile: "assistant"
+      });
+    } catch (fallbackError) {
+      console.error("DeepSeek CEO assistant fallback failed:", fallbackError);
+
+      return {
+        rawData: context,
+        ai: buildFallbackCEOResponse(context)
+      };
+    }
+  }
+
+  const aiResult = {
+    intent: "ai_reasoning",
+    period: "global",
+    source_module: "ai_ceo",
+    summary: reasoning.summary || "",
+    answer: reasoning.analysis || "",
+    metrics: {},
+    drivers: [
+      ...(reasoning.risks || []).map((item) => `Risque: ${item}`),
+      ...(reasoning.opportunities || []).map((item) => `Opportunité: ${item}`)
+    ],
+    recommendations: reasoning.actions || reasoning.recommendations || [],
+    priority_level: reasoning.priority_level || "MEDIUM",
+    confidence_score: reasoning.confidence_score || 0.95,
+    generated_at: new Date().toISOString()
+  };
 
   return {
     rawData: context,

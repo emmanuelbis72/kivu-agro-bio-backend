@@ -33,7 +33,9 @@ export async function getCustomerScores(businessRules = {}) {
 
   const scoredCustomers = customers.map((customer) => {
     const receivable = Number(customer.total_balance_due || 0);
-    const sales = Number(customer.total_sales_amount || 0);
+    const sales = Number(
+      customer.total_sales_amount ?? customer.total_billed ?? 0
+    );
     const cityPriority = isPriorityCity(customer.city, businessRules);
     const channelPriority = isPriorityChannel(
       customer.business_name,
@@ -62,7 +64,7 @@ export async function getCustomerScores(businessRules = {}) {
     }
 
     return {
-      customer_id: customer.id,
+      customer_id: customer.customer_id ?? customer.id,
       business_name: customer.business_name,
       city: customer.city || null,
       total_sales_amount: round2(sales),

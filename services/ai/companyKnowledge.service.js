@@ -10,6 +10,72 @@ function normalizeTags(tags) {
     .filter(Boolean);
 }
 
+function isUndefinedTableError(error) {
+  return error?.code === "42P01";
+}
+
+function isConcurrentCreateError(error, relationName) {
+  const message = String(error?.message || "");
+  const detail = String(error?.detail || "");
+
+  return (
+    error?.code === "42P07" ||
+    (error?.code === "23505" &&
+      (message.includes(relationName) || detail.includes(relationName)))
+  );
+}
+
+async function ensureCompanyKnowledgeTable() {
+  const query = `
+    CREATE TABLE IF NOT EXISTS company_knowledge (
+      id SERIAL PRIMARY KEY,
+      knowledge_key VARCHAR(150) NOT NULL UNIQUE,
+      title VARCHAR(255) NOT NULL,
+      category VARCHAR(100) NOT NULL,
+      content TEXT NOT NULL,
+      tags TEXT[] DEFAULT '{}',
+      source_type VARCHAR(50) DEFAULT 'manual',
+      source_reference TEXT NULL,
+      priority_level VARCHAR(20) DEFAULT 'normal',
+      is_active BOOLEAN DEFAULT TRUE,
+      created_by INTEGER NULL,
+      updated_by INTEGER NULL,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_company_knowledge_category
+      ON company_knowledge(category);
+
+    CREATE INDEX IF NOT EXISTS idx_company_knowledge_is_active
+      ON company_knowledge(is_active);
+
+    CREATE INDEX IF NOT EXISTS idx_company_knowledge_priority_level
+      ON company_knowledge(priority_level);
+  `;
+
+  try {
+    await pool.query(query);
+  } catch (error) {
+    if (!isConcurrentCreateError(error, "company_knowledge")) {
+      throw error;
+    }
+  }
+}
+
+async function queryWithCompanyKnowledgeSchemaRetry(query, values = []) {
+  try {
+    return await pool.query(query, values);
+  } catch (error) {
+    if (!isUndefinedTableError(error)) {
+      throw error;
+    }
+
+    await ensureCompanyKnowledgeTable();
+    return pool.query(query, values);
+  }
+}
+
 export async function getActiveCompanyKnowledge({
   categories = [],
   limit = 100
@@ -55,7 +121,7 @@ export async function getActiveCompanyKnowledge({
     LIMIT $${index};
   `;
 
-  const result = await pool.query(query, values);
+  const result = await queryWithCompanyKnowledgeSchemaRetry(query, values);
   return result.rows;
 }
 
@@ -81,7 +147,7 @@ export async function getCompanyKnowledgeByKey(knowledgeKey) {
     LIMIT 1;
   `;
 
-  const result = await pool.query(query, [knowledgeKey]);
+  const result = await queryWithCompanyKnowledgeSchemaRetry(query, [knowledgeKey]);
   return result.rows[0] || null;
 }
 
@@ -162,7 +228,7 @@ export async function upsertCompanyKnowledge({
     user_id
   ];
 
-  const result = await pool.query(query, values);
+  const result = await queryWithCompanyKnowledgeSchemaRetry(query, values);
   return result.rows[0];
 }
 
@@ -177,7 +243,7 @@ export async function deactivateCompanyKnowledge(knowledgeKey, userId = null) {
     RETURNING *;
   `;
 
-  const result = await pool.query(query, [knowledgeKey, userId]);
+  const result = await queryWithCompanyKnowledgeSchemaRetry(query, [knowledgeKey, userId]);
   return result.rows[0] || null;
 }
 
@@ -211,7 +277,7 @@ export async function searchCompanyKnowledge(searchTerm, limit = 20) {
     LIMIT $2;
   `;
 
-  const result = await pool.query(query, [`%${keyword}%`, limit]);
+  const result = await queryWithCompanyKnowledgeSchemaRetry(query, [`%${keyword}%`, limit]);
   return result.rows;
 }
 

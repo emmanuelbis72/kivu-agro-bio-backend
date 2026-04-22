@@ -3,6 +3,7 @@ import {
   getStockAlerts,
   getTopProducts,
   getTopCustomers,
+  getRecentInvoices,
   getAccountingGlobalStats,
   getRecentJournalEntries
 } from "../../models/dashboard.model.js";
@@ -39,25 +40,124 @@ function round2(value) {
 
 function compactCompanyKnowledge(rows = []) {
   return rows.map((row) => ({
-    knowledge_key: row.knowledge_key,
     title: row.title,
     category: row.category,
-    content: row.content,
-    tags: row.tags || [],
-    priority_level: row.priority_level,
-    source_type: row.source_type,
-    source_reference: row.source_reference
+    content: String(row.content || "").trim().slice(0, 280),
+    priority_level: row.priority_level
   }));
 }
 
-async function buildReasoningContextData() {
+function compactBusinessRulesForReasoning(businessRules = {}) {
+  return {
+    strategic_products: Array.isArray(businessRules.strategic_products)
+      ? businessRules.strategic_products.slice(0, 8)
+      : [],
+    priority_cities: Array.isArray(businessRules.priority_cities)
+      ? businessRules.priority_cities.slice(0, 6)
+      : [],
+    priority_channels: Array.isArray(businessRules.priority_channels)
+      ? businessRules.priority_channels.slice(0, 8)
+      : [],
+    minimum_cash_threshold_usd: Number(
+      businessRules.minimum_cash_threshold_usd || 3000
+    ),
+    target_net_margin_range: businessRules.target_net_margin_range || {
+      min: 25,
+      max: 30
+    },
+    monthly_revenue_targets: businessRules.monthly_revenue_targets || {}
+  };
+}
+
+function getReasoningFocus(intent) {
+  switch (intent) {
+    case "sales_overview":
+    case "sales_variance_explanation":
+      return "sales";
+    case "stock_priority_restock":
+      return "stock";
+    case "customer_receivables_risk":
+      return "customers";
+    case "expense_pressure_analysis":
+      return "expenses";
+    case "cash_position_analysis":
+      return "cash";
+    case "accounting_summary":
+      return "accounting";
+    default:
+      return "general";
+  }
+}
+
+function summarizeGlobalStats(globalStats = {}) {
+  return {
+    total_sales_amount: round2(globalStats.total_sales_amount),
+    total_net_sales_amount: round2(globalStats.total_net_sales_amount),
+    total_collected_amount: round2(globalStats.total_collected_amount),
+    total_receivables: round2(globalStats.total_receivables),
+    gross_profit_amount: round2(globalStats.gross_profit_amount),
+    gross_margin_percent: round2(globalStats.gross_margin_percent),
+    total_units_in_stock: Number(globalStats.total_units_in_stock || 0),
+    total_customers: Number(globalStats.total_customers || 0),
+    total_invoices: Number(globalStats.total_invoices || 0)
+  };
+}
+
+function buildReasoningHighlights({
+  globalStats,
+  stockAlerts,
+  topProducts,
+  topCustomers,
+  expenses,
+  recentInvoices,
+  accounting,
+  recentEntries,
+  businessRules
+}) {
+  const cashThreshold = Number(
+    businessRules.minimum_cash_threshold_usd || 3000
+  );
+  const topCustomer = topCustomers[0] || null;
+  const topProduct = topProducts[0] || null;
+  const topStockAlert = stockAlerts[0] || null;
+  const topExpenseCategory = getTopExpenseCategories(expenses, 1)[0] || null;
+  const latestInvoice = recentInvoices[0] || null;
+  const latestEntry = recentEntries[0] || null;
+
+  return [
+    `Ventes ${round2(globalStats.total_sales_amount)} USD, encaissements ${round2(globalStats.total_collected_amount)} USD, creances ${round2(globalStats.total_receivables)} USD.`,
+    `Tresorerie ${round2(globalStats.total_collected_amount)} USD pour seuil minimal ${round2(cashThreshold)} USD.`,
+    `Stock total ${Number(globalStats.total_units_in_stock || 0)} unites, alertes stock ${stockAlerts.length}.`,
+    topProduct
+      ? `Produit leader: ${topProduct.product_name}, ${Number(topProduct.total_quantity_sold || 0)} unites, ${round2(topProduct.total_sales_value)} USD.`
+      : null,
+    topCustomer
+      ? `Client principal: ${topCustomer.business_name}, encours ${round2(topCustomer.total_balance_due)} USD.`
+      : null,
+    topStockAlert
+      ? `Alerte stock: ${topStockAlert.product_name}, stock ${Number(topStockAlert.quantity || 0)} pour seuil ${Number(topStockAlert.alert_threshold || 0)}.`
+      : null,
+    topExpenseCategory
+      ? `Depense principale: ${topExpenseCategory.category}, ${round2(topExpenseCategory.total_amount)} USD.`
+      : null,
+    latestInvoice
+      ? `Derniere facture: ${latestInvoice.invoice_number}, statut ${latestInvoice.status}, solde ${round2(latestInvoice.balance_due)} USD.`
+      : null,
+    `Comptabilite: ${Number(accounting.posted_entries || 0)} ecritures validees, ${Number(accounting.draft_entries || 0)} brouillons.`,
+    latestEntry
+      ? `Derniere ecriture: ${latestEntry.entry_number} (${latestEntry.journal_code}).`
+      : null
+  ].filter(Boolean);
+}
+
+async function buildReasoningContextData(intent, businessRules = {}) {
   const [
     globalStats,
     stockAlerts,
     topProducts,
     topCustomers,
     expenses,
-    invoices,
+    recentInvoices,
     accounting,
     recentEntries,
     companyKnowledge
@@ -67,26 +167,174 @@ async function buildReasoningContextData() {
     getTopProducts(10),
     getTopCustomers(10),
     getAllExpenses(),
-    getAllInvoices(),
+    getRecentInvoices(12),
     getAccountingGlobalStats(),
     getRecentJournalEntries(10),
     getActiveCompanyKnowledge({
       categories: ["company_profile", "strategy", "products", "distribution", "operations", "finance", "market", "investor_notes", "founder_notes"],
-      limit: 100
+      limit: 25
     })
   ]);
 
-  return {
-    globalStats,
-    stockAlerts,
-    topProducts,
-    topCustomers,
-    expenses,
-    invoices,
-    accounting,
-    recentEntries,
-    companyKnowledge: compactCompanyKnowledge(companyKnowledge)
+  const totalExpensesAmount = expenses.reduce(
+    (sum, row) => sum + Number(row.amount || 0),
+    0
+  );
+
+  const focus = getReasoningFocus(intent);
+  const summarizedGlobalStats = summarizeGlobalStats(globalStats);
+  const expenseCategories = getTopExpenseCategories(expenses, 3);
+  const highlightedInvoices = recentInvoices.slice(0, 5).map((invoice) => ({
+    invoice_number: invoice.invoice_number,
+    invoice_date: invoice.invoice_date,
+    status: invoice.status,
+    customer_name: invoice.customer_name,
+    total_amount: round2(invoice.total_amount),
+    paid_amount: round2(invoice.paid_amount),
+    balance_due: round2(invoice.balance_due)
+  }));
+  const highlightedProducts = topProducts.slice(0, 5).map((product) => ({
+    product_name: product.product_name,
+    sku: product.sku,
+    total_quantity_sold: Number(product.total_quantity_sold || 0),
+    total_sales_value: round2(product.total_sales_value),
+    gross_profit_amount: round2(product.gross_profit_amount)
+  }));
+  const highlightedCustomers = topCustomers.slice(0, 5).map((customer) => ({
+    business_name: customer.business_name,
+    city: customer.city || null,
+    total_billed: round2(customer.total_billed),
+    total_paid: round2(customer.total_paid),
+    total_balance_due: round2(customer.total_balance_due)
+  }));
+  const highlightedStockAlerts = stockAlerts.slice(0, 5).map((alert) => ({
+    product_name: alert.product_name,
+    warehouse_name: alert.warehouse_name,
+    quantity: Number(alert.quantity || 0),
+    alert_threshold: Number(alert.alert_threshold || 0)
+  }));
+  const highlightedEntries = recentEntries.slice(0, 5).map((entry) => ({
+    entry_number: entry.entry_number,
+    entry_date: entry.entry_date,
+    journal_code: entry.journal_code,
+    description: entry.description,
+    status: entry.status,
+    total_debit: round2(entry.total_debit),
+    total_credit: round2(entry.total_credit)
+  }));
+  const highlightedKnowledge = compactCompanyKnowledge(companyKnowledge).slice(
+    0,
+    5
+  );
+
+  const baseContext = {
+    focus,
+    executive_snapshot: summarizedGlobalStats,
+    executive_highlights: buildReasoningHighlights({
+      globalStats: summarizedGlobalStats,
+      stockAlerts,
+      topProducts,
+      topCustomers,
+      expenses,
+      recentInvoices,
+      accounting,
+      recentEntries,
+      businessRules
+    })
   };
+
+  switch (focus) {
+    case "sales":
+      return {
+        ...baseContext,
+        sales: {
+          top_products: highlightedProducts,
+          top_customers: highlightedCustomers,
+          recent_invoices: highlightedInvoices
+        },
+        knowledge: highlightedKnowledge
+      };
+    case "stock":
+      return {
+        ...baseContext,
+        stock: {
+          alerts: highlightedStockAlerts,
+          top_products: highlightedProducts
+        },
+        knowledge: highlightedKnowledge
+      };
+    case "customers":
+      return {
+        ...baseContext,
+        customers: {
+          top_customers: highlightedCustomers,
+          recent_invoices: highlightedInvoices
+        },
+        knowledge: highlightedKnowledge
+      };
+    case "expenses":
+      return {
+        ...baseContext,
+        expenses: {
+          total_amount: round2(totalExpensesAmount),
+          count: expenses.length,
+          top_categories: expenseCategories,
+          recent_items: expenses.slice(0, 5).map((expense) => ({
+            expense_date: expense.expense_date,
+            category: expense.category,
+            description: expense.description,
+            amount: round2(expense.amount)
+          }))
+        },
+        knowledge: highlightedKnowledge
+      };
+    case "cash":
+      return {
+        ...baseContext,
+        cash: {
+          top_customers: highlightedCustomers,
+          top_expense_categories: expenseCategories,
+          recent_invoices: highlightedInvoices
+        },
+        knowledge: highlightedKnowledge
+      };
+    case "accounting":
+      return {
+        ...baseContext,
+        accounting: {
+          summary: {
+            posted_entries: Number(accounting.posted_entries || 0),
+            draft_entries: Number(accounting.draft_entries || 0),
+            total_posted_debit: round2(accounting.total_posted_debit),
+            total_posted_credit: round2(accounting.total_posted_credit)
+          },
+          recent_entries: highlightedEntries
+        },
+        knowledge: highlightedKnowledge
+      };
+    default:
+      return {
+        ...baseContext,
+        sales: {
+          top_products: highlightedProducts,
+          top_customers: highlightedCustomers,
+          recent_invoices: highlightedInvoices
+        },
+        stock: {
+          alerts: highlightedStockAlerts
+        },
+        expenses: {
+          total_amount: round2(totalExpensesAmount),
+          top_categories: expenseCategories
+        },
+        accounting: {
+          posted_entries: Number(accounting.posted_entries || 0),
+          draft_entries: Number(accounting.draft_entries || 0),
+          recent_entries: highlightedEntries
+        },
+        knowledge: highlightedKnowledge
+      };
+  }
 }
 
 function getTopExpenseCategories(expenses = [], limit = 5) {
@@ -533,7 +781,10 @@ export async function askAIQuestion({ question, context = {} }) {
 
   if (useReasoning) {
     try {
-      const contextData = await buildReasoningContextData();
+      const contextData = await buildReasoningContextData(
+        intentResult.intent,
+        businessRules
+      );
 
       const mergedContextData =
         context && typeof context === "object" && Object.keys(context).length > 0
@@ -545,8 +796,9 @@ export async function askAIQuestion({ question, context = {} }) {
 
       const reasoning = await runDeepseekReasoning({
         question,
-        businessRules,
-        contextData: mergedContextData
+        businessRules: compactBusinessRulesForReasoning(businessRules),
+        contextData: mergedContextData,
+        profile: "assistant"
       });
 
       const response = {
