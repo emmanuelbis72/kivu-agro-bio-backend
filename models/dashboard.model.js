@@ -1,5 +1,40 @@
 import { pool } from "../config/db.js";
 
+function buildStockMovementFilters(filters = {}, alias = "sm") {
+  const conditions = [];
+  const values = [];
+
+  if (filters.warehouseId) {
+    values.push(filters.warehouseId);
+    conditions.push(`${alias}.warehouse_id = $${values.length}`);
+  }
+
+  if (filters.productId) {
+    values.push(filters.productId);
+    conditions.push(`${alias}.product_id = $${values.length}`);
+  }
+
+  if (filters.stockForm) {
+    values.push(filters.stockForm);
+    conditions.push(`${alias}.stock_form = $${values.length}`);
+  }
+
+  if (filters.startDate) {
+    values.push(filters.startDate);
+    conditions.push(`${alias}.created_at::date >= $${values.length}`);
+  }
+
+  if (filters.endDate) {
+    values.push(filters.endDate);
+    conditions.push(`${alias}.created_at::date <= $${values.length}`);
+  }
+
+  return {
+    whereClause: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "",
+    values
+  };
+}
+
 export async function getGlobalStats() {
   const query = `
     WITH sales_base AS (
@@ -344,5 +379,207 @@ export async function getRecentJournalEntries(limit = 10) {
   `;
 
   const result = await pool.query(query, [limit]);
+  return result.rows;
+}
+
+export async function getStockVariationOverview(filters = {}) {
+  const { whereClause, values } = buildStockMovementFilters(filters);
+
+  const query = `
+    SELECT
+      COUNT(*)::int AS total_movements,
+      COUNT(DISTINCT sm.product_id)::int AS total_products,
+      COUNT(DISTINCT sm.warehouse_id)::int AS total_warehouses,
+      MIN(sm.created_at) AS first_movement_at,
+      MAX(sm.created_at) AS last_movement_at,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type IN ('IN', 'TRANSFER_IN', 'PRODUCTION_OUTPUT', 'TRANSFORM_IN', 'MIXTURE_IN')
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS total_positive_quantity,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type IN ('OUT', 'TRANSFER_OUT', 'PRODUCTION_CONSUME', 'TRANSFORM_OUT', 'MIXTURE_OUT')
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS total_negative_quantity,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type = 'ADJUSTMENT'
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS total_adjusted_quantity
+    FROM stock_movements sm
+    ${whereClause};
+  `;
+
+  const result = await pool.query(query, values);
+  return result.rows[0];
+}
+
+export async function getStockVariationByMovementType(filters = {}) {
+  const { whereClause, values } = buildStockMovementFilters(filters);
+
+  const query = `
+    SELECT
+      sm.movement_type,
+      COUNT(*)::int AS movements_count,
+      COALESCE(SUM(sm.quantity), 0) AS total_quantity
+    FROM stock_movements sm
+    ${whereClause}
+    GROUP BY sm.movement_type
+    ORDER BY movements_count DESC, total_quantity DESC, sm.movement_type ASC;
+  `;
+
+  const result = await pool.query(query, values);
+  return result.rows;
+}
+
+export async function getStockVariationByProduct(filters = {}, limit = 10) {
+  const { whereClause, values } = buildStockMovementFilters(filters);
+  values.push(limit);
+
+  const query = `
+    SELECT
+      sm.product_id,
+      p.name AS product_name,
+      p.sku,
+      p.unit,
+      COUNT(*)::int AS movements_count,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type IN ('IN', 'TRANSFER_IN', 'PRODUCTION_OUTPUT', 'TRANSFORM_IN', 'MIXTURE_IN')
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS quantity_in,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type IN ('OUT', 'TRANSFER_OUT', 'PRODUCTION_CONSUME', 'TRANSFORM_OUT', 'MIXTURE_OUT')
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS quantity_out,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type = 'ADJUSTMENT'
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS adjusted_quantity
+    FROM stock_movements sm
+    INNER JOIN products p ON p.id = sm.product_id
+    ${whereClause}
+    GROUP BY sm.product_id, p.name, p.sku, p.unit
+    ORDER BY movements_count DESC, quantity_in DESC, product_name ASC
+    LIMIT $${values.length};
+  `;
+
+  const result = await pool.query(query, values);
+  return result.rows;
+}
+
+export async function getStockVariationByWarehouse(filters = {}, limit = 10) {
+  const { whereClause, values } = buildStockMovementFilters(filters);
+  values.push(limit);
+
+  const query = `
+    SELECT
+      sm.warehouse_id,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city,
+      COUNT(*)::int AS movements_count,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type IN ('IN', 'TRANSFER_IN', 'PRODUCTION_OUTPUT', 'TRANSFORM_IN', 'MIXTURE_IN')
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS quantity_in,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type IN ('OUT', 'TRANSFER_OUT', 'PRODUCTION_CONSUME', 'TRANSFORM_OUT', 'MIXTURE_OUT')
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS quantity_out,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type = 'ADJUSTMENT'
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS adjusted_quantity
+    FROM stock_movements sm
+    INNER JOIN warehouses w ON w.id = sm.warehouse_id
+    ${whereClause}
+    GROUP BY sm.warehouse_id, w.name, w.city
+    ORDER BY movements_count DESC, quantity_in DESC, warehouse_name ASC
+    LIMIT $${values.length};
+  `;
+
+  const result = await pool.query(query, values);
+  return result.rows;
+}
+
+export async function getStockVariationTimeline(
+  filters = {},
+  granularity = "day"
+) {
+  const periodExpression =
+    granularity === "month"
+      ? `TO_CHAR(sm.created_at, 'YYYY-MM')`
+      : `TO_CHAR(sm.created_at, 'YYYY-MM-DD')`;
+
+  const { whereClause, values } = buildStockMovementFilters(filters);
+
+  const query = `
+    SELECT
+      ${periodExpression} AS period,
+      COUNT(*)::int AS movements_count,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type IN ('IN', 'TRANSFER_IN', 'PRODUCTION_OUTPUT', 'TRANSFORM_IN', 'MIXTURE_IN')
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS quantity_in,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type IN ('OUT', 'TRANSFER_OUT', 'PRODUCTION_CONSUME', 'TRANSFORM_OUT', 'MIXTURE_OUT')
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS quantity_out,
+      COALESCE(SUM(CASE
+        WHEN sm.movement_type = 'ADJUSTMENT'
+          THEN sm.quantity
+        ELSE 0
+      END), 0) AS adjusted_quantity
+    FROM stock_movements sm
+    ${whereClause}
+    GROUP BY period
+    ORDER BY period ASC;
+  `;
+
+  const result = await pool.query(query, values);
+  return result.rows;
+}
+
+export async function getRecentStockVariationMovements(filters = {}, limit = 20) {
+  const { whereClause, values } = buildStockMovementFilters(filters);
+  values.push(limit);
+
+  const query = `
+    SELECT
+      sm.id,
+      sm.product_id,
+      sm.warehouse_id,
+      sm.movement_type,
+      sm.quantity,
+      sm.stock_form,
+      sm.package_size,
+      sm.package_unit,
+      sm.unit_cost,
+      sm.reference_type,
+      sm.reference_id,
+      sm.notes,
+      sm.created_at,
+      p.name AS product_name,
+      p.sku,
+      p.unit,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city
+    FROM stock_movements sm
+    INNER JOIN products p ON p.id = sm.product_id
+    INNER JOIN warehouses w ON w.id = sm.warehouse_id
+    ${whereClause}
+    ORDER BY sm.created_at DESC, sm.id DESC
+    LIMIT $${values.length};
+  `;
+
+  const result = await pool.query(query, values);
   return result.rows;
 }

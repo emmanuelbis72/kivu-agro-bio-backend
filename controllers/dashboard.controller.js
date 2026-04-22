@@ -1,6 +1,12 @@
 import {
   getGlobalStats,
   getStockAlerts,
+  getStockVariationOverview,
+  getStockVariationByMovementType,
+  getStockVariationByProduct,
+  getStockVariationByWarehouse,
+  getStockVariationTimeline,
+  getRecentStockVariationMovements,
   getTopProducts,
   getTopCustomers,
   getRecentInvoices,
@@ -27,6 +33,30 @@ function parsePositiveLimit(value, defaultValue = 10, maxValue = 100) {
   }
 
   return Math.min(parsed, maxValue);
+}
+
+function parsePositiveInteger(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseDateFilter(value) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = String(value).trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : null;
+}
+
+function parseStockVariationFilters(query = {}) {
+  return {
+    warehouseId: parsePositiveInteger(query.warehouse_id),
+    productId: parsePositiveInteger(query.product_id),
+    stockForm: query.stock_form ? String(query.stock_form).trim().toLowerCase() : null,
+    startDate: parseDateFilter(query.start_date),
+    endDate: parseDateFilter(query.end_date)
+  };
 }
 
 export async function getDashboardOverviewHandler(req, res, next) {
@@ -302,6 +332,56 @@ export async function getLowRotationProductsHandler(req, res, next) {
       success: true,
       count: rows.length,
       data: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getStockVariationReportHandler(req, res, next) {
+  try {
+    const filters = parseStockVariationFilters(req.query);
+    const topLimit = parsePositiveLimit(req.query.top_limit, 10, 100);
+    const recentLimit = parsePositiveLimit(req.query.recent_limit, 20, 100);
+    const timelineGranularity =
+      String(req.query.timeline || "day").trim().toLowerCase() === "month"
+        ? "month"
+        : "day";
+
+    const [
+      overview,
+      byMovementType,
+      byProduct,
+      byWarehouse,
+      timeline,
+      recentMovements
+    ] = await Promise.all([
+      getStockVariationOverview(filters),
+      getStockVariationByMovementType(filters),
+      getStockVariationByProduct(filters, topLimit),
+      getStockVariationByWarehouse(filters, topLimit),
+      getStockVariationTimeline(filters, timelineGranularity),
+      getRecentStockVariationMovements(filters, recentLimit)
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters: {
+          warehouse_id: filters.warehouseId,
+          product_id: filters.productId,
+          stock_form: filters.stockForm,
+          start_date: filters.startDate,
+          end_date: filters.endDate,
+          timeline: timelineGranularity
+        },
+        overview,
+        by_movement_type: byMovementType,
+        by_product: byProduct,
+        by_warehouse: byWarehouse,
+        timeline,
+        recent_movements: recentMovements
+      }
     });
   } catch (error) {
     next(error);
