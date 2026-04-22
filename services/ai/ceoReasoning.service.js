@@ -2,9 +2,27 @@ import { pool } from "../../config/db.js";
 import { runDeepseekReasoning } from "./deepseekReasoner.service.js";
 import { getBusinessRulesMap } from "./businessRules.service.js";
 import { getActiveCompanyKnowledge } from "./companyKnowledge.service.js";
+import {
+  getBalanceSheet,
+  getIncomeStatement,
+  getTrialBalance
+} from "../../models/accountingReport.model.js";
 
 function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function currentMonthRange() {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const end = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+  );
+
+  return {
+    start_date: start.toISOString().slice(0, 10),
+    end_date: end.toISOString().slice(0, 10)
+  };
 }
 
 async function getGlobalKpis() {
@@ -269,6 +287,9 @@ export async function getCEOBRIEF() {
     lowMarginInvoices,
     stockAlerts,
     topProducts,
+    incomeStatement,
+    balanceSheet,
+    trialBalance,
     companyKnowledge
   ] = await Promise.all([
     getGlobalKpis(),
@@ -276,6 +297,9 @@ export async function getCEOBRIEF() {
     getLowMarginInvoices(10),
     getStockAlerts(10),
     getTopProducts(10),
+    getIncomeStatement(currentMonthRange()),
+    getBalanceSheet(currentMonthRange()),
+    getTrialBalance(currentMonthRange()),
     getActiveCompanyKnowledge({
       categories: ["company_profile", "strategy", "market", "operations"],
       limit: 30
@@ -288,7 +312,12 @@ export async function getCEOBRIEF() {
     receivables: criticalReceivables,
     low_margin_invoices: lowMarginInvoices,
     stock_alerts: stockAlerts,
-    top_products: topProducts
+    top_products: topProducts,
+    accounting_reporting: {
+      income_statement: incomeStatement?.totals || {},
+      balance_sheet: balanceSheet?.totals || {},
+      trial_balance: trialBalance?.totals || {}
+    }
   };
 
   const businessRules = await getBusinessRulesMap();

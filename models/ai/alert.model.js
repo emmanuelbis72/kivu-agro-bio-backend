@@ -1,7 +1,83 @@
 import { pool } from "../../config/db.js";
+import {
+  ensureTableSchema,
+  queryWithSchemaRetry
+} from "../../utils/schemaSelfHealing.util.js";
 
 function toJson(value, fallback = {}) {
   return JSON.stringify(value === undefined || value === null ? fallback : value);
+}
+
+async function ensureAIAlertsTable() {
+  const query = `
+    CREATE TABLE IF NOT EXISTS ai_alerts (
+      id SERIAL PRIMARY KEY,
+      alert_key VARCHAR(120) NOT NULL UNIQUE,
+      run_id INTEGER REFERENCES ai_agent_runs(id) ON DELETE SET NULL,
+      source_agent VARCHAR(100) NOT NULL,
+      domain VARCHAR(50) NOT NULL,
+      alert_type VARCHAR(60) NOT NULL,
+      severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+      priority_weight INTEGER NOT NULL DEFAULT 1,
+      title VARCHAR(255) NOT NULL,
+      summary TEXT NOT NULL,
+      explanation TEXT,
+      recommendation TEXT,
+      entity_type VARCHAR(50),
+      entity_id INTEGER,
+      object_ref JSONB NOT NULL DEFAULT '{}'::jsonb,
+      alert_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      detected_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      resolution_state VARCHAR(30) NOT NULL DEFAULT 'open',
+      resolved_at TIMESTAMP,
+      resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      resolution_notes TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      CONSTRAINT ai_alerts_domain_chk CHECK (
+        domain IN ('ceo', 'finance', 'accounting', 'commercial', 'marketing', 'operations', 'stock', 'production', 'knowledge', 'general')
+      ),
+      CONSTRAINT ai_alerts_severity_chk CHECK (
+        severity IN ('low', 'medium', 'high', 'critical')
+      ),
+      CONSTRAINT ai_alerts_priority_weight_chk CHECK (
+        priority_weight >= 1 AND priority_weight <= 10
+      ),
+      CONSTRAINT ai_alerts_resolution_state_chk CHECK (
+        resolution_state IN ('open', 'acknowledged', 'in_progress', 'resolved', 'dismissed')
+      )
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ai_alerts_domain
+      ON ai_alerts (domain);
+
+    CREATE INDEX IF NOT EXISTS idx_ai_alerts_severity
+      ON ai_alerts (severity);
+
+    CREATE INDEX IF NOT EXISTS idx_ai_alerts_resolution_state
+      ON ai_alerts (resolution_state);
+
+    CREATE INDEX IF NOT EXISTS idx_ai_alerts_detected_at
+      ON ai_alerts (detected_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_ai_alerts_entity
+      ON ai_alerts (entity_type, entity_id);
+  `;
+
+  await ensureTableSchema({
+    executor: (text) => pool.query(text),
+    relationName: "ai_alerts",
+    createSql: query
+  });
+}
+
+async function queryWithAIAlertsSchemaRetry(query, values = []) {
+  return queryWithSchemaRetry({
+    executor: (text, params) => pool.query(text, params),
+    ensureSchema: ensureAIAlertsTable,
+    query,
+    values
+  });
 }
 
 export async function upsertAIAlert({
@@ -65,7 +141,7 @@ export async function upsertAIAlert({
     RETURNING *;
   `;
 
-  const result = await pool.query(query, [
+  const result = await queryWithAIAlertsSchemaRetry(query, [
     alert_key,
     run_id,
     source_agent,
@@ -121,7 +197,7 @@ export async function getAIAlerts({
     LIMIT $${values.length};
   `;
 
-  const result = await pool.query(query, values);
+  const result = await queryWithAIAlertsSchemaRetry(query, values);
   return result.rows;
 }
 
@@ -138,6 +214,10 @@ export async function resolveAIAlert(id, { resolved_by = null, resolution_notes 
     RETURNING *;
   `;
 
-  const result = await pool.query(query, [id, resolved_by, resolution_notes]);
+  const result = await queryWithAIAlertsSchemaRetry(query, [
+    id,
+    resolved_by,
+    resolution_notes
+  ]);
   return result.rows[0] || null;
 }

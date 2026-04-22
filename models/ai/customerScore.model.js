@@ -1,22 +1,11 @@
 import { pool } from "../../config/db.js";
+import {
+  ensureTableSchema,
+  queryWithSchemaRetry
+} from "../../utils/schemaSelfHealing.util.js";
 
 function toJson(value, fallback = {}) {
   return JSON.stringify(value === undefined || value === null ? fallback : value);
-}
-
-function isUndefinedTableError(error) {
-  return error?.code === "42P01";
-}
-
-function isConcurrentCreateError(error, relationName) {
-  const message = String(error?.message || "");
-  const detail = String(error?.detail || "");
-
-  return (
-    error?.code === "42P07" ||
-    (error?.code === "23505" &&
-      (message.includes(relationName) || detail.includes(relationName)))
-  );
 }
 
 async function ensureCustomerScoresTable() {
@@ -60,26 +49,20 @@ async function ensureCustomerScoresTable() {
       ON customer_scores (score_date DESC);
   `;
 
-  try {
-    await pool.query(query);
-  } catch (error) {
-    if (!isConcurrentCreateError(error, "customer_scores")) {
-      throw error;
-    }
-  }
+  await ensureTableSchema({
+    executor: (text) => pool.query(text),
+    relationName: "customer_scores",
+    createSql: query
+  });
 }
 
 async function queryWithCustomerScoresSchemaRetry(query, values = []) {
-  try {
-    return await pool.query(query, values);
-  } catch (error) {
-    if (!isUndefinedTableError(error)) {
-      throw error;
-    }
-
-    await ensureCustomerScoresTable();
-    return pool.query(query, values);
-  }
+  return queryWithSchemaRetry({
+    executor: (text, params) => pool.query(text, params),
+    ensureSchema: ensureCustomerScoresTable,
+    query,
+    values
+  });
 }
 
 export async function upsertCustomerScore({

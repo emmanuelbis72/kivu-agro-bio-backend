@@ -124,6 +124,10 @@ export function detectIntent(question) {
       "bilan",
       "résultat",
       "resultat",
+      "reporting",
+      "reporting comptable",
+      "etat financier",
+      "compte de resultat",
       "grand livre",
       "écriture",
       "ecriture"

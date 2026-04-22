@@ -100,6 +100,7 @@ function normalizeTextBlock(value, fallback = "") {
 function normalizeReasoningPayload(payload, rawText = "") {
   const recommendations = normalizeStringArray(payload?.recommendations);
   const actions = normalizeStringArray(payload?.actions);
+  const alerts = normalizeStringArray(payload?.alerts);
   const summary = normalizeTextBlock(
     payload?.summary,
     "Analyse stratégique générée."
@@ -112,12 +113,21 @@ function normalizeReasoningPayload(payload, rawText = "") {
   return {
     summary,
     analysis,
-    risks: normalizeStringArray(payload?.risks),
+    risks:
+      normalizeStringArray(payload?.risks).length > 0
+        ? normalizeStringArray(payload?.risks)
+        : alerts,
     opportunities: normalizeStringArray(payload?.opportunities),
     recommendations,
     actions: actions.length > 0 ? actions : recommendations,
     priority_level: normalizePriorityLevel(payload?.priority_level),
-    confidence_score: normalizeConfidenceScore(payload?.confidence_score)
+    confidence_score: normalizeConfidenceScore(payload?.confidence_score),
+    metrics:
+      payload?.metrics &&
+      typeof payload.metrics === "object" &&
+      !Array.isArray(payload.metrics)
+        ? payload.metrics
+        : {}
   };
 }
 
@@ -175,6 +185,23 @@ function safeParseReasoningContent(content) {
 }
 
 function buildAssistantPrompt({ question, businessRules, contextData }) {
+  const focus = String(contextData?.focus || "general").trim().toLowerCase();
+  const extraInstructions =
+    focus === "accounting"
+      ? [
+          "Instructions specifiques comptabilite:",
+          "- Lis les donnees comme un directeur financier.",
+          "- Donne un resume de reporting comptable exploitable en comite de direction.",
+          "- Commente le resultat, l'equilibre debit-credit, le bilan, les brouillons et les comptes dominants quand ces donnees existent.",
+          "- Propose des actions concretes de cloture, controle ou pilotage comptable.",
+          '- Remplis \"metrics\" avec les indicateurs comptables les plus importants disponibles.'
+        ].join("\n")
+      : [
+          "Instructions specifiques:",
+          "- Si des donnees comptables sont presentes, integre-les dans le diagnostic.",
+          '- Remplis \"metrics\" avec les indicateurs les plus utiles pour la decision.'
+        ].join("\n");
+
   return `
 Tu es KABOT, copilote CEO/CFO de KIVU AGRO BIO.
 
@@ -185,12 +212,15 @@ Règles:
 - Réponse courte, niveau direction générale.
 - Priorise les risques et les actions.
 - Maximum 5 éléments par tableau.
+- Integre les donnees comptables et de reporting si elles sont fournies.
 - Retourne uniquement un JSON valide.
 - Pas de markdown.
 - "summary" et "analysis" doivent être des chaînes.
 
 Business rules:
 ${JSON.stringify(businessRules)}
+
+${extraInstructions}
 
 Contexte:
 ${JSON.stringify(contextData)}
@@ -206,6 +236,9 @@ JSON attendu:
   "opportunities": ["opportunité 1", "opportunité 2"],
   "recommendations": ["recommandation 1", "recommandation 2"],
   "actions": ["action prioritaire 1", "action prioritaire 2", "action prioritaire 3"],
+  "metrics": {
+    "metric_1": 0
+  },
   "priority_level": "LOW | MEDIUM | HIGH | CRITICAL",
   "confidence_score": 0.0
 }
@@ -240,6 +273,9 @@ JSON attendu:
   "opportunities": ["..."],
   "recommendations": ["..."],
   "actions": ["..."],
+  "metrics": {
+    "metric_1": 0
+  },
   "priority_level": "LOW | MEDIUM | HIGH | CRITICAL",
   "confidence_score": 0.0
 }
@@ -347,7 +383,7 @@ export async function runDeepseekReasoning({
       "deepseek-reasoner"
   ).trim();
 
-  const timeoutLimit = profile === "assistant" ? 70000 : 120000;
+  const timeoutLimit = profile === "assistant" ? 120000 : 120000;
   const timeoutMs = Math.min(
     getEnvNumber("DEEPSEEK_TIMEOUT_MS", 90000),
     timeoutLimit

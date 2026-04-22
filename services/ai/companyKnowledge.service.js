@@ -1,4 +1,8 @@
 import { pool } from "../../config/db.js";
+import {
+  ensureTableSchema,
+  queryWithSchemaRetry
+} from "../../utils/schemaSelfHealing.util.js";
 
 function normalizeTags(tags) {
   if (!Array.isArray(tags)) {
@@ -8,21 +12,6 @@ function normalizeTags(tags) {
   return tags
     .map((tag) => String(tag || "").trim())
     .filter(Boolean);
-}
-
-function isUndefinedTableError(error) {
-  return error?.code === "42P01";
-}
-
-function isConcurrentCreateError(error, relationName) {
-  const message = String(error?.message || "");
-  const detail = String(error?.detail || "");
-
-  return (
-    error?.code === "42P07" ||
-    (error?.code === "23505" &&
-      (message.includes(relationName) || detail.includes(relationName)))
-  );
 }
 
 async function ensureCompanyKnowledgeTable() {
@@ -54,26 +43,20 @@ async function ensureCompanyKnowledgeTable() {
       ON company_knowledge(priority_level);
   `;
 
-  try {
-    await pool.query(query);
-  } catch (error) {
-    if (!isConcurrentCreateError(error, "company_knowledge")) {
-      throw error;
-    }
-  }
+  await ensureTableSchema({
+    executor: (text) => pool.query(text),
+    relationName: "company_knowledge",
+    createSql: query
+  });
 }
 
 async function queryWithCompanyKnowledgeSchemaRetry(query, values = []) {
-  try {
-    return await pool.query(query, values);
-  } catch (error) {
-    if (!isUndefinedTableError(error)) {
-      throw error;
-    }
-
-    await ensureCompanyKnowledgeTable();
-    return pool.query(query, values);
-  }
+  return queryWithSchemaRetry({
+    executor: (text, params) => pool.query(text, params),
+    ensureSchema: ensureCompanyKnowledgeTable,
+    query,
+    values
+  });
 }
 
 export async function getActiveCompanyKnowledge({

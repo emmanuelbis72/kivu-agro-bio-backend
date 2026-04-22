@@ -5,8 +5,16 @@ import {
   getTopCustomers,
   getRecentInvoices,
   getAccountingGlobalStats,
-  getRecentJournalEntries
+  getRecentJournalEntries,
+  getAccountingMonthlyOverview,
+  getAccountClassBalances,
+  getRecentPayments
 } from "../../models/dashboard.model.js";
+import {
+  getBalanceSheet,
+  getIncomeStatement,
+  getTrialBalance
+} from "../../models/accountingReport.model.js";
 import { getAllExpenses } from "../../models/expense.model.js";
 import { getAllInvoices } from "../../models/invoice.model.js";
 import { detectIntent } from "./naturalQuery.service.js";
@@ -36,6 +44,40 @@ const quickQuestions = [
 
 function round2(value) {
   return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function toIsoDate(value) {
+  return new Date(value).toISOString().slice(0, 10);
+}
+
+function getReasoningDateRange(period = "current") {
+  const now = new Date();
+  const end = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+  );
+  let start = new Date(end);
+
+  switch (period) {
+    case "today":
+      break;
+    case "this_week": {
+      const day = start.getUTCDay();
+      const offset = day === 0 ? 6 : day - 1;
+      start.setUTCDate(start.getUTCDate() - offset);
+      break;
+    }
+    case "this_month":
+    case "current":
+    default:
+      start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+      break;
+  }
+
+  return {
+    label: period,
+    start_date: toIsoDate(start),
+    end_date: toIsoDate(end)
+  };
 }
 
 function compactCompanyKnowledge(rows = []) {
@@ -103,6 +145,179 @@ function summarizeGlobalStats(globalStats = {}) {
   };
 }
 
+function summarizeAccountingStats(accounting = {}) {
+  const totalPostedDebit = round2(accounting.total_posted_debit);
+  const totalPostedCredit = round2(accounting.total_posted_credit);
+
+  return {
+    total_accounts: Number(accounting.total_accounts || 0),
+    total_entries: Number(accounting.total_entries || 0),
+    posted_entries: Number(accounting.posted_entries || 0),
+    draft_entries: Number(accounting.draft_entries || 0),
+    total_posted_debit: totalPostedDebit,
+    total_posted_credit: totalPostedCredit,
+    posted_balance_gap: round2(totalPostedDebit - totalPostedCredit)
+  };
+}
+
+function compactMonthlyAccountingOverview(rows = [], limit = 4) {
+  return rows.slice(-limit).map((row) => ({
+    period: row.period,
+    total_entries: Number(row.total_entries || 0),
+    total_debit: round2(row.total_debit),
+    total_credit: round2(row.total_credit),
+    balance_gap: round2(Number(row.total_debit || 0) - Number(row.total_credit || 0))
+  }));
+}
+
+function compactAccountClassBalances(rows = [], limit = 6) {
+  return rows.slice(0, limit).map((row) => ({
+    account_class: row.account_class,
+    total_debit: round2(row.total_debit),
+    total_credit: round2(row.total_credit),
+    balance: round2(row.balance)
+  }));
+}
+
+function compactIncomeStatement(report = {}) {
+  const revenues = Array.isArray(report.revenues) ? report.revenues : [];
+  const expenses = Array.isArray(report.expenses) ? report.expenses : [];
+  const totals = report.totals || {};
+
+  return {
+    totals: {
+      total_revenue: round2(totals.total_revenue),
+      total_expense: round2(totals.total_expense),
+      net_result: round2(totals.net_result)
+    },
+    top_revenues: revenues.slice(0, 5).map((row) => ({
+      account_number: row.account_number,
+      account_name: row.account_name,
+      net_amount: round2(row.net_amount)
+    })),
+    top_expenses: expenses
+      .slice()
+      .sort((a, b) => Number(b.net_amount || 0) - Number(a.net_amount || 0))
+      .slice(0, 5)
+      .map((row) => ({
+        account_number: row.account_number,
+        account_name: row.account_name,
+        net_amount: round2(row.net_amount)
+      }))
+  };
+}
+
+function compactBalanceSheet(report = {}) {
+  const assets = Array.isArray(report.assets) ? report.assets : [];
+  const liabilities = Array.isArray(report.liabilities) ? report.liabilities : [];
+  const equity = Array.isArray(report.equity) ? report.equity : [];
+  const totals = report.totals || {};
+
+  return {
+    totals: {
+      total_assets: round2(totals.total_assets),
+      total_liabilities: round2(totals.total_liabilities),
+      total_equity: round2(totals.total_equity),
+      total_liabilities_and_equity: round2(totals.total_liabilities_and_equity),
+      gap: round2(totals.gap)
+    },
+    top_assets: assets
+      .slice()
+      .sort((a, b) => Number(b.balance_amount || 0) - Number(a.balance_amount || 0))
+      .slice(0, 5)
+      .map((row) => ({
+        account_number: row.account_number,
+        account_name: row.account_name,
+        balance_amount: round2(row.balance_amount)
+      })),
+    top_liabilities: liabilities
+      .slice()
+      .sort((a, b) => Number(b.balance_amount || 0) - Number(a.balance_amount || 0))
+      .slice(0, 5)
+      .map((row) => ({
+        account_number: row.account_number,
+        account_name: row.account_name,
+        balance_amount: round2(row.balance_amount)
+      })),
+    top_equity: equity
+      .slice()
+      .sort((a, b) => Number(b.balance_amount || 0) - Number(a.balance_amount || 0))
+      .slice(0, 5)
+      .map((row) => ({
+        account_number: row.account_number,
+        account_name: row.account_name,
+        balance_amount: round2(row.balance_amount)
+      }))
+  };
+}
+
+function compactTrialBalance(report = {}) {
+  const rows = Array.isArray(report.rows) ? report.rows : [];
+  const totals = report.totals || {};
+
+  return {
+    totals: {
+      total_debit: round2(totals.total_debit),
+      total_credit: round2(totals.total_credit),
+      total_debit_balance: round2(totals.total_debit_balance),
+      total_credit_balance: round2(totals.total_credit_balance),
+      trial_gap: round2(
+        Number(totals.total_debit || 0) - Number(totals.total_credit || 0)
+      )
+    },
+    top_accounts: rows
+      .slice()
+      .sort(
+        (a, b) =>
+          Math.abs(Number(b.balance || 0)) - Math.abs(Number(a.balance || 0))
+      )
+      .slice(0, 5)
+      .map((row) => ({
+        account_number: row.account_number,
+        account_name: row.account_name,
+        account_type: row.account_type,
+        balance: round2(row.balance),
+        total_debit: round2(row.total_debit),
+        total_credit: round2(row.total_credit)
+      }))
+  };
+}
+
+function buildAccountingHighlights({
+  accountingSummary,
+  incomeStatement,
+  balanceSheet,
+  trialBalance,
+  monthlyOverview,
+  recentEntries,
+  recentPayments,
+  expenses
+}) {
+  const latestPeriod = monthlyOverview[monthlyOverview.length - 1] || null;
+  const topExpense = getTopExpenseCategories(expenses, 1)[0] || null;
+  const latestPayment = recentPayments[0] || null;
+  const latestEntry = recentEntries[0] || null;
+
+  return [
+    `Comptabilite: ${accountingSummary.posted_entries} ecritures validees, ${accountingSummary.draft_entries} brouillons, ecart debit-credit ${round2(accountingSummary.posted_balance_gap)} USD.`,
+    `Resultat: produits ${round2(incomeStatement?.totals?.total_revenue)} USD, charges ${round2(incomeStatement?.totals?.total_expense)} USD, net ${round2(incomeStatement?.totals?.net_result)} USD.`,
+    `Bilan: actifs ${round2(balanceSheet?.totals?.total_assets)} USD, passifs ${round2(balanceSheet?.totals?.total_liabilities)} USD, capitaux propres ${round2(balanceSheet?.totals?.total_equity)} USD, ecart ${round2(balanceSheet?.totals?.gap)} USD.`,
+    `Balance generale: debit ${round2(trialBalance?.totals?.total_debit)} USD, credit ${round2(trialBalance?.totals?.total_credit)} USD, ecart ${round2(trialBalance?.totals?.trial_gap)} USD.`,
+    latestPeriod
+      ? `Derniere periode comptable ${latestPeriod.period}: ${latestPeriod.total_entries} ecritures, ecart ${round2(latestPeriod.balance_gap)} USD.`
+      : null,
+    topExpense
+      ? `Charge dominante: ${topExpense.category}, ${round2(topExpense.total_amount)} USD.`
+      : null,
+    latestPayment
+      ? `Dernier paiement: ${latestPayment.customer_name}, ${round2(latestPayment.amount)} USD le ${latestPayment.payment_date}.`
+      : null,
+    latestEntry
+      ? `Derniere ecriture: ${latestEntry.entry_number} (${latestEntry.journal_code}) statut ${latestEntry.status}.`
+      : null
+  ].filter(Boolean);
+}
+
 function buildReasoningHighlights({
   globalStats,
   stockAlerts,
@@ -150,7 +365,13 @@ function buildReasoningHighlights({
   ].filter(Boolean);
 }
 
-async function buildReasoningContextData(intent, businessRules = {}) {
+async function buildReasoningContextData(
+  intent,
+  businessRules = {},
+  period = "current"
+) {
+  const focus = getReasoningFocus(intent);
+  const reportingRange = getReasoningDateRange(period);
   const [
     globalStats,
     stockAlerts,
@@ -160,6 +381,12 @@ async function buildReasoningContextData(intent, businessRules = {}) {
     recentInvoices,
     accounting,
     recentEntries,
+    accountingMonthlyOverview,
+    accountClassBalances,
+    trialBalance,
+    incomeStatement,
+    balanceSheet,
+    recentPayments,
     companyKnowledge
   ] = await Promise.all([
     getGlobalStats(),
@@ -170,6 +397,24 @@ async function buildReasoningContextData(intent, businessRules = {}) {
     getRecentInvoices(12),
     getAccountingGlobalStats(),
     getRecentJournalEntries(10),
+    focus === "accounting" || focus === "general"
+      ? getAccountingMonthlyOverview()
+      : Promise.resolve([]),
+    focus === "accounting" || focus === "general"
+      ? getAccountClassBalances()
+      : Promise.resolve([]),
+    focus === "accounting" || focus === "general"
+      ? getTrialBalance(reportingRange)
+      : Promise.resolve({ rows: [], totals: {} }),
+    focus === "accounting" || focus === "general"
+      ? getIncomeStatement(reportingRange)
+      : Promise.resolve({ revenues: [], expenses: [], totals: {} }),
+    focus === "accounting" || focus === "general"
+      ? getBalanceSheet(reportingRange)
+      : Promise.resolve({ assets: [], liabilities: [], equity: [], totals: {} }),
+    focus === "accounting" || focus === "cash" || focus === "general"
+      ? getRecentPayments(8)
+      : Promise.resolve([]),
     getActiveCompanyKnowledge({
       categories: ["company_profile", "strategy", "products", "distribution", "operations", "finance", "market", "investor_notes", "founder_notes"],
       limit: 25
@@ -181,9 +426,18 @@ async function buildReasoningContextData(intent, businessRules = {}) {
     0
   );
 
-  const focus = getReasoningFocus(intent);
   const summarizedGlobalStats = summarizeGlobalStats(globalStats);
+  const summarizedAccountingStats = summarizeAccountingStats(accounting);
   const expenseCategories = getTopExpenseCategories(expenses, 3);
+  const compactAccountingOverview = compactMonthlyAccountingOverview(
+    accountingMonthlyOverview
+  );
+  const compactAccountingBalances = compactAccountClassBalances(
+    accountClassBalances
+  );
+  const compactTrial = compactTrialBalance(trialBalance);
+  const compactIncome = compactIncomeStatement(incomeStatement);
+  const compactBalance = compactBalanceSheet(balanceSheet);
   const highlightedInvoices = recentInvoices.slice(0, 5).map((invoice) => ({
     invoice_number: invoice.invoice_number,
     invoice_date: invoice.invoice_date,
@@ -222,6 +476,13 @@ async function buildReasoningContextData(intent, businessRules = {}) {
     total_debit: round2(entry.total_debit),
     total_credit: round2(entry.total_credit)
   }));
+  const highlightedPayments = recentPayments.slice(0, 5).map((payment) => ({
+    payment_date: payment.payment_date,
+    customer_name: payment.customer_name,
+    invoice_number: payment.invoice_number,
+    payment_method: payment.payment_method,
+    amount: round2(payment.amount)
+  }));
   const highlightedKnowledge = compactCompanyKnowledge(companyKnowledge).slice(
     0,
     5
@@ -229,6 +490,7 @@ async function buildReasoningContextData(intent, businessRules = {}) {
 
   const baseContext = {
     focus,
+    reporting_period: reportingRange,
     executive_snapshot: summarizedGlobalStats,
     executive_highlights: buildReasoningHighlights({
       globalStats: summarizedGlobalStats,
@@ -237,9 +499,19 @@ async function buildReasoningContextData(intent, businessRules = {}) {
       topCustomers,
       expenses,
       recentInvoices,
-      accounting,
+      accounting: summarizedAccountingStats,
       recentEntries,
       businessRules
+    }),
+    accounting_reporting_highlights: buildAccountingHighlights({
+      accountingSummary: summarizedAccountingStats,
+      incomeStatement: compactIncome,
+      balanceSheet: compactBalance,
+      trialBalance: compactTrial,
+      monthlyOverview: compactAccountingOverview,
+      recentEntries: highlightedEntries,
+      recentPayments: highlightedPayments,
+      expenses
     })
   };
 
@@ -302,13 +574,15 @@ async function buildReasoningContextData(intent, businessRules = {}) {
       return {
         ...baseContext,
         accounting: {
-          summary: {
-            posted_entries: Number(accounting.posted_entries || 0),
-            draft_entries: Number(accounting.draft_entries || 0),
-            total_posted_debit: round2(accounting.total_posted_debit),
-            total_posted_credit: round2(accounting.total_posted_credit)
-          },
-          recent_entries: highlightedEntries
+          summary: summarizedAccountingStats,
+          monthly_overview: compactAccountingOverview,
+          account_class_balances: compactAccountingBalances,
+          trial_balance: compactTrial,
+          income_statement: compactIncome,
+          balance_sheet: compactBalance,
+          recent_entries: highlightedEntries,
+          recent_payments: highlightedPayments,
+          reporting_highlights: baseContext.accounting_reporting_highlights
         },
         knowledge: highlightedKnowledge
       };
@@ -328,8 +602,8 @@ async function buildReasoningContextData(intent, businessRules = {}) {
           top_categories: expenseCategories
         },
         accounting: {
-          posted_entries: Number(accounting.posted_entries || 0),
-          draft_entries: Number(accounting.draft_entries || 0),
+          summary: summarizedAccountingStats,
+          reporting_highlights: baseContext.accounting_reporting_highlights,
           recent_entries: highlightedEntries
         },
         knowledge: highlightedKnowledge
@@ -696,11 +970,29 @@ async function analyzeCashPosition(businessRules) {
   };
 }
 
-async function analyzeAccounting() {
-  const [stats, recentEntries] = await Promise.all([
+async function analyzeAccounting(period = "current") {
+  const reportingRange = getReasoningDateRange(period);
+  const [
+    stats,
+    recentEntries,
+    monthlyOverview,
+    incomeStatement,
+    balanceSheet,
+    trialBalance
+  ] = await Promise.all([
     getAccountingGlobalStats(),
-    getRecentJournalEntries(5)
+    getRecentJournalEntries(5),
+    getAccountingMonthlyOverview(),
+    getIncomeStatement(reportingRange),
+    getBalanceSheet(reportingRange),
+    getTrialBalance(reportingRange)
   ]);
+
+  const accountingSummary = summarizeAccountingStats(stats);
+  const compactMonthly = compactMonthlyAccountingOverview(monthlyOverview);
+  const compactIncome = compactIncomeStatement(incomeStatement);
+  const compactBalance = compactBalanceSheet(balanceSheet);
+  const compactTrial = compactTrialBalance(trialBalance);
 
   return {
     source_module: "accounting",
@@ -722,6 +1014,67 @@ async function analyzeAccounting() {
     recommendations: [
       "Surveiller les brouillons non validés.",
       "Contrôler régulièrement les journaux à plus forte fréquence."
+    ]
+  };
+}
+
+async function analyzeAccountingReporting(period = "current") {
+  const reportingRange = getReasoningDateRange(period);
+  const [
+    stats,
+    recentEntries,
+    monthlyOverview,
+    incomeStatement,
+    balanceSheet,
+    trialBalance
+  ] = await Promise.all([
+    getAccountingGlobalStats(),
+    getRecentJournalEntries(5),
+    getAccountingMonthlyOverview(),
+    getIncomeStatement(reportingRange),
+    getBalanceSheet(reportingRange),
+    getTrialBalance(reportingRange)
+  ]);
+
+  const accountingSummary = summarizeAccountingStats(stats);
+  const compactMonthly = compactMonthlyAccountingOverview(monthlyOverview);
+  const compactIncome = compactIncomeStatement(incomeStatement);
+  const compactBalance = compactBalanceSheet(balanceSheet);
+  const compactTrial = compactTrialBalance(trialBalance);
+
+  return {
+    source_module: "accounting",
+    summary:
+      `Reporting comptable ${reportingRange.label}: ${accountingSummary.posted_entries} ecritures validees, resultat net ${round2(compactIncome.totals.net_result)} USD, ecart bilan ${round2(compactBalance.totals.gap)} USD.`,
+    answer:
+      `Le reporting comptable met en avant ${round2(compactIncome.totals.total_revenue)} USD de produits, ${round2(compactIncome.totals.total_expense)} USD de charges et un resultat net de ${round2(compactIncome.totals.net_result)} USD. ` +
+      `Le bilan ressort a ${round2(compactBalance.totals.total_assets)} USD d'actifs pour ${round2(compactBalance.totals.total_liabilities_and_equity)} USD de passif plus capitaux propres, avec un ecart de ${round2(compactBalance.totals.gap)} USD. ` +
+      `La direction doit suivre la discipline de cloture, les brouillons non postes et les comptes qui portent les plus gros soldes.`,
+    metrics: {
+      ...accountingSummary,
+      total_revenue: round2(compactIncome.totals.total_revenue),
+      total_expense: round2(compactIncome.totals.total_expense),
+      net_result: round2(compactIncome.totals.net_result),
+      total_assets: round2(compactBalance.totals.total_assets),
+      total_liabilities_and_equity: round2(
+        compactBalance.totals.total_liabilities_and_equity
+      ),
+      balance_sheet_gap: round2(compactBalance.totals.gap),
+      trial_balance_gap: round2(compactTrial.totals.trial_gap)
+    },
+    drivers: [
+      ...compactMonthly.map(
+        (row) =>
+          `Periode ${row.period}: ${row.total_entries} ecritures, ecart ${round2(row.balance_gap)} USD`
+      ),
+      ...recentEntries.map(
+        (row) => `${row.entry_number} - ${row.journal_code} - ${row.description}`
+      )
+    ].slice(0, 5),
+    recommendations: [
+      "Surveiller les brouillons non valides avant cloture.",
+      "Verifier l'alignement debit-credit et investiguer tout ecart de balance.",
+      "Suivre les comptes de charges et de produits dominants pour les commentaires de reporting."
     ]
   };
 }
@@ -783,7 +1136,8 @@ export async function askAIQuestion({ question, context = {} }) {
     try {
       const contextData = await buildReasoningContextData(
         intentResult.intent,
-        businessRules
+        businessRules,
+        intentResult.period
       );
 
       const mergedContextData =
@@ -856,7 +1210,7 @@ export async function askAIQuestion({ question, context = {} }) {
       analysis = await analyzeCashPosition(businessRules);
       break;
     case "accounting_summary":
-      analysis = await analyzeAccounting();
+      analysis = await analyzeAccountingReporting(intentResult.period);
       break;
     default:
       analysis = await analyzeBusinessOverview(businessRules);
