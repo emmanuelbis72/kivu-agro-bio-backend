@@ -12,6 +12,11 @@ function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function getEnvNumber(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
 function currentMonthRange() {
   const now = new Date();
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -23,6 +28,19 @@ function currentMonthRange() {
     start_date: start.toISOString().slice(0, 10),
     end_date: end.toISOString().slice(0, 10)
   };
+}
+
+function withTimeout(task, timeoutMs, label) {
+  return Promise.race([
+    task,
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+        error.code = "TIMEOUT";
+        reject(error);
+      }, timeoutMs);
+    })
+  ]);
 }
 
 async function getGlobalKpis() {
@@ -188,25 +206,28 @@ function buildCEOQuestion() {
   return `
 Tu es KABOT, assistant CEO de KIVU AGRO BIO.
 
-Tu travailles pour la direction générale.
-Tu dois raisonner comme un CEO/CFO opérationnel.
+Tu travailles pour la direction generale.
+Tu dois raisonner comme un CEO/CFO operationnel.
 
-Règles obligatoires :
-- Base-toi uniquement sur les données fournies.
-- N’invente aucun chiffre.
-- Si une donnée manque, dis-le clairement.
-- Réponds en français professionnel.
-- Sois concret, orienté décision, investisseur-ready.
+Regles obligatoires :
+- Base-toi uniquement sur les donnees fournies.
+- N'invente aucun chiffre.
+- Si une donnee manque, dis-le clairement.
+- Reponds en francais professionnel.
+- Sois concret, oriente decision, investisseur-ready.
 
 Format de sortie JSON strict :
 {
-  "summary": "résumé exécutif en 5 à 8 lignes",
+  "summary": "resume executif en 5 a 8 lignes",
   "priority_level": "CRITICAL | HIGH | MEDIUM | LOW",
   "confidence_score": 0.0,
   "alerts": ["..."],
   "opportunities": ["..."],
   "actions": ["..."],
-  "analysis": "analyse détaillée structurée"
+  "metrics": {
+    "metric_1": 0
+  },
+  "analysis": "analyse detaillee structuree"
 }
 `;
 }
@@ -222,21 +243,28 @@ function buildFallbackCEOResponse(context) {
   const topProducts = Array.isArray(context?.top_products)
     ? context.top_products
     : [];
+  const accountingReporting = context?.accounting_reporting || {};
+  const incomeStatement = accountingReporting.income_statement || {};
+  const balanceSheet = accountingReporting.balance_sheet || {};
+  const trialBalance = accountingReporting.trial_balance || {};
 
   const summary =
     `Ventes ${roundAmount(kpis.total_sales_amount)} USD, encaissements ${roundAmount(
       kpis.total_collected_amount
-    )} USD, créances ${roundAmount(kpis.total_receivables)} USD. ` +
-    `La direction doit surveiller en priorité la trésorerie, les encours clients et les alertes de stock.`;
+    )} USD, creances ${roundAmount(kpis.total_receivables)} USD. ` +
+    `Resultat net ${roundAmount(incomeStatement.net_result)} USD et ecart de bilan ${roundAmount(balanceSheet.gap)} USD. ` +
+    `La direction doit surveiller en priorite la tresorerie, les encours clients, la coherence comptable et les alertes de stock.`;
 
   const analysis =
-    `Les encaissements restent faibles par rapport aux ventes, ce qui accroît la tension sur le cash. ` +
-    `Les créances prioritaires et les produits à faible stock doivent être traités immédiatement pour protéger la continuité opérationnelle.`;
+    `Les encaissements restent faibles par rapport aux ventes, ce qui accroit la tension sur le cash. ` +
+    `Les creances prioritaires et les produits a faible stock doivent etre traites immediatement pour proteger la continuite operationnelle. ` +
+    `Le reporting comptable montre ${roundAmount(incomeStatement.total_revenue)} USD de produits, ${roundAmount(incomeStatement.total_expense)} USD de charges et un ecart de balance de ${roundAmount(Number(trialBalance.total_debit || 0) - Number(trialBalance.total_credit || 0))} USD a surveiller si non nul.`;
 
   const recommendations = [
-    "Accélérer le recouvrement des créances les plus élevées.",
-    "Sécuriser les produits en alerte de stock.",
-    "Concentrer l'effort commercial sur les meilleures références."
+    "Accelerer le recouvrement des creances les plus elevees.",
+    "Securiser les produits en alerte de stock.",
+    "Controler les ecarts comptables et les brouillons avant cloture.",
+    "Concentrer l'effort commercial sur les meilleures references."
   ];
 
   return {
@@ -245,16 +273,28 @@ function buildFallbackCEOResponse(context) {
     source_module: "ai_ceo",
     summary,
     answer: analysis,
-    metrics: {},
+    metrics: {
+      total_sales_amount: roundAmount(kpis.total_sales_amount),
+      total_collected_amount: roundAmount(kpis.total_collected_amount),
+      total_receivables: roundAmount(kpis.total_receivables),
+      total_revenue: roundAmount(incomeStatement.total_revenue),
+      total_expense: roundAmount(incomeStatement.total_expense),
+      net_result: roundAmount(incomeStatement.net_result),
+      balance_sheet_gap: roundAmount(balanceSheet.gap),
+      trial_balance_gap: roundAmount(
+        Number(trialBalance.total_debit || 0) -
+          Number(trialBalance.total_credit || 0)
+      )
+    },
     drivers: [
       ...receivables.slice(0, 3).map(
-        (item) => `Risque: créance ${item.customer_name} ${roundAmount(item.balance_due)} USD`
+        (item) => `Risque: creance ${item.customer_name} ${roundAmount(item.balance_due)} USD`
       ),
       ...stockAlerts.slice(0, 2).map(
         (item) => `Risque: stock faible ${item.product_name}`
       ),
       ...topProducts.slice(0, 2).map(
-        (item) => `Opportunité: produit porteur ${item.product_name}`
+        (item) => `Opportunite: produit porteur ${item.product_name}`
       )
     ],
     recommendations,
@@ -266,21 +306,27 @@ function buildFallbackCEOResponse(context) {
 
 function isWeakCEOReasoning(reasoning) {
   const summary = String(reasoning?.summary || "").trim();
+  const analysis = String(reasoning?.analysis || "").trim();
   const recommendations = Array.isArray(reasoning?.recommendations)
     ? reasoning.recommendations.length
     : 0;
-  const actions = Array.isArray(reasoning?.actions)
-    ? reasoning.actions.length
-    : 0;
+  const actions = Array.isArray(reasoning?.actions) ? reasoning.actions.length : 0;
 
   return (
     !summary ||
-    summary === "Analyse stratégique générée." ||
+    summary === "Analyse strategique generee." ||
+    !analysis ||
     (recommendations === 0 && actions === 0)
   );
 }
 
 export async function getCEOBRIEF() {
+  const ceoBudgetMs = Math.min(
+    getEnvNumber("CEO_BRIEF_TIMEOUT_MS", 45000),
+    55000
+  );
+  const range = currentMonthRange();
+
   const [
     globalKpis,
     criticalReceivables,
@@ -297,9 +343,9 @@ export async function getCEOBRIEF() {
     getLowMarginInvoices(10),
     getStockAlerts(10),
     getTopProducts(10),
-    getIncomeStatement(currentMonthRange()),
-    getBalanceSheet(currentMonthRange()),
-    getTrialBalance(currentMonthRange()),
+    getIncomeStatement(range),
+    getBalanceSheet(range),
+    getTrialBalance(range),
     getActiveCompanyKnowledge({
       categories: ["company_profile", "strategy", "market", "operations"],
       limit: 30
@@ -314,6 +360,7 @@ export async function getCEOBRIEF() {
     stock_alerts: stockAlerts,
     top_products: topProducts,
     accounting_reporting: {
+      period: range,
       income_statement: incomeStatement?.totals || {},
       balance_sheet: balanceSheet?.totals || {},
       trial_balance: trialBalance?.totals || {}
@@ -321,60 +368,59 @@ export async function getCEOBRIEF() {
   };
 
   const businessRules = await getBusinessRulesMap();
-  let reasoning;
 
   try {
-    reasoning = await runDeepseekReasoning({
-      question: buildCEOQuestion(),
-      businessRules,
-      contextData: context,
-      profile: "ceo"
-    });
-  } catch (error) {
-    console.error("DeepSeek CEO profile failed, fallback assistant profile:", error);
-  }
-
-  if (!reasoning || isWeakCEOReasoning(reasoning)) {
-    if (reasoning && isWeakCEOReasoning(reasoning)) {
-      console.error("DeepSeek CEO profile returned weak payload, fallback assistant profile.");
-    }
-
-    try {
-      reasoning = await runDeepseekReasoning({
+    const reasoning = await withTimeout(
+      runDeepseekReasoning({
         question: buildCEOQuestion(),
         businessRules,
         contextData: context,
-        profile: "assistant"
-      });
-    } catch (fallbackError) {
-      console.error("DeepSeek CEO assistant fallback failed:", fallbackError);
+        profile: "ceo"
+      }),
+      ceoBudgetMs,
+      "CEO brief reasoning"
+    );
 
+    if (!reasoning || isWeakCEOReasoning(reasoning)) {
+      console.error("DeepSeek CEO profile returned weak payload, using rich fallback.");
       return {
         rawData: context,
         ai: buildFallbackCEOResponse(context)
       };
     }
+
+    const aiResult = {
+      intent: "ai_reasoning",
+      period: "global",
+      source_module: "ai_ceo",
+      summary: reasoning.summary || "",
+      answer: reasoning.analysis || "",
+      metrics:
+        reasoning.metrics && typeof reasoning.metrics === "object"
+          ? reasoning.metrics
+          : {},
+      drivers: [
+        ...(reasoning.risks || []).map((item) => `Risque: ${item}`),
+        ...(reasoning.opportunities || []).map(
+          (item) => `Opportunite: ${item}`
+        )
+      ],
+      recommendations: reasoning.actions || reasoning.recommendations || [],
+      priority_level: reasoning.priority_level || "MEDIUM",
+      confidence_score: reasoning.confidence_score || 0.95,
+      generated_at: new Date().toISOString()
+    };
+
+    return {
+      rawData: context,
+      ai: aiResult
+    };
+  } catch (error) {
+    console.error("DeepSeek CEO profile failed, using rich fallback:", error);
+
+    return {
+      rawData: context,
+      ai: buildFallbackCEOResponse(context)
+    };
   }
-
-  const aiResult = {
-    intent: "ai_reasoning",
-    period: "global",
-    source_module: "ai_ceo",
-    summary: reasoning.summary || "",
-    answer: reasoning.analysis || "",
-    metrics: {},
-    drivers: [
-      ...(reasoning.risks || []).map((item) => `Risque: ${item}`),
-      ...(reasoning.opportunities || []).map((item) => `Opportunité: ${item}`)
-    ],
-    recommendations: reasoning.actions || reasoning.recommendations || [],
-    priority_level: reasoning.priority_level || "MEDIUM",
-    confidence_score: reasoning.confidence_score || 0.95,
-    generated_at: new Date().toISOString()
-  };
-
-  return {
-    rawData: context,
-    ai: aiResult
-  };
 }
