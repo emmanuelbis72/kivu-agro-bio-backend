@@ -18,6 +18,22 @@ function isNonNegativeNumber(value) {
   return !Number.isNaN(Number(value)) && Number(value) >= 0;
 }
 
+function normalizeStockForm(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  return String(value).trim().toLowerCase();
+}
+
+function normalizeUnit(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  return String(value).trim().toLowerCase();
+}
+
 function addDays(dateString, days) {
   const date = new Date(dateString);
   date.setDate(date.getDate() + Number(days || 0));
@@ -65,7 +81,7 @@ export async function createInvoiceHandler(req, res, next) {
     if (!warehouse) {
       return res.status(404).json({
         success: false,
-        message: "Dépôt introuvable."
+        message: "Depot introuvable."
       });
     }
 
@@ -76,7 +92,8 @@ export async function createInvoiceHandler(req, res, next) {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Le dépôt sélectionné ne correspond pas au dépôt lié à ce client."
+        message:
+          "Le depot selectionne ne correspond pas au depot lie a ce client."
       });
     }
 
@@ -98,7 +115,7 @@ export async function createInvoiceHandler(req, res, next) {
       if (!isPositiveInteger(quantity)) {
         return res.status(400).json({
           success: false,
-          message: "Chaque ligne doit avoir une 'quantity' entière positive."
+          message: "Chaque ligne doit avoir une 'quantity' entiere positive."
         });
       }
 
@@ -118,6 +135,41 @@ export async function createInvoiceHandler(req, res, next) {
         });
       }
 
+      if (product.product_role !== "finished_product") {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Seuls les produits finis peuvent etre vendus et factures aux clients."
+        });
+      }
+
+      const stock_form = normalizeStockForm(rawItem.stock_form);
+      const package_size =
+        rawItem.package_size === undefined ||
+        rawItem.package_size === null ||
+        rawItem.package_size === ""
+          ? null
+          : Number(rawItem.package_size);
+      const package_unit = normalizeUnit(rawItem.package_unit);
+
+      if (stock_form && !["bulk", "package"].includes(stock_form)) {
+        return res.status(400).json({
+          success: false,
+          message: "Le champ 'stock_form' est invalide sur une ligne de facture."
+        });
+      }
+
+      if (
+        stock_form === "package" &&
+        (!Number.isFinite(package_size) || package_size <= 0 || !package_unit)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Pour une ligne de facture en paquet, 'package_size' et 'package_unit' sont obligatoires."
+        });
+      }
+
       const line_total = Number(quantity) * Number(unit_price);
       subtotal += line_total;
 
@@ -126,7 +178,10 @@ export async function createInvoiceHandler(req, res, next) {
         quantity,
         unit_price,
         line_total,
-        unit_cost: Number(product.cost_price ?? 0)
+        unit_cost: Number(product.cost_price ?? 0),
+        stock_form,
+        package_size,
+        package_unit
       });
     }
 
@@ -136,21 +191,21 @@ export async function createInvoiceHandler(req, res, next) {
     if (!isNonNegativeNumber(discount_amount)) {
       return res.status(400).json({
         success: false,
-        message: "Le champ 'discount_amount' doit être >= 0."
+        message: "Le champ 'discount_amount' doit etre >= 0."
       });
     }
 
     if (!isNonNegativeNumber(tax_amount)) {
       return res.status(400).json({
         success: false,
-        message: "Le champ 'tax_amount' doit être >= 0."
+        message: "Le champ 'tax_amount' doit etre >= 0."
       });
     }
 
     if (discount_amount > subtotal) {
       return res.status(400).json({
         success: false,
-        message: "La remise ne peut pas être supérieure au sous-total."
+        message: "La remise ne peut pas etre superieure au sous-total."
       });
     }
 
@@ -193,7 +248,7 @@ export async function createInvoiceHandler(req, res, next) {
     if (invoice.accounting_entry_id) {
       accounting = {
         status: "skipped",
-        reason: "Facture déjà comptabilisée."
+        reason: "Facture deja comptabilisee."
       };
     } else {
       try {
@@ -218,7 +273,7 @@ export async function createInvoiceHandler(req, res, next) {
 
     return res.status(201).json({
       success: true,
-      message: "Facture créée avec succès.",
+      message: "Facture creee avec succes.",
       data: {
         invoice: {
           ...invoice,

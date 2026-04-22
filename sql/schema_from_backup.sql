@@ -1,7 +1,8 @@
-﻿--
+--
 -- PostgreSQL database dump
 --
 
+\restrict 9CPgX2svrZ0OeNg4ATyZPCQW4o2gU7nX6dtfkNXmsAmkOXjNBkfCpcDlyFz6Zce
 
 -- Dumped from database version 18.3 (Debian 18.3-1.pgdg12+1)
 -- Dumped by pg_dump version 18.2
@@ -25,6 +26,7 @@ SET row_security = off;
 -- *not* creating schema, since initdb creates it
 
 
+ALTER SCHEMA public OWNER TO kivu_agro_bio_db_user;
 
 SET default_tablespace = '';
 
@@ -50,6 +52,7 @@ CREATE TABLE public.accounts (
 );
 
 
+ALTER TABLE public.accounts OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: accounts_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -64,6 +67,7 @@ CREATE SEQUENCE public.accounts_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.accounts_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: accounts_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -86,6 +90,7 @@ CREATE TABLE public.business_rules (
 );
 
 
+ALTER TABLE public.business_rules OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: business_rules_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -100,6 +105,7 @@ CREATE SEQUENCE public.business_rules_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.business_rules_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: business_rules_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -130,6 +136,7 @@ CREATE TABLE public.company_knowledge (
 );
 
 
+ALTER TABLE public.company_knowledge OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: company_knowledge_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -144,6 +151,7 @@ CREATE SEQUENCE public.company_knowledge_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.company_knowledge_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: company_knowledge_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -176,6 +184,7 @@ CREATE TABLE public.customers (
 );
 
 
+ALTER TABLE public.customers OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: customers_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -190,6 +199,7 @@ CREATE SEQUENCE public.customers_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.customers_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: customers_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -223,6 +233,7 @@ CREATE TABLE public.expenses (
 );
 
 
+ALTER TABLE public.expenses OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: expenses_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -237,6 +248,7 @@ CREATE SEQUENCE public.expenses_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.expenses_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: expenses_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -263,6 +275,7 @@ CREATE TABLE public.fiscal_periods (
 );
 
 
+ALTER TABLE public.fiscal_periods OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: fiscal_periods_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -277,6 +290,7 @@ CREATE SEQUENCE public.fiscal_periods_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.fiscal_periods_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: fiscal_periods_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -305,6 +319,7 @@ CREATE TABLE public.invoice_items (
 );
 
 
+ALTER TABLE public.invoice_items OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: invoice_items_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -319,6 +334,7 @@ CREATE SEQUENCE public.invoice_items_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.invoice_items_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: invoice_items_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -356,6 +372,7 @@ CREATE TABLE public.invoices (
 );
 
 
+ALTER TABLE public.invoices OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: invoices_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -370,6 +387,7 @@ CREATE SEQUENCE public.invoices_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.invoices_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: invoices_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -402,6 +420,7 @@ CREATE TABLE public.journal_entries (
 );
 
 
+ALTER TABLE public.journal_entries OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: journal_entries_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -416,6 +435,7 @@ CREATE SEQUENCE public.journal_entries_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.journal_entries_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: journal_entries_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -445,6 +465,7 @@ CREATE TABLE public.journal_entry_lines (
 );
 
 
+ALTER TABLE public.journal_entry_lines OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: journal_entry_lines_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -459,6 +480,7 @@ CREATE SEQUENCE public.journal_entry_lines_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.journal_entry_lines_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: journal_entry_lines_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -487,6 +509,7 @@ CREATE TABLE public.payments (
 );
 
 
+ALTER TABLE public.payments OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: payments_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -501,6 +524,7 @@ CREATE SEQUENCE public.payments_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.payments_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: payments_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -525,6 +549,7 @@ CREATE TABLE public.product_recipes (
 );
 
 
+ALTER TABLE public.product_recipes OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: product_recipes_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -539,6 +564,7 @@ CREATE SEQUENCE public.product_recipes_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.product_recipes_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: product_recipes_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -562,6 +588,7 @@ CREATE TABLE public.production_batch_items (
 );
 
 
+ALTER TABLE public.production_batch_items OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: production_batch_items_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -576,6 +603,7 @@ CREATE SEQUENCE public.production_batch_items_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.production_batch_items_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: production_batch_items_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -606,6 +634,7 @@ CREATE TABLE public.production_batches (
 );
 
 
+ALTER TABLE public.production_batches OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: production_batches_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -620,6 +649,7 @@ CREATE SEQUENCE public.production_batches_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.production_batches_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: production_batches_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -664,6 +694,7 @@ CREATE TABLE public.products (
 );
 
 
+ALTER TABLE public.products OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: products_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -678,6 +709,7 @@ CREATE SEQUENCE public.products_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.products_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: products_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -708,6 +740,7 @@ CREATE TABLE public.stock_conversions (
 );
 
 
+ALTER TABLE public.stock_conversions OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_conversions_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -722,6 +755,7 @@ CREATE SEQUENCE public.stock_conversions_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.stock_conversions_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_conversions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -757,6 +791,7 @@ CREATE TABLE public.stock_movements (
 );
 
 
+ALTER TABLE public.stock_movements OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_movements_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -771,6 +806,7 @@ CREATE SEQUENCE public.stock_movements_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.stock_movements_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_movements_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -797,6 +833,7 @@ CREATE TABLE public.stock_transfer_items (
 );
 
 
+ALTER TABLE public.stock_transfer_items OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_transfer_items_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -811,6 +848,7 @@ CREATE SEQUENCE public.stock_transfer_items_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.stock_transfer_items_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_transfer_items_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -839,6 +877,7 @@ CREATE TABLE public.stock_transfers (
 );
 
 
+ALTER TABLE public.stock_transfers OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_transfers_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -853,6 +892,7 @@ CREATE SEQUENCE public.stock_transfers_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.stock_transfers_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_transfers_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -877,6 +917,7 @@ CREATE TABLE public.stock_transformation_inputs (
 );
 
 
+ALTER TABLE public.stock_transformation_inputs OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_transformation_inputs_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -891,6 +932,7 @@ CREATE SEQUENCE public.stock_transformation_inputs_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.stock_transformation_inputs_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_transformation_inputs_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -923,6 +965,7 @@ CREATE TABLE public.stock_transformations (
 );
 
 
+ALTER TABLE public.stock_transformations OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_transformations_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -937,6 +980,7 @@ CREATE SEQUENCE public.stock_transformations_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.stock_transformations_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: stock_transformations_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -961,6 +1005,7 @@ CREATE TABLE public.users (
 );
 
 
+ALTER TABLE public.users OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: users_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -975,6 +1020,7 @@ CREATE SEQUENCE public.users_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.users_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: users_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -1003,6 +1049,7 @@ CREATE TABLE public.warehouse_stock (
 );
 
 
+ALTER TABLE public.warehouse_stock OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: warehouse_stock_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -1017,6 +1064,7 @@ CREATE SEQUENCE public.warehouse_stock_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.warehouse_stock_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: warehouse_stock_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -1041,6 +1089,7 @@ CREATE TABLE public.warehouses (
 );
 
 
+ALTER TABLE public.warehouses OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: warehouses_id_seq; Type: SEQUENCE; Schema: public; Owner: kivu_agro_bio_db_user
@@ -1055,6 +1104,7 @@ CREATE SEQUENCE public.warehouses_id_seq
     CACHE 1;
 
 
+ALTER SEQUENCE public.warehouses_id_seq OWNER TO kivu_agro_bio_db_user;
 
 --
 -- Name: warehouses_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: kivu_agro_bio_db_user
@@ -2158,28 +2208,33 @@ ALTER TABLE ONLY public.warehouse_stock
 -- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: -; Owner: postgres
 --
 
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT ALL ON SEQUENCES TO kivu_agro_bio_db_user;
 
 
 --
 -- Name: DEFAULT PRIVILEGES FOR TYPES; Type: DEFAULT ACL; Schema: -; Owner: postgres
 --
 
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT ALL ON TYPES TO kivu_agro_bio_db_user;
 
 
 --
 -- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: -; Owner: postgres
 --
 
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT ALL ON FUNCTIONS TO kivu_agro_bio_db_user;
 
 
 --
 -- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: -; Owner: postgres
 --
 
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT ALL ON TABLES TO kivu_agro_bio_db_user;
 
 
 --
 -- PostgreSQL database dump complete
 --
 
+\unrestrict 9CPgX2svrZ0OeNg4ATyZPCQW4o2gU7nX6dtfkNXmsAmkOXjNBkfCpcDlyFz6Zce
 

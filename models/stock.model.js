@@ -1,8 +1,15 @@
 import { pool } from "../config/db.js";
+import { createProduct as createProductRecord } from "./product.model.js";
 
 const STOCK_FORMS = {
   BULK: "bulk",
   PACKAGE: "package"
+};
+
+const PRODUCT_ROLES = {
+  FINISHED: "finished_product",
+  RAW_MATERIAL: "raw_material",
+  PACKAGING: "packaging_material"
 };
 
 function normalizeStockForm(value) {
@@ -34,6 +41,20 @@ async function getClient(externalClient) {
   }
 
   return { client: await pool.connect(), shouldManageTransaction: true };
+}
+
+async function getProductRecord(client, productId) {
+  const result = await client.query(
+    `
+    SELECT *
+    FROM products
+    WHERE id = $1
+    LIMIT 1;
+    `,
+    [productId]
+  );
+
+  return result.rows[0] || null;
 }
 
 async function getStockItemByVariant(client, warehouseId, productId, variant = {}) {
@@ -770,6 +791,31 @@ export async function performBulkToPackageTransform(data) {
       await client.query("BEGIN");
     }
 
+    const [sourceProduct, targetProduct] = await Promise.all([
+      getProductRecord(client, data.source_product_id),
+      getProductRecord(client, data.target_product_id)
+    ]);
+
+    if (!sourceProduct) {
+      const error = new Error("Produit source introuvable.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (!targetProduct) {
+      const error = new Error("Produit cible introuvable.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (targetProduct.product_role !== PRODUCT_ROLES.FINISHED) {
+      const error = new Error(
+        "La mise en paquet doit produire un produit fini vendable."
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+
     const sourceStock = await getStockItemByVariant(
       client,
       data.warehouse_id,
@@ -917,6 +963,47 @@ export async function performStockMixture(data) {
       await client.query("BEGIN");
     }
 
+    let targetProductId = data.target_product_id;
+
+    if (!targetProductId && data.target_product) {
+      const createdTargetProduct = await createProductRecord({
+        client,
+        name: data.target_product.name,
+        category: data.target_product.category || null,
+        sku: data.target_product.sku,
+        barcode: data.target_product.barcode || null,
+        product_role: PRODUCT_ROLES.FINISHED,
+        unit: data.target_product.unit || "piece",
+        cost_price: data.target_product.cost_price ?? data.unit_cost ?? 0,
+        selling_price: data.target_product.selling_price ?? 0,
+        alert_threshold: data.target_product.alert_threshold ?? 0,
+        is_active:
+          data.target_product.is_active === undefined
+            ? true
+            : Boolean(data.target_product.is_active),
+        description: data.target_product.description || null,
+        sales_account_id: data.target_product.sales_account_id ?? null
+      });
+
+      targetProductId = createdTargetProduct.id;
+    }
+
+    const targetProduct = await getProductRecord(client, targetProductId);
+
+    if (!targetProduct) {
+      const error = new Error("Produit cible de la mixture introuvable.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (targetProduct.product_role !== PRODUCT_ROLES.FINISHED) {
+      const error = new Error(
+        "La mixture doit produire un produit fini vendable."
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+
     const targetVariant = {
       stock_form: data.target_stock_form,
       package_size: data.package_size,
@@ -948,7 +1035,7 @@ export async function performStockMixture(data) {
       [
         data.warehouse_id,
         "bulk_mix",
-        data.target_product_id,
+        targetProductId,
         data.target_quantity,
         normalizedTargetVariant.stock_form,
         normalizedTargetVariant.package_size,
@@ -961,6 +1048,32 @@ export async function performStockMixture(data) {
     const transformation = headerResult.rows[0];
 
     for (const component of data.components) {
+      const componentProduct = await getProductRecord(client, component.product_id);
+
+      if (!componentProduct) {
+        const error = new Error(
+          `Produit composant introuvable pour l'ID ${component.product_id}.`
+        );
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (component.product_id === targetProductId) {
+        const error = new Error(
+          "Le produit cible de la mixture ne peut pas être repris comme composant source."
+        );
+        error.statusCode = 400;
+        throw error;
+      }
+
+      if (componentProduct.product_role === PRODUCT_ROLES.PACKAGING) {
+        const error = new Error(
+          `Le produit ${componentProduct.name} est un emballage et ne peut pas être utilisé dans une mixture.`
+        );
+        error.statusCode = 400;
+        throw error;
+      }
+
       const sourceStock = await getStockItemByVariant(
         client,
         data.warehouse_id,
@@ -1025,7 +1138,7 @@ export async function performStockMixture(data) {
     const targetStock = await ensureStockItem(
       client,
       data.warehouse_id,
-      data.target_product_id,
+      targetProductId,
       normalizedTargetVariant
     );
 
@@ -1036,7 +1149,7 @@ export async function performStockMixture(data) {
     );
 
     const outputMovement = await createStockMovement(client, {
-      product_id: data.target_product_id,
+      product_id: targetProductId,
       warehouse_id: data.warehouse_id,
       movement_type: "MIXTURE_IN",
       quantity: data.target_quantity,
@@ -1056,6 +1169,7 @@ export async function performStockMixture(data) {
 
     return {
       transformation,
+      target_product: targetProduct,
       output_movement: outputMovement
     };
   } catch (error) {

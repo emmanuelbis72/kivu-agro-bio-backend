@@ -310,6 +310,12 @@ export async function createProductionBatch(data) {
       throw error;
     }
 
+    if (finishedProduct.product_role !== "finished_product") {
+      const error = new Error("Le batch de production doit cibler un produit fini.");
+      error.statusCode = 400;
+      throw error;
+    }
+
     const recipesResult = await client.query(
       `
       SELECT *

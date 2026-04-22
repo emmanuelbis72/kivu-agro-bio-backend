@@ -1,4 +1,4 @@
-import { getProductById } from "../models/product.model.js";
+import { getProductById, getProductBySku } from "../models/product.model.js";
 import { getWarehouseById } from "../models/warehouse.model.js";
 import {
   getWarehouseStock,
@@ -16,6 +16,8 @@ import {
 
 const ALLOWED_STOCK_FORMS = ["bulk", "package"];
 const ALLOWED_UNITS = ["g", "kg", "ml", "l", "unit", "piece"];
+const FINISHED_PRODUCT_ROLE = "finished_product";
+const PACKAGING_ROLE = "packaging_material";
 
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
@@ -418,8 +420,28 @@ export async function createBulkToPackageTransformHandler(req, res, next) {
       });
     }
 
-    await validateWarehouseAndProduct(warehouse_id, source_product_id);
-    await validateWarehouseAndProduct(warehouse_id, target_product_id);
+    const { product: sourceProduct } = await validateWarehouseAndProduct(
+      warehouse_id,
+      source_product_id
+    );
+    const { product: targetProduct } = await validateWarehouseAndProduct(
+      warehouse_id,
+      target_product_id
+    );
+
+    if (targetProduct.product_role !== FINISHED_PRODUCT_ROLE) {
+      return res.status(400).json({
+        success: false,
+        message: "Le produit cible du paquetage doit être un produit fini."
+      });
+    }
+
+    if (sourceProduct.product_role === PACKAGING_ROLE) {
+      return res.status(400).json({
+        success: false,
+        message: "Un emballage ne peut pas être utilisé comme stock source à conditionner."
+      });
+    }
 
     const result = await performBulkToPackageTransform({
       warehouse_id,
@@ -448,6 +470,11 @@ export async function createStockMixtureHandler(req, res, next) {
   try {
     const warehouse_id = Number(req.body.warehouse_id);
     const target_product_id = Number(req.body.target_product_id);
+    const hasTargetProductId = isPositiveInteger(target_product_id);
+    const target_product =
+      req.body.target_product && typeof req.body.target_product === "object"
+        ? req.body.target_product
+        : null;
     const target_quantity = Number(req.body.target_quantity);
     const target_stock_form = normalizeStockForm(req.body.target_stock_form || "bulk");
     const package_size =
@@ -462,8 +489,10 @@ export async function createStockMixtureHandler(req, res, next) {
       errors.push("Le champ 'warehouse_id' est invalide.");
     }
 
-    if (!isPositiveInteger(target_product_id)) {
-      errors.push("Le champ 'target_product_id' est invalide.");
+    if (!hasTargetProductId && !target_product) {
+      errors.push(
+        "Veuillez sélectionner un produit cible existant ou renseigner les informations du nouveau produit mixture."
+      );
     }
 
     if (!isPositiveNumber(target_quantity)) {
@@ -492,7 +521,59 @@ export async function createStockMixtureHandler(req, res, next) {
       });
     }
 
-    await validateWarehouseAndProduct(warehouse_id, target_product_id);
+    if (hasTargetProductId) {
+      const { product: targetProduct } = await validateWarehouseAndProduct(
+        warehouse_id,
+        target_product_id
+      );
+
+      if (targetProduct.product_role !== FINISHED_PRODUCT_ROLE) {
+        return res.status(400).json({
+          success: false,
+          message: "Le produit cible de la mixture doit être un produit fini."
+        });
+      }
+    } else if (target_product) {
+      if (!target_product.name || String(target_product.name).trim() === "") {
+        errors.push("Le nom du nouveau produit mixture est obligatoire.");
+      }
+
+      if (!target_product.sku || String(target_product.sku).trim() === "") {
+        errors.push("Le SKU du nouveau produit mixture est obligatoire.");
+      }
+
+      if (
+        target_product.selling_price !== undefined &&
+        target_product.selling_price !== "" &&
+        !isNonNegativeNumber(target_product.selling_price)
+      ) {
+        errors.push("Le prix de vente du nouveau produit mixture est invalide.");
+      }
+
+      if (
+        target_product.alert_threshold !== undefined &&
+        target_product.alert_threshold !== "" &&
+        !isNonNegativeNumber(target_product.alert_threshold)
+      ) {
+        errors.push("Le seuil d'alerte du nouveau produit mixture est invalide.");
+      }
+
+      if (!errors.length) {
+        const existingProduct = await getProductBySku(String(target_product.sku).trim());
+
+        if (existingProduct) {
+          errors.push("Un produit existe déjà avec le SKU du nouveau produit mixture.");
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation échouée.",
+        errors
+      });
+    }
 
     const normalizedComponents = [];
 
@@ -514,7 +595,18 @@ export async function createStockMixtureHandler(req, res, next) {
         });
       }
 
-      await validateWarehouseAndProduct(warehouse_id, product_id);
+      const { product: componentProduct } = await validateWarehouseAndProduct(
+        warehouse_id,
+        product_id
+      );
+
+      if (componentProduct.product_role === PACKAGING_ROLE) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Les emballages ne peuvent pas être utilisés comme composants de mixture."
+        });
+      }
 
       normalizedComponents.push({
         product_id,
@@ -525,7 +617,31 @@ export async function createStockMixtureHandler(req, res, next) {
 
     const result = await performStockMixture({
       warehouse_id,
-      target_product_id,
+      target_product_id: hasTargetProductId ? target_product_id : null,
+      target_product: hasTargetProductId
+        ? null
+        : {
+            name: String(target_product.name).trim(),
+            sku: String(target_product.sku).trim(),
+            category: target_product.category?.trim() || null,
+            barcode: target_product.barcode?.trim() || null,
+            unit: target_product.unit?.trim() || "piece",
+            selling_price:
+              target_product.selling_price === undefined ||
+              target_product.selling_price === ""
+                ? 0
+                : Number(target_product.selling_price),
+            alert_threshold:
+              target_product.alert_threshold === undefined ||
+              target_product.alert_threshold === ""
+                ? 0
+                : Number(target_product.alert_threshold),
+            description: target_product.description?.trim() || null,
+            is_active:
+              target_product.is_active === undefined
+                ? true
+                : Boolean(target_product.is_active)
+          },
       target_quantity,
       target_stock_form,
       package_size,

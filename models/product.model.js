@@ -1,12 +1,18 @@
 import { pool } from "../config/db.js";
 
+function getExecutor(client) {
+  return client || pool;
+}
+
 export async function createProduct(data) {
+  const executor = getExecutor(data.client);
   const query = `
     INSERT INTO products (
       name,
       category,
       sku,
       barcode,
+      product_role,
       unit,
       cost_price,
       selling_price,
@@ -15,7 +21,7 @@ export async function createProduct(data) {
       description,
       sales_account_id
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     RETURNING *;
   `;
 
@@ -24,6 +30,7 @@ export async function createProduct(data) {
     data.category || null,
     data.sku,
     data.barcode || null,
+    data.product_role || "finished_product",
     data.unit || "piece",
     data.cost_price ?? 0,
     data.selling_price ?? 0,
@@ -33,7 +40,7 @@ export async function createProduct(data) {
     data.sales_account_id ?? null
   ];
 
-  const result = await pool.query(query, values);
+  const result = await executor.query(query, values);
   return result.rows[0];
 }
 
@@ -70,6 +77,7 @@ export async function getProductBySku(sku) {
 }
 
 export async function updateProduct(id, data) {
+  const executor = getExecutor(data.client);
   const query = `
     UPDATE products
     SET
@@ -77,15 +85,16 @@ export async function updateProduct(id, data) {
       category = $2,
       sku = $3,
       barcode = $4,
-      unit = $5,
-      cost_price = $6,
-      selling_price = $7,
-      alert_threshold = $8,
-      is_active = $9,
-      description = $10,
-      sales_account_id = $11,
+      product_role = $5,
+      unit = $6,
+      cost_price = $7,
+      selling_price = $8,
+      alert_threshold = $9,
+      is_active = $10,
+      description = $11,
+      sales_account_id = $12,
       updated_at = NOW()
-    WHERE id = $12
+    WHERE id = $13
     RETURNING *;
   `;
 
@@ -94,6 +103,7 @@ export async function updateProduct(id, data) {
     data.category || null,
     data.sku,
     data.barcode || null,
+    data.product_role || "finished_product",
     data.unit || "piece",
     data.cost_price ?? 0,
     data.selling_price ?? 0,
@@ -104,7 +114,7 @@ export async function updateProduct(id, data) {
     id
   ];
 
-  const result = await pool.query(query, values);
+  const result = await executor.query(query, values);
   return result.rows[0] || null;
 }
 

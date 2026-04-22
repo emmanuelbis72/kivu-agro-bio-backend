@@ -3,6 +3,13 @@ import { createPayment, getPaymentsByInvoiceId } from "../models/payment.model.j
 import { autoPostPaymentEntry } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
 
+const ALLOWED_PAYMENT_METHODS = [
+  "cash",
+  "mobile_money",
+  "bank_transfer",
+  "card"
+];
+
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
 }
@@ -17,6 +24,7 @@ export async function createPaymentHandler(req, res, next) {
     const amount = Number(req.body.amount);
     const payment_date =
       req.body.payment_date || new Date().toISOString().split("T")[0];
+    const payment_method = String(req.body.payment_method || "cash").trim();
 
     if (!isPositiveInteger(invoice_id)) {
       return res.status(400).json({
@@ -28,7 +36,15 @@ export async function createPaymentHandler(req, res, next) {
     if (!isPositiveNumber(amount)) {
       return res.status(400).json({
         success: false,
-        message: "Le champ 'amount' doit être > 0."
+        message: "Le champ 'amount' doit etre > 0."
+      });
+    }
+
+    if (!ALLOWED_PAYMENT_METHODS.includes(payment_method)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Le champ 'payment_method' est invalide. Valeurs attendues : cash, mobile_money, bank_transfer, card."
       });
     }
 
@@ -44,21 +60,21 @@ export async function createPaymentHandler(req, res, next) {
     if (String(invoice.status || "").trim().toLowerCase() === "paid") {
       return res.status(400).json({
         success: false,
-        message: "Cette facture est déjà entièrement payée."
+        message: "Cette facture est deja entierement payee."
       });
     }
 
     if (Number(invoice.balance_due) <= 0) {
       return res.status(400).json({
         success: false,
-        message: "Cette facture ne présente plus de solde à payer."
+        message: "Cette facture ne presente plus de solde a payer."
       });
     }
 
     if (Number(amount) > Number(invoice.balance_due)) {
       return res.status(400).json({
         success: false,
-        message: "Le montant payé dépasse le solde restant dû."
+        message: "Le montant paye depasse le solde restant du."
       });
     }
 
@@ -66,7 +82,7 @@ export async function createPaymentHandler(req, res, next) {
       invoice_id,
       payment_date,
       amount,
-      payment_method: req.body.payment_method?.trim() || "cash",
+      payment_method,
       reference: req.body.reference?.trim(),
       notes: req.body.notes?.trim(),
       received_by: req.body.received_by ? Number(req.body.received_by) : null
@@ -82,7 +98,7 @@ export async function createPaymentHandler(req, res, next) {
     if (payment.accounting_entry_id) {
       accounting = {
         status: "skipped",
-        reason: "Paiement déjà comptabilisé."
+        reason: "Paiement deja comptabilise."
       };
     } else {
       try {
@@ -108,7 +124,7 @@ export async function createPaymentHandler(req, res, next) {
 
     return res.status(201).json({
       success: true,
-      message: "Paiement enregistré avec succès.",
+      message: "Paiement enregistre avec succes.",
       data: {
         payment: {
           ...payment,

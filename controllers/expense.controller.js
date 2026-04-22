@@ -8,6 +8,13 @@ import {
 import { autoPostExpenseEntry } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
 
+const ALLOWED_EXPENSE_PAYMENT_METHODS = [
+  "cash",
+  "mobile_money",
+  "bank_transfer",
+  "card"
+];
+
 function validateExpensePayload(body) {
   const errors = [];
 
@@ -29,7 +36,18 @@ function validateExpensePayload(body) {
     Number.isNaN(Number(body.amount)) ||
     Number(body.amount) <= 0
   ) {
-    errors.push("Le champ 'amount' doit être un nombre supérieur à 0.");
+    errors.push("Le champ 'amount' doit etre un nombre superieur a 0.");
+  }
+
+  if (
+    body.payment_method !== undefined &&
+    body.payment_method !== null &&
+    body.payment_method !== "" &&
+    !ALLOWED_EXPENSE_PAYMENT_METHODS.includes(String(body.payment_method).trim())
+  ) {
+    errors.push(
+      "Le champ 'payment_method' est invalide. Valeurs attendues : cash, mobile_money, bank_transfer, card."
+    );
   }
 
   return errors;
@@ -42,7 +60,7 @@ export async function createExpenseHandler(req, res, next) {
     if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: "Validation échouée.",
+        message: "Validation echouee.",
         errors
       });
     }
@@ -84,7 +102,7 @@ export async function createExpenseHandler(req, res, next) {
 
     return res.status(201).json({
       success: true,
-      message: "Dépense créée avec succès.",
+      message: "Depense creee avec succes.",
       data: {
         expense: {
           ...expense,
@@ -121,7 +139,7 @@ export async function getExpenseByIdHandler(req, res, next) {
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({
         success: false,
-        message: "ID dépense invalide."
+        message: "ID depense invalide."
       });
     }
 
@@ -130,7 +148,7 @@ export async function getExpenseByIdHandler(req, res, next) {
     if (!expense) {
       return res.status(404).json({
         success: false,
-        message: "Dépense introuvable."
+        message: "Depense introuvable."
       });
     }
 
@@ -150,7 +168,7 @@ export async function updateExpenseHandler(req, res, next) {
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({
         success: false,
-        message: "ID dépense invalide."
+        message: "ID depense invalide."
       });
     }
 
@@ -159,7 +177,7 @@ export async function updateExpenseHandler(req, res, next) {
     if (!existingExpense) {
       return res.status(404).json({
         success: false,
-        message: "Dépense introuvable."
+        message: "Depense introuvable."
       });
     }
 
@@ -173,7 +191,7 @@ export async function updateExpenseHandler(req, res, next) {
     if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: "Validation échouée.",
+        message: "Validation echouee.",
         errors
       });
     }
@@ -191,7 +209,7 @@ export async function updateExpenseHandler(req, res, next) {
 
     return res.status(200).json({
       success: true,
-      message: "Dépense mise à jour avec succès.",
+      message: "Depense mise a jour avec succes.",
       data: updatedExpense
     });
   } catch (error) {
@@ -206,7 +224,7 @@ export async function deleteExpenseHandler(req, res, next) {
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({
         success: false,
-        message: "ID dépense invalide."
+        message: "ID depense invalide."
       });
     }
 
@@ -215,13 +233,13 @@ export async function deleteExpenseHandler(req, res, next) {
     if (!deletedExpense) {
       return res.status(404).json({
         success: false,
-        message: "Dépense introuvable."
+        message: "Depense introuvable."
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "Dépense supprimée avec succès.",
+      message: "Depense supprimee avec succes.",
       data: deletedExpense
     });
   } catch (error) {

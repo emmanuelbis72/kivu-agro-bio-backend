@@ -18,14 +18,14 @@ function validateCustomerPayload(body) {
     (!Number.isInteger(Number(body.payment_terms_days)) ||
       Number(body.payment_terms_days) < 0)
   ) {
-    errors.push("Le champ 'payment_terms_days' doit être un entier >= 0.");
+    errors.push("Le champ 'payment_terms_days' doit etre un entier >= 0.");
   }
 
   if (
     body.credit_limit !== undefined &&
     (Number.isNaN(Number(body.credit_limit)) || Number(body.credit_limit) < 0)
   ) {
-    errors.push("Le champ 'credit_limit' doit être un nombre >= 0.");
+    errors.push("Le champ 'credit_limit' doit etre un nombre >= 0.");
   }
 
   if (
@@ -36,7 +36,7 @@ function validateCustomerPayload(body) {
       Number(body.receivable_account_id) <= 0)
   ) {
     errors.push(
-      "Le champ 'receivable_account_id' doit être un entier positif ou nul."
+      "Le champ 'receivable_account_id' doit etre un entier positif ou nul."
     );
   }
 
@@ -47,7 +47,7 @@ function validateCustomerPayload(body) {
     (!Number.isInteger(Number(body.warehouse_id)) ||
       Number(body.warehouse_id) <= 0)
   ) {
-    errors.push("Le champ 'warehouse_id' doit être un entier positif ou nul.");
+    errors.push("Le champ 'warehouse_id' doit etre un entier positif ou nul.");
   }
 
   return errors;
@@ -60,7 +60,7 @@ export async function createCustomerHandler(req, res, next) {
     if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: "Validation échouée.",
+        message: "Validation echouee.",
         errors
       });
     }
@@ -94,7 +94,7 @@ export async function createCustomerHandler(req, res, next) {
 
     return res.status(201).json({
       success: true,
-      message: "Client créé avec succès.",
+      message: "Client cree avec succes.",
       data: customer
     });
   } catch (error) {
@@ -175,7 +175,7 @@ export async function updateCustomerHandler(req, res, next) {
     if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: "Validation échouée.",
+        message: "Validation echouee.",
         errors
       });
     }
@@ -211,7 +211,7 @@ export async function updateCustomerHandler(req, res, next) {
 
     return res.status(200).json({
       success: true,
-      message: "Client mis à jour avec succès.",
+      message: "Client mis a jour avec succes.",
       data: updatedCustomer
     });
   } catch (error) {
@@ -241,14 +241,14 @@ export async function deleteCustomerHandler(req, res, next) {
 
     return res.status(200).json({
       success: true,
-      message: "Client supprimé avec succès.",
+      message: "Client supprime avec succes.",
       data: deletedCustomer
     });
   } catch (error) {
     if (error.code === "23503") {
       return res.status(409).json({
         success: false,
-        message: "Impossible de supprimer ce client car il est lié à des factures."
+        message: "Impossible de supprimer ce client car il est lie a des factures."
       });
     }
 

@@ -7,6 +7,12 @@ import {
   deleteProduct
 } from "../models/product.model.js";
 
+const ALLOWED_PRODUCT_ROLES = [
+  "finished_product",
+  "raw_material",
+  "packaging_material"
+];
+
 function validateProductPayload(body) {
   const errors = [];
 
@@ -38,6 +44,15 @@ function validateProductPayload(body) {
       Number(body.alert_threshold) < 0)
   ) {
     errors.push("Le champ 'alert_threshold' doit être un entier >= 0.");
+  }
+
+  if (
+    body.product_role !== undefined &&
+    !ALLOWED_PRODUCT_ROLES.includes(String(body.product_role).trim().toLowerCase())
+  ) {
+    errors.push(
+      "Le champ 'product_role' est invalide. Valeurs autorisées: finished_product, raw_material, packaging_material."
+    );
   }
 
   if (
@@ -77,6 +92,8 @@ export async function createProductHandler(req, res, next) {
       category: req.body.category?.trim(),
       sku: req.body.sku.trim(),
       barcode: req.body.barcode?.trim(),
+      product_role:
+        req.body.product_role?.trim().toLowerCase() || "finished_product",
       unit: req.body.unit?.trim(),
       cost_price: Number(req.body.cost_price ?? 0),
       selling_price: Number(req.body.selling_price ?? 0),
@@ -194,6 +211,8 @@ export async function updateProductHandler(req, res, next) {
       category: mergedPayload.category?.trim(),
       sku: String(mergedPayload.sku).trim(),
       barcode: mergedPayload.barcode?.trim(),
+      product_role:
+        mergedPayload.product_role?.trim().toLowerCase() || "finished_product",
       unit: mergedPayload.unit?.trim(),
       cost_price: Number(mergedPayload.cost_price ?? 0),
       selling_price: Number(mergedPayload.selling_price ?? 0),

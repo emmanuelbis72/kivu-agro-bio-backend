@@ -61,10 +61,14 @@ export async function getInvoiceById(id) {
       ii.invoice_id,
       ii.product_id,
       ii.quantity,
+      ii.stock_form,
+      ii.package_size,
+      ii.package_unit,
       ii.unit_price,
       ii.line_total,
       p.name AS product_name,
       p.sku,
+      p.product_role,
       p.unit,
       p.cost_price,
       (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
@@ -211,15 +215,33 @@ export async function createInvoiceWithItems(data) {
     const insertedItems = [];
 
     for (const item of data.items) {
+      const exitResult = await performStockExit({
+        warehouse_id: data.warehouse_id,
+        product_id: item.product_id,
+        quantity: item.quantity,
+        stock_form: item.stock_form || undefined,
+        package_size: item.package_size ?? undefined,
+        package_unit: item.package_unit ?? undefined,
+        unit_cost: item.unit_cost ?? 0,
+        reference_type: "invoice",
+        reference_id: invoice.id,
+        notes: `Sortie liee a la facture ${data.invoice_number}`,
+        created_by: data.created_by || null,
+        client
+      });
+
       const itemQuery = `
         INSERT INTO invoice_items (
           invoice_id,
           product_id,
           quantity,
+          stock_form,
+          package_size,
+          package_unit,
           unit_price,
           line_total
         )
-        VALUES ($1,$2,$3,$4,$5)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
         RETURNING *;
       `;
 
@@ -227,6 +249,9 @@ export async function createInvoiceWithItems(data) {
         invoice.id,
         item.product_id,
         item.quantity,
+        exitResult.movement.stock_form || null,
+        exitResult.movement.package_size ?? null,
+        exitResult.movement.package_unit ?? null,
         item.unit_price,
         item.line_total
       ];
@@ -235,19 +260,10 @@ export async function createInvoiceWithItems(data) {
 
       insertedItems.push({
         ...itemResult.rows[0],
-        unit_cost: Number(item.unit_cost ?? 0)
-      });
-
-      await performStockExit({
-        warehouse_id: data.warehouse_id,
-        product_id: item.product_id,
-        quantity: item.quantity,
-        unit_cost: item.unit_cost ?? 0,
-        reference_type: "invoice",
-        reference_id: invoice.id,
-        notes: `Sortie liée à la facture ${data.invoice_number}`,
-        created_by: data.created_by || null,
-        client
+        unit_cost: Number(item.unit_cost ?? 0),
+        stock_form: exitResult.movement.stock_form || null,
+        package_size: exitResult.movement.package_size ?? null,
+        package_unit: exitResult.movement.package_unit ?? null
       });
     }
 

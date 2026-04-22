@@ -103,6 +103,13 @@ export async function createOrUpdateRecipeItemHandler(req, res, next) {
       });
     }
 
+    if (finishedProduct.product_role !== "finished_product") {
+      return res.status(400).json({
+        success: false,
+        message: "La recette doit cibler un produit fini."
+      });
+    }
+
     const componentProduct = await getProductById(component_product_id);
     if (!componentProduct) {
       return res.status(404).json({
@@ -200,6 +207,13 @@ export async function createProductionBatchHandler(req, res, next) {
       return res.status(404).json({
         success: false,
         message: "Produit fini introuvable."
+      });
+    }
+
+    if (finishedProduct.product_role !== "finished_product") {
+      return res.status(400).json({
+        success: false,
+        message: "Le batch de production doit produire un produit fini."
       });
     }
 
