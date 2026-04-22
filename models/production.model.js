@@ -17,7 +17,7 @@ function convertToBaseQuantity(quantity, unit) {
   return numeric;
 }
 
-async function getProductByIdWithProductionFields(client, productId) {
+async function getProductById(client, productId) {
   const result = await client.query(
     `
     SELECT *
@@ -31,12 +31,14 @@ async function getProductByIdWithProductionFields(client, productId) {
   return result.rows[0] || null;
 }
 
-async function getWarehouseStockItem(client, warehouseId, productId) {
+async function getBulkStockItem(client, warehouseId, productId) {
   const result = await client.query(
     `
     SELECT *
     FROM warehouse_stock
-    WHERE warehouse_id = $1 AND product_id = $2
+    WHERE warehouse_id = $1
+      AND product_id = $2
+      AND stock_form = 'bulk'
     LIMIT 1;
     `,
     [warehouseId, productId]
@@ -45,14 +47,21 @@ async function getWarehouseStockItem(client, warehouseId, productId) {
   return result.rows[0] || null;
 }
 
-async function ensureWarehouseStockItem(client, warehouseId, productId) {
-  let stockItem = await getWarehouseStockItem(client, warehouseId, productId);
+async function ensureBulkStockItem(client, warehouseId, productId) {
+  let stockItem = await getBulkStockItem(client, warehouseId, productId);
 
   if (!stockItem) {
     const created = await client.query(
       `
-      INSERT INTO warehouse_stock (warehouse_id, product_id, quantity)
-      VALUES ($1, $2, 0)
+      INSERT INTO warehouse_stock (
+        warehouse_id,
+        product_id,
+        quantity,
+        stock_form,
+        package_size,
+        package_unit
+      )
+      VALUES ($1, $2, 0, 'bulk', NULL, NULL)
       RETURNING *;
       `,
       [warehouseId, productId]
@@ -63,15 +72,15 @@ async function ensureWarehouseStockItem(client, warehouseId, productId) {
   return stockItem;
 }
 
-async function updateWarehouseStockQuantity(client, warehouseId, productId, quantity) {
+async function updateStockQuantity(client, stockItemId, quantity) {
   const result = await client.query(
     `
     UPDATE warehouse_stock
     SET quantity = $1, updated_at = NOW()
-    WHERE warehouse_id = $2 AND product_id = $3
+    WHERE id = $2
     RETURNING *;
     `,
-    [quantity, warehouseId, productId]
+    [quantity, stockItemId]
   );
 
   return result.rows[0] || null;
@@ -85,13 +94,16 @@ async function createStockMovement(client, data) {
       warehouse_id,
       movement_type,
       quantity,
+      stock_form,
+      package_size,
+      package_unit,
       unit_cost,
       reference_type,
       reference_id,
       notes,
       created_by
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
     RETURNING *;
     `,
     [
@@ -99,6 +111,9 @@ async function createStockMovement(client, data) {
       data.warehouse_id,
       data.movement_type,
       data.quantity,
+      "bulk",
+      null,
+      null,
       data.unit_cost ?? 0,
       data.reference_type || null,
       data.reference_id || null,
@@ -123,10 +138,10 @@ export async function getRecipesByFinishedProduct(finishedProductId) {
       pr.updated_at,
       fp.name AS finished_product_name,
       fp.sku AS finished_product_sku,
+      fp.unit AS finished_product_unit,
       cp.name AS component_product_name,
       cp.sku AS component_product_sku,
-      cp.product_type AS component_product_type,
-      cp.stock_unit AS component_stock_unit
+      cp.unit AS component_unit
     FROM product_recipes pr
     INNER JOIN products fp ON fp.id = pr.finished_product_id
     INNER JOIN products cp ON cp.id = pr.component_product_id
@@ -214,13 +229,13 @@ export async function getProductionBatches(limit = 100) {
       w.city AS warehouse_city,
       p.name AS finished_product_name,
       p.sku AS finished_product_sku,
-      p.stock_unit AS finished_product_stock_unit,
+      p.unit AS finished_product_unit,
       COALESCE(COUNT(pbi.id), 0)::int AS components_count
     FROM production_batches pb
     INNER JOIN warehouses w ON w.id = pb.warehouse_id
     INNER JOIN products p ON p.id = pb.finished_product_id
     LEFT JOIN production_batch_items pbi ON pbi.batch_id = pb.id
-    GROUP BY pb.id, w.name, w.city, p.name, p.sku, p.stock_unit
+    GROUP BY pb.id, w.name, w.city, p.name, p.sku, p.unit
     ORDER BY pb.created_at DESC
     LIMIT $1;
     `,
@@ -239,8 +254,7 @@ export async function getProductionBatchById(batchId) {
       w.city AS warehouse_city,
       p.name AS finished_product_name,
       p.sku AS finished_product_sku,
-      p.stock_unit AS finished_product_stock_unit,
-      p.product_type AS finished_product_type
+      p.unit AS finished_product_unit
     FROM production_batches pb
     INNER JOIN warehouses w ON w.id = pb.warehouse_id
     INNER JOIN products p ON p.id = pb.finished_product_id
@@ -267,8 +281,7 @@ export async function getProductionBatchById(batchId) {
       pbi.unit_cost,
       cp.name AS component_product_name,
       cp.sku AS component_product_sku,
-      cp.product_type AS component_product_type,
-      cp.stock_unit AS component_stock_unit
+      cp.unit AS component_unit
     FROM production_batch_items pbi
     INNER JOIN products cp ON cp.id = pbi.component_product_id
     WHERE pbi.batch_id = $1
@@ -289,22 +302,11 @@ export async function createProductionBatch(data) {
   try {
     await client.query("BEGIN");
 
-    const finishedProduct = await getProductByIdWithProductionFields(
-      client,
-      data.finished_product_id
-    );
+    const finishedProduct = await getProductById(client, data.finished_product_id);
 
     if (!finishedProduct) {
       const error = new Error("Produit fini introuvable.");
       error.statusCode = 404;
-      throw error;
-    }
-
-    if (finishedProduct.product_type !== "finished_product") {
-      const error = new Error(
-        "Le produit à fabriquer doit être de type 'finished_product'."
-      );
-      error.statusCode = 400;
       throw error;
     }
 
@@ -321,7 +323,7 @@ export async function createProductionBatch(data) {
     const recipeRows = recipesResult.rows;
 
     if (!recipeRows.length) {
-      const error = new Error("Aucune recette définie pour ce produit fini.");
+      const error = new Error("Aucune recette définie pour ce produit.");
       error.statusCode = 400;
       throw error;
     }
@@ -359,10 +361,7 @@ export async function createProductionBatch(data) {
     const consumedItems = [];
 
     for (const recipe of recipeRows) {
-      const componentProduct = await getProductByIdWithProductionFields(
-        client,
-        recipe.component_product_id
-      );
+      const componentProduct = await getProductById(client, recipe.component_product_id);
 
       if (!componentProduct) {
         const error = new Error(
@@ -377,17 +376,17 @@ export async function createProductionBatch(data) {
         producedQty;
 
       const recipeBaseUnit = normalizeUnitToBase(recipe.quantity_unit);
-      const componentBaseUnit = normalizeUnitToBase(componentProduct.stock_unit);
+      const componentBaseUnit = normalizeUnitToBase(componentProduct.unit);
 
       if (recipeBaseUnit !== componentBaseUnit) {
         const error = new Error(
-          `Incohérence d'unité pour ${componentProduct.name}: recette en ${recipe.quantity_unit}, stock en ${componentProduct.stock_unit}.`
+          `Incohérence d'unité pour ${componentProduct.name}: recette en ${recipe.quantity_unit}, produit en ${componentProduct.unit}.`
         );
         error.statusCode = 400;
         throw error;
       }
 
-      const sourceStock = await ensureWarehouseStockItem(
+      const sourceStock = await ensureBulkStockItem(
         client,
         data.warehouse_id,
         componentProduct.id
@@ -395,19 +394,16 @@ export async function createProductionBatch(data) {
 
       if (Number(sourceStock.quantity) < Number(requiredQtyBase)) {
         const error = new Error(
-          `Stock insuffisant pour ${componentProduct.name}. Requis: ${requiredQtyBase}, disponible: ${sourceStock.quantity}.`
+          `Stock vrac insuffisant pour ${componentProduct.name}. Requis: ${requiredQtyBase}, disponible: ${sourceStock.quantity}.`
         );
         error.statusCode = 400;
         throw error;
       }
 
-      const newSourceQty = Number(sourceStock.quantity) - Number(requiredQtyBase);
-
-      await updateWarehouseStockQuantity(
+      await updateStockQuantity(
         client,
-        data.warehouse_id,
-        componentProduct.id,
-        newSourceQty
+        sourceStock.id,
+        Number(sourceStock.quantity) - Number(requiredQtyBase)
       );
 
       const batchItemResult = await client.query(
@@ -441,27 +437,21 @@ export async function createProductionBatch(data) {
         unit_cost: Number(componentProduct.cost_price || 0),
         reference_type: "production_batch",
         reference_id: batch.id,
-        notes:
-          data.notes ||
-          `Consommation composant pour batch ${batchNumber}`,
+        notes: data.notes || `Consommation composant pour batch ${batchNumber}`,
         created_by: data.created_by
       });
     }
 
-    const finishedStock = await ensureWarehouseStockItem(
+    const finishedStock = await ensureBulkStockItem(
       client,
       data.warehouse_id,
       data.finished_product_id
     );
 
-    const newFinishedQty =
-      Number(finishedStock.quantity) + Number(producedQty);
-
-    await updateWarehouseStockQuantity(
+    await updateStockQuantity(
       client,
-      data.warehouse_id,
-      data.finished_product_id,
-      newFinishedQty
+      finishedStock.id,
+      Number(finishedStock.quantity) + Number(producedQty)
     );
 
     await createStockMovement(client, {
@@ -472,8 +462,7 @@ export async function createProductionBatch(data) {
       unit_cost: Number(finishedProduct.cost_price || 0),
       reference_type: "production_batch",
       reference_id: batch.id,
-      notes:
-        data.notes || `Production terminée batch ${batchNumber}`,
+      notes: data.notes || `Production terminée batch ${batchNumber}`,
       created_by: data.created_by
     });
 

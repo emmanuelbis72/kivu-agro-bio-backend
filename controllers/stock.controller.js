@@ -9,15 +9,64 @@ import {
   performStockEntry,
   performStockExit,
   performStockAdjustment,
-  performStockTransfer
+  performStockTransfer,
+  performBulkToPackageTransform,
+  performStockMixture
 } from "../models/stock.model.js";
+
+const ALLOWED_STOCK_FORMS = ["bulk", "package"];
+const ALLOWED_UNITS = ["g", "kg", "ml", "l", "unit", "piece"];
 
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
 }
 
-function isNonNegativeInteger(value) {
+function isPositiveNumber(value) {
+  return Number.isFinite(Number(value)) && Number(value) > 0;
+}
+
+function isNonNegativeNumber(value) {
   return Number.isFinite(Number(value)) && Number(value) >= 0;
+}
+
+function normalizeStockForm(value) {
+  return String(value || "bulk").trim().toLowerCase();
+}
+
+function normalizeUnit(value) {
+  return value ? String(value).trim().toLowerCase() : null;
+}
+
+function parseVariantPayload(body) {
+  const stock_form = normalizeStockForm(body.stock_form);
+  const package_size =
+    body.package_size === undefined || body.package_size === null || body.package_size === ""
+      ? null
+      : Number(body.package_size);
+  const package_unit = normalizeUnit(body.package_unit);
+
+  return {
+    stock_form,
+    package_size,
+    package_unit
+  };
+}
+
+function validateVariant(variant, errors, label = "stock") {
+  if (!ALLOWED_STOCK_FORMS.includes(variant.stock_form)) {
+    errors.push(`Le champ '${label}_form' / 'stock_form' est invalide.`);
+    return;
+  }
+
+  if (variant.stock_form === "package") {
+    if (!isPositiveNumber(variant.package_size)) {
+      errors.push("Le champ 'package_size' doit être > 0 pour un stock en paquet.");
+    }
+
+    if (!variant.package_unit || !ALLOWED_UNITS.includes(variant.package_unit)) {
+      errors.push("Le champ 'package_unit' est obligatoire et invalide pour un stock en paquet.");
+    }
+  }
 }
 
 async function validateWarehouseAndProduct(warehouseId, productId) {
@@ -43,25 +92,28 @@ export async function createStockEntryHandler(req, res, next) {
     const warehouse_id = Number(req.body.warehouse_id);
     const product_id = Number(req.body.product_id);
     const quantity = Number(req.body.quantity);
+    const variant = parseVariantPayload(req.body);
+    const errors = [];
 
     if (!isPositiveInteger(warehouse_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Le champ 'warehouse_id' doit être un entier positif."
-      });
+      errors.push("Le champ 'warehouse_id' doit être un entier positif.");
     }
 
     if (!isPositiveInteger(product_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Le champ 'product_id' doit être un entier positif."
-      });
+      errors.push("Le champ 'product_id' doit être un entier positif.");
     }
 
-    if (!isPositiveInteger(quantity)) {
+    if (!isPositiveNumber(quantity)) {
+      errors.push("Le champ 'quantity' doit être un nombre > 0.");
+    }
+
+    validateVariant(variant, errors);
+
+    if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: "Le champ 'quantity' doit être un entier positif."
+        message: "Validation échouée.",
+        errors
       });
     }
 
@@ -71,6 +123,7 @@ export async function createStockEntryHandler(req, res, next) {
       warehouse_id,
       product_id,
       quantity,
+      ...variant,
       unit_cost: Number(req.body.unit_cost ?? 0),
       reference_type: req.body.reference_type?.trim(),
       reference_id: req.body.reference_id ? Number(req.body.reference_id) : null,
@@ -93,25 +146,40 @@ export async function createStockExitHandler(req, res, next) {
     const warehouse_id = Number(req.body.warehouse_id);
     const product_id = Number(req.body.product_id);
     const quantity = Number(req.body.quantity);
+    const variant =
+      req.body.stock_form === undefined
+        ? {}
+        : parseVariantPayload(req.body);
+    const errors = [];
 
     if (!isPositiveInteger(warehouse_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Le champ 'warehouse_id' doit être un entier positif."
-      });
+      errors.push("Le champ 'warehouse_id' doit être un entier positif.");
     }
 
     if (!isPositiveInteger(product_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Le champ 'product_id' doit être un entier positif."
-      });
+      errors.push("Le champ 'product_id' doit être un entier positif.");
     }
 
-    if (!isPositiveInteger(quantity)) {
+    if (!isPositiveNumber(quantity)) {
+      errors.push("Le champ 'quantity' doit être un nombre > 0.");
+    }
+
+    if (variant.stock_form) {
+      validateVariant(
+        {
+          stock_form: variant.stock_form,
+          package_size: variant.package_size,
+          package_unit: variant.package_unit
+        },
+        errors
+      );
+    }
+
+    if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: "Le champ 'quantity' doit être un entier positif."
+        message: "Validation échouée.",
+        errors
       });
     }
 
@@ -121,6 +189,7 @@ export async function createStockExitHandler(req, res, next) {
       warehouse_id,
       product_id,
       quantity,
+      ...variant,
       unit_cost: Number(req.body.unit_cost ?? 0),
       reference_type: req.body.reference_type?.trim(),
       reference_id: req.body.reference_id ? Number(req.body.reference_id) : null,
@@ -143,25 +212,28 @@ export async function createStockAdjustmentHandler(req, res, next) {
     const warehouse_id = Number(req.body.warehouse_id);
     const product_id = Number(req.body.product_id);
     const new_quantity = Number(req.body.new_quantity);
+    const variant = parseVariantPayload(req.body);
+    const errors = [];
 
     if (!isPositiveInteger(warehouse_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Le champ 'warehouse_id' doit être un entier positif."
-      });
+      errors.push("Le champ 'warehouse_id' doit être un entier positif.");
     }
 
     if (!isPositiveInteger(product_id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Le champ 'product_id' doit être un entier positif."
-      });
+      errors.push("Le champ 'product_id' doit être un entier positif.");
     }
 
-    if (!isNonNegativeInteger(new_quantity)) {
+    if (!isNonNegativeNumber(new_quantity)) {
+      errors.push("Le champ 'new_quantity' doit être un nombre >= 0.");
+    }
+
+    validateVariant(variant, errors);
+
+    if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: "Le champ 'new_quantity' doit être un nombre >= 0."
+        message: "Validation échouée.",
+        errors
       });
     }
 
@@ -171,6 +243,7 @@ export async function createStockAdjustmentHandler(req, res, next) {
       warehouse_id,
       product_id,
       new_quantity,
+      ...variant,
       unit_cost: Number(req.body.unit_cost ?? 0),
       reference_type: req.body.reference_type?.trim(),
       reference_id: req.body.reference_id ? Number(req.body.reference_id) : null,
@@ -195,7 +268,6 @@ export async function createStockTransferHandler(req, res, next) {
     const transfer_date = String(
       req.body.transfer_date || new Date().toISOString().split("T")[0]
     ).trim();
-
     const items = Array.isArray(req.body.items) ? req.body.items : [];
 
     if (!isPositiveInteger(source_warehouse_id)) {
@@ -247,19 +319,25 @@ export async function createStockTransferHandler(req, res, next) {
     for (const rawItem of items) {
       const product_id = Number(rawItem.product_id);
       const quantity = Number(rawItem.quantity);
+      const variant = parseVariantPayload(rawItem);
       const unit_cost = Number(rawItem.unit_cost ?? 0);
+      const errors = [];
 
       if (!isPositiveInteger(product_id)) {
-        return res.status(400).json({
-          success: false,
-          message: "Chaque ligne doit contenir un 'product_id' valide."
-        });
+        errors.push("Chaque ligne doit contenir un 'product_id' valide.");
       }
 
-      if (!isPositiveInteger(quantity)) {
+      if (!isPositiveNumber(quantity)) {
+        errors.push("Chaque ligne doit contenir une 'quantity' > 0.");
+      }
+
+      validateVariant(variant, errors);
+
+      if (errors.length > 0) {
         return res.status(400).json({
           success: false,
-          message: "Chaque ligne doit contenir une 'quantity' entière positive."
+          message: "Validation échouée sur une ligne de transfert.",
+          errors
         });
       }
 
@@ -268,6 +346,7 @@ export async function createStockTransferHandler(req, res, next) {
       normalizedItems.push({
         product_id,
         quantity,
+        ...variant,
         unit_cost,
         notes: rawItem.notes?.trim() || null
       });
@@ -285,6 +364,181 @@ export async function createStockTransferHandler(req, res, next) {
     return res.status(201).json({
       success: true,
       message: "Transfert inter-dépôts enregistré avec succès.",
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createBulkToPackageTransformHandler(req, res, next) {
+  try {
+    const warehouse_id = Number(req.body.warehouse_id);
+    const source_product_id = Number(req.body.source_product_id);
+    const target_product_id = Number(req.body.target_product_id);
+    const source_quantity = Number(req.body.source_quantity);
+    const target_quantity = Number(req.body.target_quantity);
+    const package_size = Number(req.body.package_size);
+    const package_unit = normalizeUnit(req.body.package_unit);
+    const errors = [];
+
+    if (!isPositiveInteger(warehouse_id)) {
+      errors.push("Le champ 'warehouse_id' est invalide.");
+    }
+
+    if (!isPositiveInteger(source_product_id)) {
+      errors.push("Le champ 'source_product_id' est invalide.");
+    }
+
+    if (!isPositiveInteger(target_product_id)) {
+      errors.push("Le champ 'target_product_id' est invalide.");
+    }
+
+    if (!isPositiveNumber(source_quantity)) {
+      errors.push("Le champ 'source_quantity' doit être > 0.");
+    }
+
+    if (!isPositiveNumber(target_quantity)) {
+      errors.push("Le champ 'target_quantity' doit être > 0.");
+    }
+
+    if (!isPositiveNumber(package_size)) {
+      errors.push("Le champ 'package_size' doit être > 0.");
+    }
+
+    if (!package_unit || !ALLOWED_UNITS.includes(package_unit)) {
+      errors.push("Le champ 'package_unit' est invalide.");
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation échouée.",
+        errors
+      });
+    }
+
+    await validateWarehouseAndProduct(warehouse_id, source_product_id);
+    await validateWarehouseAndProduct(warehouse_id, target_product_id);
+
+    const result = await performBulkToPackageTransform({
+      warehouse_id,
+      source_product_id,
+      target_product_id,
+      source_quantity,
+      target_quantity,
+      package_size,
+      package_unit,
+      unit_cost: Number(req.body.unit_cost ?? 0),
+      notes: req.body.notes?.trim() || null,
+      created_by: req.body.created_by ? Number(req.body.created_by) : null
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Transformation du vrac en paquet enregistrée avec succès.",
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createStockMixtureHandler(req, res, next) {
+  try {
+    const warehouse_id = Number(req.body.warehouse_id);
+    const target_product_id = Number(req.body.target_product_id);
+    const target_quantity = Number(req.body.target_quantity);
+    const target_stock_form = normalizeStockForm(req.body.target_stock_form || "bulk");
+    const package_size =
+      req.body.package_size === undefined || req.body.package_size === null || req.body.package_size === ""
+        ? null
+        : Number(req.body.package_size);
+    const package_unit = normalizeUnit(req.body.package_unit);
+    const components = Array.isArray(req.body.components) ? req.body.components : [];
+    const errors = [];
+
+    if (!isPositiveInteger(warehouse_id)) {
+      errors.push("Le champ 'warehouse_id' est invalide.");
+    }
+
+    if (!isPositiveInteger(target_product_id)) {
+      errors.push("Le champ 'target_product_id' est invalide.");
+    }
+
+    if (!isPositiveNumber(target_quantity)) {
+      errors.push("Le champ 'target_quantity' doit être > 0.");
+    }
+
+    if (!components.length) {
+      errors.push("Le mélange doit contenir au moins un composant.");
+    }
+
+    validateVariant(
+      {
+        stock_form: target_stock_form,
+        package_size,
+        package_unit
+      },
+      errors,
+      "target_stock"
+    );
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation échouée.",
+        errors
+      });
+    }
+
+    await validateWarehouseAndProduct(warehouse_id, target_product_id);
+
+    const normalizedComponents = [];
+
+    for (const rawComponent of components) {
+      const product_id = Number(rawComponent.product_id);
+      const quantity = Number(rawComponent.quantity);
+
+      if (!isPositiveInteger(product_id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Chaque composant doit contenir un 'product_id' valide."
+        });
+      }
+
+      if (!isPositiveNumber(quantity)) {
+        return res.status(400).json({
+          success: false,
+          message: "Chaque composant doit contenir une 'quantity' > 0."
+        });
+      }
+
+      await validateWarehouseAndProduct(warehouse_id, product_id);
+
+      normalizedComponents.push({
+        product_id,
+        quantity,
+        unit_cost: Number(rawComponent.unit_cost ?? 0)
+      });
+    }
+
+    const result = await performStockMixture({
+      warehouse_id,
+      target_product_id,
+      target_quantity,
+      target_stock_form,
+      package_size,
+      package_unit,
+      unit_cost: Number(req.body.unit_cost ?? 0),
+      notes: req.body.notes?.trim() || null,
+      created_by: req.body.created_by ? Number(req.body.created_by) : null,
+      components: normalizedComponents
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Création du produit mixture enregistrée avec succès.",
       data: result
     });
   } catch (error) {
@@ -343,11 +597,9 @@ export async function getStockMovementsHandler(req, res, next) {
     const warehouseId = req.query.warehouse_id
       ? Number(req.query.warehouse_id)
       : null;
-
     const productId = req.query.product_id
       ? Number(req.query.product_id)
       : null;
-
     const limit = req.query.limit ? Number(req.query.limit) : 100;
 
     if (warehouseId !== null && !isPositiveInteger(warehouseId)) {
