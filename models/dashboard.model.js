@@ -442,6 +442,7 @@ export async function getStockVariationByProduct(filters = {}, limit = 10) {
       sm.product_id,
       p.name AS product_name,
       p.sku,
+      p.product_role,
       p.unit,
       COUNT(*)::int AS movements_count,
       COALESCE(SUM(CASE

@@ -251,6 +251,7 @@ export async function getWarehouseStock(warehouseId) {
       p.name AS product_name,
       p.sku,
       p.category,
+      p.product_role,
       p.unit,
       p.alert_threshold,
       w.name AS warehouse_name,
@@ -281,6 +282,7 @@ export async function getAllStockSummary() {
       p.name AS product_name,
       p.sku,
       p.category,
+      p.product_role,
       p.unit,
       p.alert_threshold,
       w.name AS warehouse_name,
@@ -321,6 +323,7 @@ export async function getStockMovements({ warehouseId, productId, limit = 100 })
       sm.*,
       p.name AS product_name,
       p.sku,
+      p.product_role,
       p.unit,
       w.name AS warehouse_name,
       w.city AS warehouse_city
@@ -407,6 +410,7 @@ export async function getStockTransferById(transferId) {
         sti.unit_cost,
         p.name AS product_name,
         p.sku,
+        p.product_role,
         p.unit
       FROM stock_transfer_items sti
       INNER JOIN products p ON p.id = sti.product_id
