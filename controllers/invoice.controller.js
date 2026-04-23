@@ -145,33 +145,6 @@ export async function createInvoiceHandler(req, res, next) {
         });
       }
 
-      const stock_form = normalizeStockForm(rawItem.stock_form);
-      const package_size =
-        rawItem.package_size === undefined ||
-        rawItem.package_size === null ||
-        rawItem.package_size === ""
-          ? null
-          : Number(rawItem.package_size);
-      const package_unit = normalizeUnit(rawItem.package_unit);
-
-      if (stock_form && !["bulk", "package"].includes(stock_form)) {
-        return res.status(400).json({
-          success: false,
-          message: "Le champ 'stock_form' est invalide sur une ligne de facture."
-        });
-      }
-
-      if (
-        stock_form === "package" &&
-        (!Number.isFinite(package_size) || package_size <= 0 || !package_unit)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Pour une ligne de facture en paquet, 'package_size' et 'package_unit' sont obligatoires."
-        });
-      }
-
       const line_total = Number(quantity) * Number(unit_price);
       subtotal += line_total;
 
@@ -181,9 +154,9 @@ export async function createInvoiceHandler(req, res, next) {
         unit_price,
         line_total,
         unit_cost: Number(product.cost_price ?? 0),
-        stock_form,
-        package_size,
-        package_unit
+        stock_form: null,
+        package_size: null,
+        package_unit: null
       });
     }
 
@@ -412,33 +385,6 @@ export async function updateInvoiceHandler(req, res, next) {
         });
       }
 
-      const stock_form = normalizeStockForm(rawItem.stock_form);
-      const package_size =
-        rawItem.package_size === undefined ||
-        rawItem.package_size === null ||
-        rawItem.package_size === ""
-          ? null
-          : Number(rawItem.package_size);
-      const package_unit = normalizeUnit(rawItem.package_unit);
-
-      if (stock_form && !["bulk", "package"].includes(stock_form)) {
-        return res.status(400).json({
-          success: false,
-          message: "Le champ 'stock_form' est invalide sur une ligne de facture."
-        });
-      }
-
-      if (
-        stock_form === "package" &&
-        (!Number.isFinite(package_size) || package_size <= 0 || !package_unit)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Pour une ligne de facture en paquet, 'package_size' et 'package_unit' sont obligatoires."
-        });
-      }
-
       const line_total = Number(quantity) * Number(unit_price);
       subtotal += line_total;
 
@@ -448,9 +394,9 @@ export async function updateInvoiceHandler(req, res, next) {
         unit_price,
         line_total,
         unit_cost: Number(product.cost_price ?? 0),
-        stock_form,
-        package_size,
-        package_unit
+        stock_form: null,
+        package_size: null,
+        package_unit: null
       });
     }
 
