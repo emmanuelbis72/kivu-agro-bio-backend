@@ -6,7 +6,11 @@
   "type": "module",
   "scripts": {
     "dev": "node server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "import:payments:kab": "node scripts/import-payments-kab.mjs",
+    "import:payments:kab:dry-run": "node scripts/import-payments-kab.mjs --dry-run",
+    "list:unallocated-payments": "node scripts/list-unallocated-payments.mjs",
+    "allocate:payment": "node scripts/allocate-unallocated-payment.mjs"
   },
   "engines": {
     "node": ">=22.0.0"
