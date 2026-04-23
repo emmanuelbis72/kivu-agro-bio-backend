@@ -1,6 +1,19 @@
 import { pool } from "../config/db.js";
+import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
+
+async function ensureCustomersSchema(executor = pool) {
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS warehouse_id INTEGER REFERENCES warehouses(id) ON DELETE SET NULL;
+  `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS receivable_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL;
+  `);
+}
 
 export async function createCustomer(data) {
+  await ensureCustomersSchema(pool);
   const query = `
     INSERT INTO customers (
       customer_type,
@@ -54,7 +67,11 @@ export async function getAllCustomers() {
     LEFT JOIN warehouses w ON w.id = c.warehouse_id
     ORDER BY c.created_at DESC;
   `;
-  const result = await pool.query(query);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensureCustomersSchema(pool),
+    query
+  });
   return result.rows;
 }
 
@@ -72,11 +89,17 @@ export async function getCustomerById(id) {
     WHERE c.id = $1
     LIMIT 1;
   `;
-  const result = await pool.query(query, [id]);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensureCustomersSchema(pool),
+    query,
+    values: [id]
+  });
   return result.rows[0] || null;
 }
 
 export async function updateCustomer(id, data) {
+  await ensureCustomersSchema(pool);
   const query = `
     UPDATE customers
     SET

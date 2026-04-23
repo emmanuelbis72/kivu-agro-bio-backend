@@ -1,7 +1,15 @@
 import { pool } from "../config/db.js";
+import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 
 function getExecutor(client) {
   return client || pool;
+}
+
+async function ensureProductsSchema(executor = pool) {
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS product_role VARCHAR(30) NOT NULL DEFAULT 'finished_product';
+  `);
 }
 
 export async function createProduct(data) {
@@ -40,6 +48,7 @@ export async function createProduct(data) {
     data.sales_account_id ?? null
   ];
 
+  await ensureProductsSchema(executor);
   const result = await executor.query(query, values);
   return result.rows[0];
 }
@@ -50,7 +59,11 @@ export async function getAllProducts() {
     FROM products
     ORDER BY created_at DESC;
   `;
-  const result = await pool.query(query);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensureProductsSchema(pool),
+    query
+  });
   return result.rows;
 }
 
@@ -61,7 +74,12 @@ export async function getProductById(id) {
     WHERE id = $1
     LIMIT 1;
   `;
-  const result = await pool.query(query, [id]);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensureProductsSchema(pool),
+    query,
+    values: [id]
+  });
   return result.rows[0] || null;
 }
 
@@ -72,7 +90,12 @@ export async function getProductBySku(sku) {
     WHERE sku = $1
     LIMIT 1;
   `;
-  const result = await pool.query(query, [sku]);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensureProductsSchema(pool),
+    query,
+    values: [sku]
+  });
   return result.rows[0] || null;
 }
 
@@ -114,6 +137,7 @@ export async function updateProduct(id, data) {
     id
   ];
 
+  await ensureProductsSchema(executor);
   const result = await executor.query(query, values);
   return result.rows[0] || null;
 }

@@ -1,5 +1,6 @@
 import { pool } from "../config/db.js";
 import { createProduct as createProductRecord } from "./product.model.js";
+import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 
 const STOCK_FORMS = {
   BULK: "bulk",
@@ -41,6 +42,37 @@ async function getClient(externalClient) {
   }
 
   return { client: await pool.connect(), shouldManageTransaction: true };
+}
+
+async function ensureStockSchema(executor = pool) {
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS product_role VARCHAR(30) NOT NULL DEFAULT 'finished_product';
+  `);
+  await executor.query(`
+    ALTER TABLE warehouse_stock
+    ADD COLUMN IF NOT EXISTS stock_form VARCHAR(20) NOT NULL DEFAULT 'bulk';
+  `);
+  await executor.query(`
+    ALTER TABLE warehouse_stock
+    ADD COLUMN IF NOT EXISTS package_size NUMERIC(14,2);
+  `);
+  await executor.query(`
+    ALTER TABLE warehouse_stock
+    ADD COLUMN IF NOT EXISTS package_unit VARCHAR(20);
+  `);
+  await executor.query(`
+    ALTER TABLE stock_movements
+    ADD COLUMN IF NOT EXISTS stock_form VARCHAR(20) NOT NULL DEFAULT 'bulk';
+  `);
+  await executor.query(`
+    ALTER TABLE stock_movements
+    ADD COLUMN IF NOT EXISTS package_size NUMERIC(14,2);
+  `);
+  await executor.query(`
+    ALTER TABLE stock_movements
+    ADD COLUMN IF NOT EXISTS package_unit VARCHAR(20);
+  `);
 }
 
 async function getProductRecord(client, productId) {
@@ -236,8 +268,7 @@ async function createStockMovement(client, data) {
 }
 
 export async function getWarehouseStock(warehouseId) {
-  const result = await pool.query(
-    `
+  const query = `
     SELECT
       ws.id,
       ws.warehouse_id,
@@ -261,16 +292,20 @@ export async function getWarehouseStock(warehouseId) {
     INNER JOIN warehouses w ON w.id = ws.warehouse_id
     WHERE ws.warehouse_id = $1
     ORDER BY p.name ASC, ws.stock_form ASC, COALESCE(ws.package_size, 0) ASC;
-    `,
-    [warehouseId]
-  );
+    `;
+
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensureStockSchema(pool),
+    query,
+    values: [warehouseId]
+  });
 
   return result.rows;
 }
 
 export async function getAllStockSummary() {
-  const result = await pool.query(
-    `
+  const query = `
     SELECT
       ws.id,
       ws.warehouse_id,
@@ -291,8 +326,13 @@ export async function getAllStockSummary() {
     INNER JOIN products p ON p.id = ws.product_id
     INNER JOIN warehouses w ON w.id = ws.warehouse_id
     ORDER BY w.name ASC, p.name ASC, ws.stock_form ASC, COALESCE(ws.package_size, 0) ASC;
-    `
-  );
+    `;
+
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensureStockSchema(pool),
+    query
+  });
 
   return result.rows;
 }
@@ -317,8 +357,7 @@ export async function getStockMovements({ warehouseId, productId, limit = 100 })
 
   values.push(limit);
 
-  const result = await pool.query(
-    `
+  const query = `
     SELECT
       sm.*,
       p.name AS product_name,
@@ -333,9 +372,14 @@ export async function getStockMovements({ warehouseId, productId, limit = 100 })
     ${whereClause}
     ORDER BY sm.created_at DESC
     LIMIT $${index};
-    `,
+    `;
+
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, params = []) => pool.query(sql, params),
+    ensureSchema: () => ensureStockSchema(pool),
+    query,
     values
-  );
+  });
 
   return result.rows;
 }

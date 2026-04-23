@@ -1,5 +1,29 @@
 import { pool } from "../config/db.js";
 import { performStockExit } from "./stock.model.js";
+import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
+
+async function ensureInvoicesSchema(executor = pool) {
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS product_role VARCHAR(30) NOT NULL DEFAULT 'finished_product';
+  `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS warehouse_id INTEGER REFERENCES warehouses(id) ON DELETE SET NULL;
+  `);
+  await executor.query(`
+    ALTER TABLE invoice_items
+    ADD COLUMN IF NOT EXISTS stock_form VARCHAR(20);
+  `);
+  await executor.query(`
+    ALTER TABLE invoice_items
+    ADD COLUMN IF NOT EXISTS package_size NUMERIC(14,2);
+  `);
+  await executor.query(`
+    ALTER TABLE invoice_items
+    ADD COLUMN IF NOT EXISTS package_unit VARCHAR(20);
+  `);
+}
 
 export async function getInvoiceById(id) {
   const invoiceQuery = `
@@ -79,9 +103,20 @@ export async function getInvoiceById(id) {
     ORDER BY ii.id ASC;
   `;
 
+  await ensureInvoicesSchema(pool);
   const [invoiceResult, itemsResult] = await Promise.all([
-    pool.query(invoiceQuery, [id]),
-    pool.query(itemsQuery, [id])
+    queryWithSchemaOrColumnRetry({
+      executor: (sql, values = []) => pool.query(sql, values),
+      ensureSchema: () => ensureInvoicesSchema(pool),
+      query: invoiceQuery,
+      values: [id]
+    }),
+    queryWithSchemaOrColumnRetry({
+      executor: (sql, values = []) => pool.query(sql, values),
+      ensureSchema: () => ensureInvoicesSchema(pool),
+      query: itemsQuery,
+      values: [id]
+    })
   ]);
 
   const invoice = invoiceResult.rows[0] || null;
@@ -146,7 +181,11 @@ export async function getAllInvoices() {
     ORDER BY i.created_at DESC;
   `;
 
-  const result = await pool.query(query);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensureInvoicesSchema(pool),
+    query
+  });
   return result.rows;
 }
 

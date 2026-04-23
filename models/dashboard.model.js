@@ -1,4 +1,24 @@
 import { pool } from "../config/db.js";
+import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
+
+async function ensureDashboardSchema(executor = pool) {
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS product_role VARCHAR(30) NOT NULL DEFAULT 'finished_product';
+  `);
+  await executor.query(`
+    ALTER TABLE stock_movements
+    ADD COLUMN IF NOT EXISTS stock_form VARCHAR(20) NOT NULL DEFAULT 'bulk';
+  `);
+  await executor.query(`
+    ALTER TABLE stock_movements
+    ADD COLUMN IF NOT EXISTS package_size NUMERIC(14,2);
+  `);
+  await executor.query(`
+    ALTER TABLE stock_movements
+    ADD COLUMN IF NOT EXISTS package_unit VARCHAR(20);
+  `);
+}
 
 function buildStockMovementFilters(filters = {}, alias = "sm") {
   const conditions = [];
@@ -581,6 +601,11 @@ export async function getRecentStockVariationMovements(filters = {}, limit = 20)
     LIMIT $${values.length};
   `;
 
-  const result = await pool.query(query, values);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, params = []) => pool.query(sql, params),
+    ensureSchema: () => ensureDashboardSchema(pool),
+    query,
+    values
+  });
   return result.rows;
 }

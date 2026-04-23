@@ -2,6 +2,10 @@ export function isUndefinedTableError(error) {
   return error?.code === "42P01";
 }
 
+export function isUndefinedColumnError(error) {
+  return error?.code === "42703";
+}
+
 export function isConcurrentCreateError(error, relationName) {
   const message = String(error?.message || "");
   const detail = String(error?.detail || "");
@@ -33,6 +37,28 @@ export async function queryWithSchemaRetry({
     return await executor(query, values);
   } catch (error) {
     if (!isUndefinedTableError(error)) {
+      throw error;
+    }
+
+    await ensureSchema();
+    return executor(query, values);
+  }
+}
+
+export async function ensureColumnSchema({ executor, alterSql }) {
+  await executor(alterSql);
+}
+
+export async function queryWithSchemaOrColumnRetry({
+  executor,
+  ensureSchema,
+  query,
+  values = []
+}) {
+  try {
+    return await executor(query, values);
+  } catch (error) {
+    if (!isUndefinedTableError(error) && !isUndefinedColumnError(error)) {
       throw error;
     }
 
