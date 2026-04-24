@@ -431,7 +431,12 @@ export async function getStockVariationOverview(filters = {}) {
     ${whereClause};
   `;
 
-  const result = await pool.query(query, values);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, params = []) => pool.query(sql, params),
+    ensureSchema: () => ensureDashboardSchema(pool),
+    query,
+    values
+  });
   return result.rows[0];
 }
 
@@ -449,7 +454,12 @@ export async function getStockVariationByMovementType(filters = {}) {
     ORDER BY movements_count DESC, total_quantity DESC, sm.movement_type ASC;
   `;
 
-  const result = await pool.query(query, values);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, params = []) => pool.query(sql, params),
+    ensureSchema: () => ensureDashboardSchema(pool),
+    query,
+    values
+  });
   return result.rows;
 }
 
@@ -483,12 +493,17 @@ export async function getStockVariationByProduct(filters = {}, limit = 10) {
     FROM stock_movements sm
     INNER JOIN products p ON p.id = sm.product_id
     ${whereClause}
-    GROUP BY sm.product_id, p.name, p.sku, p.unit
+    GROUP BY sm.product_id, p.name, p.sku, p.product_role, p.unit
     ORDER BY movements_count DESC, quantity_in DESC, product_name ASC
     LIMIT $${values.length};
   `;
 
-  const result = await pool.query(query, values);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, params = []) => pool.query(sql, params),
+    ensureSchema: () => ensureDashboardSchema(pool),
+    query,
+    values
+  });
   return result.rows;
 }
 
@@ -525,7 +540,12 @@ export async function getStockVariationByWarehouse(filters = {}, limit = 10) {
     LIMIT $${values.length};
   `;
 
-  const result = await pool.query(query, values);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, params = []) => pool.query(sql, params),
+    ensureSchema: () => ensureDashboardSchema(pool),
+    query,
+    values
+  });
   return result.rows;
 }
 
@@ -565,7 +585,12 @@ export async function getStockVariationTimeline(
     ORDER BY period ASC;
   `;
 
-  const result = await pool.query(query, values);
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, params = []) => pool.query(sql, params),
+    ensureSchema: () => ensureDashboardSchema(pool),
+    query,
+    values
+  });
   return result.rows;
 }
 
