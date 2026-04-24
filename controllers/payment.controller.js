@@ -17,6 +17,62 @@ const ALLOWED_PAYMENT_METHODS = [
   "card"
 ];
 
+function shouldRetryPaymentAccounting(payment) {
+  if (!payment || Number(payment.accounting_entry_id || 0) > 0) {
+    return false;
+  }
+
+  const status = String(payment.accounting_status || "").trim().toLowerCase();
+  return status === "" || status === "error" || status === "skipped";
+}
+
+async function ensurePaymentAccounting({
+  payment,
+  invoice,
+  accounting = {},
+  created_by = null
+}) {
+  if (!payment) {
+    return null;
+  }
+
+  if (!shouldRetryPaymentAccounting(payment)) {
+    return payment;
+  }
+
+  let accountingResult = {
+    status: "skipped",
+    reason: "Aucune tentative de comptabilisation."
+  };
+
+  try {
+    accountingResult = await autoPostPaymentEntry({
+      payment,
+      invoice,
+      accounting,
+      created_by
+    });
+  } catch (accountingError) {
+    accountingResult = {
+      status: "error",
+      reason: accountingError.message
+    };
+  }
+
+  await persistAccountingStatus({
+    tableName: "payments",
+    recordId: payment.id,
+    accountingResult
+  });
+
+  return {
+    ...payment,
+    accounting_status: accountingResult.status || null,
+    accounting_entry_id: accountingResult.journal_entry_id || null,
+    accounting_message: accountingResult.reason || null
+  };
+}
+
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
 }
@@ -97,48 +153,23 @@ export async function createPaymentHandler(req, res, next) {
 
     const updatedInvoice = await recomputeInvoiceBalances(invoice_id);
 
-    let accounting = {
-      status: "skipped",
-      reason: "Aucune tentative de comptabilisation."
-    };
-
-    if (payment.accounting_entry_id) {
-      accounting = {
-        status: "skipped",
-        reason: "Paiement deja comptabilise."
-      };
-    } else {
-      try {
-        accounting = await autoPostPaymentEntry({
-          payment,
-          invoice,
-          accounting: req.body.accounting || {},
-          created_by: req.body.received_by ? Number(req.body.received_by) : null
-        });
-      } catch (accountingError) {
-        accounting = {
-          status: "error",
-          reason: accountingError.message
-        };
-      }
-    }
-
-    await persistAccountingStatus({
-      tableName: "payments",
-      recordId: payment.id,
-      accountingResult: accounting
+    const accountedPayment = await ensurePaymentAccounting({
+      payment,
+      invoice,
+      accounting: req.body.accounting || {},
+      created_by: req.body.received_by ? Number(req.body.received_by) : null
     });
+    const accounting = {
+      status: accountedPayment?.accounting_status || null,
+      journal_entry_id: accountedPayment?.accounting_entry_id || null,
+      reason: accountedPayment?.accounting_message || null
+    };
 
     return res.status(201).json({
       success: true,
       message: "Paiement enregistre avec succes.",
       data: {
-        payment: {
-          ...payment,
-          accounting_status: accounting.status || null,
-          accounting_entry_id: accounting.journal_entry_id || null,
-          accounting_message: accounting.reason || null
-        },
+        payment: accountedPayment,
         invoice: updatedInvoice,
         accounting
       }
@@ -169,11 +200,19 @@ export async function getPaymentsByInvoiceIdHandler(req, res, next) {
     }
 
     const payments = await getPaymentsByInvoiceId(invoiceId);
+    const healedPayments = await Promise.all(
+      payments.map((payment) =>
+        ensurePaymentAccounting({
+          payment,
+          invoice
+        })
+      )
+    );
 
     return res.status(200).json({
       success: true,
-      count: payments.length,
-      data: payments
+      count: healedPayments.length,
+      data: healedPayments
     });
   } catch (error) {
     next(error);
@@ -365,41 +404,23 @@ export async function allocateUnallocatedPaymentHandler(req, res, next) {
       payment_id: payment.id
     });
 
-    let accounting = {
-      status: "skipped",
-      reason: "Aucune tentative de comptabilisation."
-    };
-
-    try {
-      accounting = await autoPostPaymentEntry({
-        payment,
-        invoice,
-        accounting: req.body.accounting || {},
-        created_by: req.body.received_by ? Number(req.body.received_by) : null
-      });
-    } catch (accountingError) {
-      accounting = {
-        status: "error",
-        reason: accountingError.message
-      };
-    }
-
-    await persistAccountingStatus({
-      tableName: "payments",
-      recordId: payment.id,
-      accountingResult: accounting
+    const accountedPayment = await ensurePaymentAccounting({
+      payment,
+      invoice,
+      accounting: req.body.accounting || {},
+      created_by: req.body.received_by ? Number(req.body.received_by) : null
     });
+    const accounting = {
+      status: accountedPayment?.accounting_status || null,
+      journal_entry_id: accountedPayment?.accounting_entry_id || null,
+      reason: accountedPayment?.accounting_message || null
+    };
 
     return res.status(201).json({
       success: true,
       message: "Paiement importe affecte a la facture avec succes.",
       data: {
-        payment: {
-          ...payment,
-          accounting_status: accounting.status || null,
-          accounting_entry_id: accounting.journal_entry_id || null,
-          accounting_message: accounting.reason || null
-        },
+        payment: accountedPayment,
         invoice: updatedInvoice,
         accounting
       }
