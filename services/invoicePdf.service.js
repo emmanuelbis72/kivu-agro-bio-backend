@@ -68,9 +68,8 @@ function getCustomerLines(invoice) {
 
 export function buildInvoicePdf(doc, invoice) {
   const pageWidth = doc.page.width;
-  const pageHeight = doc.page.height;
   const marginX = 50;
-  const footerTopY = pageHeight - 70;
+  const footerTopY = doc.page.height - 50;
 
   doc.info.Title = `Facture ${invoice.invoice_number}`;
   doc.info.Author = "KIVU AGRO BIO";
@@ -207,22 +206,6 @@ export function buildInvoicePdf(doc, invoice) {
     width: pageWidth - marginX * 2
   });
 
-  doc
-    .moveTo(marginX, footerTopY)
-    .lineTo(pageWidth - marginX, footerTopY)
-    .strokeColor("#D1D5DB")
-    .stroke();
-
-  doc.font("Helvetica").fontSize(9).fillColor("#6B7280");
-  doc.text(
-    "KIVU AGRO BIO - Facture generee automatiquement",
-    marginX,
-    pageHeight - 55,
-    {
-      width: pageWidth - marginX * 2,
-      align: "center"
-    }
-  );
 }
 
 export function createInvoicePdfBuffer(invoice) {
