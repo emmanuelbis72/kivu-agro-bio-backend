@@ -1,10 +1,13 @@
 import PDFDocument from "pdfkit";
 
 function formatMoney(value) {
-  return new Intl.NumberFormat("fr-FR", {
-    style: "currency",
-    currency: "USD"
-  }).format(Number(value || 0));
+  const amount = Number(value || 0);
+  const sign = amount < 0 ? "-" : "";
+  const absolute = Math.abs(amount);
+  const fixed = absolute.toFixed(2);
+  const [integerPart, decimalPart] = fixed.split(".");
+  const groupedInteger = integerPart.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  return `${sign}${groupedInteger},${decimalPart} $US`;
 }
 
 function formatDate(value) {
@@ -16,13 +19,17 @@ function drawTableRow(doc, y, values, widths, options = {}) {
   const startX = 50;
   const rowHeight = options.rowHeight || 24;
   const isHeader = Boolean(options.isHeader);
+  const fontSize = options.fontSize || 10;
+  const verticalPadding = options.verticalPadding || 6;
+  const lineGap = options.lineGap || 2;
+  const totalWidth = widths.reduce((sum, width) => sum + width, 0);
 
   let currentX = startX;
 
   if (isHeader) {
     doc
       .save()
-      .roundedRect(startX, y - 4, widths.reduce((a, b) => a + b, 0), rowHeight, 6)
+      .roundedRect(startX, y - 4, totalWidth, rowHeight, 6)
       .fill("#EAF5EE")
       .restore();
   }
@@ -30,11 +37,12 @@ function drawTableRow(doc, y, values, widths, options = {}) {
   for (let i = 0; i < values.length; i += 1) {
     doc
       .font(isHeader ? "Helvetica-Bold" : "Helvetica")
-      .fontSize(10)
+      .fontSize(fontSize)
       .fillColor("#1F2937")
-      .text(String(values[i] ?? ""), currentX + 6, y + 2, {
+      .text(String(values[i] ?? ""), currentX + 6, y + verticalPadding - 1, {
         width: widths[i] - 12,
-        align: i >= 2 ? "right" : "left"
+        align: i >= 2 ? "right" : "left",
+        lineGap
       });
 
     currentX += widths[i];
@@ -42,15 +50,25 @@ function drawTableRow(doc, y, values, widths, options = {}) {
 
   doc
     .moveTo(startX, y + rowHeight)
-    .lineTo(startX + widths.reduce((a, b) => a + b, 0), y + rowHeight)
+    .lineTo(startX + totalWidth, y + rowHeight)
     .strokeColor("#E5E7EB")
     .stroke();
 
   return y + rowHeight;
 }
 
+function getCustomerLines(invoice) {
+  return [
+    invoice.customer_name,
+    invoice.customer_address,
+    invoice.customer_phone,
+    invoice.customer_email
+  ].filter((value) => value && String(value).trim() && String(value).trim() !== "-");
+}
+
 export function buildInvoicePdf(doc, invoice) {
   const pageWidth = doc.page.width;
+  const pageHeight = doc.page.height;
   const marginX = 50;
 
   doc.info.Title = `Facture ${invoice.invoice_number}`;
@@ -61,8 +79,8 @@ export function buildInvoicePdf(doc, invoice) {
   doc.text("KIVU AGRO BIO", marginX, 45);
 
   doc.font("Helvetica").fontSize(10).fillColor("#4B5563");
-  doc.text("Produits naturels de santé & superaliments", marginX, 74);
-  doc.text("République Démocratique du Congo", marginX, 88);
+  doc.text("Produits naturels de sante et superaliments", marginX, 74);
+  doc.text("Republique Democratique du Congo", marginX, 88);
 
   doc
     .roundedRect(pageWidth - 220, 42, 170, 58, 10)
@@ -81,70 +99,75 @@ export function buildInvoicePdf(doc, invoice) {
     .stroke();
 
   doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827");
-  doc.text("Facturé à", marginX, 136);
+  doc.text("Facture a", marginX, 136);
 
   doc.font("Helvetica").fontSize(10).fillColor("#374151");
-  doc.text(invoice.customer_name || "-", marginX, 154);
-  doc.text(invoice.customer_address || "-", marginX, 170, { width: 220 });
-  doc.text(invoice.customer_phone || "-", marginX, 198);
-  doc.text(invoice.customer_email || "-", marginX, 214);
+  const customerLines = getCustomerLines(invoice);
+  let customerY = 154;
+
+  customerLines.forEach((line) => {
+    doc.text(String(line), marginX, customerY, { width: 220 });
+    customerY += 16;
+  });
 
   const infoX = pageWidth - 250;
   doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827");
   doc.text("Informations facture", infoX, 136);
 
-  const infoRows = [
-    ["Date facture", formatDate(invoice.invoice_date)]
-  ];
+  doc.font("Helvetica-Bold").fontSize(10).fillColor("#374151");
+  doc.text("Date facture :", infoX, 154, { continued: true });
+  doc.font("Helvetica").fillColor("#111827");
+  doc.text(` ${formatDate(invoice.invoice_date)}`);
 
-  let infoY = 154;
-  for (const [label, value] of infoRows) {
-    doc.font("Helvetica-Bold").fontSize(10).fillColor("#374151");
-    doc.text(`${label} :`, infoX, infoY, { continued: true });
-    doc.font("Helvetica").fillColor("#111827");
-    doc.text(` ${value}`);
-    infoY += 18;
-  }
+  let tableY = Math.max(customerY + 18, 192);
 
-  let tableY = 250;
+  const colWidths = [105, 165, 40, 85, 100];
+  const tableHeader = ["Barcode", "Produit", "Qte", "Prix unitaire", "Total ligne"];
 
-  const colWidths = [135, 195, 55, 75, 90];
-  tableY = drawTableRow(
-    doc,
-    tableY,
-    ["Barcode", "Produit", "Qté", "Prix unitaire", "Total ligne"],
-    colWidths,
-    { isHeader: true, rowHeight: 26 }
-  );
+  tableY = drawTableRow(doc, tableY, tableHeader, colWidths, {
+    isHeader: true,
+    rowHeight: 26,
+    fontSize: 9,
+    verticalPadding: 7
+  });
 
   const items = Array.isArray(invoice.items) ? invoice.items : [];
 
   for (const item of items) {
-    if (tableY > 720) {
+    const rowValues = [
+      item.barcode || "-",
+      item.product_name || "-",
+      item.quantity ?? "-",
+      formatMoney(item.unit_price),
+      formatMoney(item.line_total)
+    ];
+
+    const barcodeHeight = doc.heightOfString(String(rowValues[0]), {
+      width: colWidths[0] - 12,
+      lineGap: 2
+    });
+    const productHeight = doc.heightOfString(String(rowValues[1]), {
+      width: colWidths[1] - 12,
+      lineGap: 2
+    });
+    const rowHeight = Math.max(24, Math.ceil(Math.max(barcodeHeight, productHeight) + 10));
+
+    if (tableY + rowHeight > 690) {
       doc.addPage();
       tableY = 60;
-      tableY = drawTableRow(
-        doc,
-        tableY,
-        ["Barcode", "Produit", "Qté", "Prix unitaire", "Total ligne"],
-        colWidths,
-        { isHeader: true, rowHeight: 26 }
-      );
+      tableY = drawTableRow(doc, tableY, tableHeader, colWidths, {
+        isHeader: true,
+        rowHeight: 26,
+        fontSize: 9,
+        verticalPadding: 7
+      });
     }
 
-    tableY = drawTableRow(
-      doc,
-      tableY,
-      [
-        item.barcode || "-",
-        item.product_name || "-",
-        item.quantity ?? "-",
-        formatMoney(item.unit_price),
-        formatMoney(item.line_total)
-      ],
-      colWidths,
-      { rowHeight: 26 }
-    );
+    tableY = drawTableRow(doc, tableY, rowValues, colWidths, {
+      rowHeight,
+      fontSize: 9,
+      verticalPadding: 5
+    });
   }
 
   const summaryBoxY = tableY + 24;
@@ -152,36 +175,17 @@ export function buildInvoicePdf(doc, invoice) {
   const summaryW = 200;
 
   doc
-    .roundedRect(summaryX, summaryBoxY, summaryW, 120, 10)
+    .roundedRect(summaryX, summaryBoxY, summaryW, 52, 10)
     .fillAndStroke("#F9FAFB", "#E5E7EB");
 
-  const totals = [
-    ["Sous-total", formatMoney(invoice.subtotal)],
-    ["Remise", formatMoney(invoice.discount_amount)],
-    ["Taxe", formatMoney(invoice.tax_amount)],
-    ["Total", formatMoney(invoice.total_amount)],
-    ["Payé", formatMoney(invoice.paid_amount)],
-    ["Solde dû", formatMoney(invoice.balance_due)]
-  ];
-
-  let totalY = summaryBoxY + 12;
-  totals.forEach(([label, value], index) => {
-    const isStrong = label === "Total" || label === "Solde dû";
-
-    doc.font(isStrong ? "Helvetica-Bold" : "Helvetica").fontSize(10).fillColor("#111827");
-    doc.text(label, summaryX + 12, totalY, { width: 90 });
-
-    doc
-      .font(isStrong ? "Helvetica-Bold" : "Helvetica")
-      .text(value, summaryX + 100, totalY, {
-        width: 88,
-        align: "right"
-      });
-
-    totalY += index === 2 ? 22 : 16;
+  doc.font("Helvetica-Bold").fontSize(12).fillColor("#111827");
+  doc.text("Solde du", summaryX + 12, summaryBoxY + 17, { width: 90 });
+  doc.text(formatMoney(invoice.balance_due), summaryX + 92, summaryBoxY + 17, {
+    width: 96,
+    align: "right"
   });
 
-  const noteY = Math.max(summaryBoxY + 140, tableY + 24);
+  const noteY = Math.max(summaryBoxY + 72, tableY + 24);
   doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827");
   doc.text("Notes", marginX, noteY);
 
@@ -191,16 +195,16 @@ export function buildInvoicePdf(doc, invoice) {
   });
 
   doc
-    .moveTo(marginX, doc.page.height - 70)
-    .lineTo(pageWidth - marginX, doc.page.height - 70)
+    .moveTo(marginX, pageHeight - 70)
+    .lineTo(pageWidth - marginX, pageHeight - 70)
     .strokeColor("#D1D5DB")
     .stroke();
 
   doc.font("Helvetica").fontSize(9).fillColor("#6B7280");
   doc.text(
-    "KIVU AGRO BIO - Facture générée automatiquement",
+    "KIVU AGRO BIO - Facture generee automatiquement",
     marginX,
-    doc.page.height - 55,
+    pageHeight - 55,
     {
       width: pageWidth - marginX * 2,
       align: "center"
