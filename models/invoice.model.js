@@ -92,6 +92,7 @@ export async function getInvoiceById(id) {
       ii.line_total,
       p.name AS product_name,
       p.sku,
+      p.barcode,
       p.product_role,
       p.unit,
       p.cost_price,

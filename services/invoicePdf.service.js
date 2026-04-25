@@ -86,20 +86,15 @@ export function buildInvoicePdf(doc, invoice) {
   doc.font("Helvetica").fontSize(10).fillColor("#374151");
   doc.text(invoice.customer_name || "-", marginX, 154);
   doc.text(invoice.customer_address || "-", marginX, 170, { width: 220 });
-  doc.text(invoice.customer_city || "-", marginX, 198);
-  doc.text(invoice.customer_phone || "-", marginX, 214);
-  doc.text(invoice.customer_email || "-", marginX, 230);
+  doc.text(invoice.customer_phone || "-", marginX, 198);
+  doc.text(invoice.customer_email || "-", marginX, 214);
 
   const infoX = pageWidth - 250;
   doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827");
   doc.text("Informations facture", infoX, 136);
 
   const infoRows = [
-    ["Date facture", formatDate(invoice.invoice_date)],
-    ["Échéance", formatDate(invoice.due_date)],
-    ["Dépôt", invoice.warehouse_name || "-"],
-    ["Ville dépôt", invoice.warehouse_city || "-"],
-    ["Statut", invoice.status || "-"]
+    ["Date facture", formatDate(invoice.invoice_date)]
   ];
 
   let infoY = 154;
@@ -111,13 +106,13 @@ export function buildInvoicePdf(doc, invoice) {
     infoY += 18;
   }
 
-  let tableY = 280;
+  let tableY = 250;
 
-  const colWidths = [220, 80, 90, 110];
+  const colWidths = [135, 195, 55, 75, 90];
   tableY = drawTableRow(
     doc,
     tableY,
-    ["Produit", "Quantité", "Prix unitaire", "Total ligne"],
+    ["Barcode", "Produit", "Qté", "Prix unitaire", "Total ligne"],
     colWidths,
     { isHeader: true, rowHeight: 26 }
   );
@@ -131,7 +126,7 @@ export function buildInvoicePdf(doc, invoice) {
       tableY = drawTableRow(
         doc,
         tableY,
-        ["Produit", "Quantité", "Prix unitaire", "Total ligne"],
+        ["Barcode", "Produit", "Qté", "Prix unitaire", "Total ligne"],
         colWidths,
         { isHeader: true, rowHeight: 26 }
       );
@@ -141,7 +136,8 @@ export function buildInvoicePdf(doc, invoice) {
       doc,
       tableY,
       [
-        `${item.product_name || "-"}${item.sku ? ` (${item.sku})` : ""}`,
+        item.barcode || "-",
+        item.product_name || "-",
         item.quantity ?? "-",
         formatMoney(item.unit_price),
         formatMoney(item.line_total)
