@@ -70,6 +70,7 @@ export function buildInvoicePdf(doc, invoice) {
   const pageWidth = doc.page.width;
   const pageHeight = doc.page.height;
   const marginX = 50;
+  const footerTopY = pageHeight - 70;
 
   doc.info.Title = `Facture ${invoice.invoice_number}`;
   doc.info.Author = "KIVU AGRO BIO";
@@ -170,6 +171,18 @@ export function buildInvoicePdf(doc, invoice) {
     });
   }
 
+  const noteText = invoice.notes || "Merci pour votre confiance.";
+  const noteHeight = doc.heightOfString(noteText, {
+    width: pageWidth - marginX * 2,
+    lineGap: 2
+  });
+  const requiredBottomSpace = 24 + 52 + 20 + 18 + noteHeight + 24;
+
+  if (tableY + requiredBottomSpace > footerTopY - 12) {
+    doc.addPage();
+    tableY = 60;
+  }
+
   const summaryBoxY = tableY + 24;
   const summaryX = pageWidth - 250;
   const summaryW = 200;
@@ -190,13 +203,13 @@ export function buildInvoicePdf(doc, invoice) {
   doc.text("Notes", marginX, noteY);
 
   doc.font("Helvetica").fontSize(10).fillColor("#4B5563");
-  doc.text(invoice.notes || "Merci pour votre confiance.", marginX, noteY + 18, {
+  doc.text(noteText, marginX, noteY + 18, {
     width: pageWidth - marginX * 2
   });
 
   doc
-    .moveTo(marginX, pageHeight - 70)
-    .lineTo(pageWidth - marginX, pageHeight - 70)
+    .moveTo(marginX, footerTopY)
+    .lineTo(pageWidth - marginX, footerTopY)
     .strokeColor("#D1D5DB")
     .stroke();
 
