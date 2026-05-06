@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import pg from "pg";
+import { buildPgPoolConfig } from "../utils/pgConnection.util.js";
 
 dotenv.config();
 
@@ -45,13 +46,7 @@ async function main() {
     throw new Error("DATABASE_URL manquant dans .env ou les variables d'environnement.");
   }
 
-  const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl:
-      process.env.NODE_ENV === "production"
-        ? { rejectUnauthorized: false }
-        : false
-  });
+  const pool = new pg.Pool(buildPgPoolConfig(process.env.DATABASE_URL));
 
   try {
     const { rows } = await pool.query(

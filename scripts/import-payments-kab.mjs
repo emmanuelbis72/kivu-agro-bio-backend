@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 
 import dotenv from "dotenv";
 import pg from "pg";
+import { buildPgPoolConfig } from "../utils/pgConnection.util.js";
 
 dotenv.config();
 
@@ -297,13 +298,7 @@ async function main() {
   }
 
   const rows = extractRowsFromWorkbook(args.file);
-  const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl:
-      process.env.NODE_ENV === "production"
-        ? { rejectUnauthorized: false }
-        : false
-  });
+  const pool = new pg.Pool(buildPgPoolConfig(process.env.DATABASE_URL));
 
   const client = await pool.connect();
 

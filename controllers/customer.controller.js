@@ -2,6 +2,7 @@ import {
   createCustomer,
   getAllCustomers,
   getCustomerById,
+  getCustomerAccountStatement,
   updateCustomer,
   deleteCustomer
 } from "../models/customer.model.js";
@@ -139,6 +140,35 @@ export async function getCustomerByIdHandler(req, res, next) {
     return res.status(200).json({
       success: true,
       data: customer
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getCustomerAccountStatementHandler(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "ID client invalide."
+      });
+    }
+
+    const statement = await getCustomerAccountStatement(id);
+
+    if (!statement) {
+      return res.status(404).json({
+        success: false,
+        message: "Client introuvable."
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: statement
     });
   } catch (error) {
     next(error);
