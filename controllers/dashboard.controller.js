@@ -18,7 +18,9 @@ import {
   getAccountingGlobalStats,
   getAccountingMonthlyOverview,
   getAccountClassBalances,
-  getRecentJournalEntries
+  getRecentJournalEntries,
+  getCashForecast,
+  getCommercialDashboard
 } from "../models/dashboard.model.js";
 
 function parsePositiveLimit(value, defaultValue = 10, maxValue = 100) {
@@ -38,6 +40,20 @@ function parsePositiveLimit(value, defaultValue = 10, maxValue = 100) {
 function parsePositiveInteger(value) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parsePositiveDaysWindow(value, defaultValue = 365, maxValue = 3650) {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return defaultValue;
+  }
+
+  return Math.min(parsed, maxValue);
 }
 
 function parseDateFilter(value) {
@@ -114,23 +130,29 @@ export async function getAccountingDashboardOverviewHandler(req, res, next) {
 
     const [
       accountingStats,
+      businessStats,
       monthlyOverview,
       classBalances,
-      recentJournalEntries
+      recentJournalEntries,
+      cashForecast
     ] = await Promise.all([
       getAccountingGlobalStats(),
+      getGlobalStats(),
       getAccountingMonthlyOverview(),
       getAccountClassBalances(),
-      getRecentJournalEntries(recentLimit)
+      getRecentJournalEntries(recentLimit),
+      getCashForecast(recentLimit)
     ]);
 
     return res.status(200).json({
       success: true,
       data: {
         accounting_global_stats: accountingStats,
+        business_global_stats: businessStats,
         accounting_monthly_overview: monthlyOverview,
         account_class_balances: classBalances,
-        recent_journal_entries: recentJournalEntries
+        recent_journal_entries: recentJournalEntries,
+        cash_forecast: cashForecast
       }
     });
   } catch (error) {
@@ -382,6 +404,21 @@ export async function getStockVariationReportHandler(req, res, next) {
         timeline,
         recent_movements: recentMovements
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getCommercialDashboardHandler(req, res, next) {
+  try {
+    const periodDays = parsePositiveDaysWindow(req.query.days, 365, 3650);
+    const topLimit = parsePositiveLimit(req.query.top_limit, 10, 50);
+    const dashboard = await getCommercialDashboard(periodDays, topLimit);
+
+    return res.status(200).json({
+      success: true,
+      data: dashboard
     });
   } catch (error) {
     next(error);

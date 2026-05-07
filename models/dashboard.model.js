@@ -1,5 +1,10 @@
 import { pool } from "../config/db.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
+import { ensurePurchaseInvoicesSchema } from "./purchaseInvoice.model.js";
+
+function roundAmount(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
+}
 
 async function ensureDashboardSchema(executor = pool) {
   await executor.query(`
@@ -339,6 +344,755 @@ export async function getAccountingGlobalStats() {
 
   const result = await pool.query(query);
   return result.rows[0];
+}
+
+export async function getCashForecast(detailLimit = 10) {
+  await ensurePurchaseInvoicesSchema(pool);
+
+  const summaryQuery = `
+    WITH receivables AS (
+      SELECT
+        COUNT(*) FILTER (
+          WHERE i.status IN ('issued', 'partial')
+            AND COALESCE(i.balance_due, 0) > 0
+        )::int AS open_receivable_invoices,
+        COALESCE(SUM(i.balance_due) FILTER (
+          WHERE i.status IN ('issued', 'partial')
+            AND COALESCE(i.balance_due, 0) > 0
+        ), 0) AS open_receivables,
+        COUNT(*) FILTER (
+          WHERE i.status IN ('issued', 'partial')
+            AND COALESCE(i.balance_due, 0) > 0
+            AND i.due_date IS NOT NULL
+            AND i.due_date < CURRENT_DATE
+        )::int AS overdue_receivable_invoices,
+        COALESCE(SUM(i.balance_due) FILTER (
+          WHERE i.status IN ('issued', 'partial')
+            AND COALESCE(i.balance_due, 0) > 0
+            AND i.due_date IS NOT NULL
+            AND i.due_date < CURRENT_DATE
+        ), 0) AS overdue_receivables,
+        COUNT(*) FILTER (
+          WHERE i.status IN ('issued', 'partial')
+            AND COALESCE(i.balance_due, 0) > 0
+            AND i.due_date IS NULL
+        )::int AS undated_receivable_invoices,
+        COALESCE(SUM(i.balance_due) FILTER (
+          WHERE i.status IN ('issued', 'partial')
+            AND COALESCE(i.balance_due, 0) > 0
+            AND i.due_date IS NULL
+        ), 0) AS undated_receivables
+      FROM invoices i
+    ),
+    payables AS (
+      SELECT
+        COUNT(*) FILTER (
+          WHERE pi.status IN ('issued', 'partial')
+            AND COALESCE(pi.balance_due, 0) > 0
+        )::int AS open_payable_invoices,
+        COALESCE(SUM(pi.balance_due) FILTER (
+          WHERE pi.status IN ('issued', 'partial')
+            AND COALESCE(pi.balance_due, 0) > 0
+        ), 0) AS open_payables,
+        COUNT(*) FILTER (
+          WHERE pi.status IN ('issued', 'partial')
+            AND COALESCE(pi.balance_due, 0) > 0
+            AND pi.due_date IS NOT NULL
+            AND pi.due_date < CURRENT_DATE
+        )::int AS overdue_payable_invoices,
+        COALESCE(SUM(pi.balance_due) FILTER (
+          WHERE pi.status IN ('issued', 'partial')
+            AND COALESCE(pi.balance_due, 0) > 0
+            AND pi.due_date IS NOT NULL
+            AND pi.due_date < CURRENT_DATE
+        ), 0) AS overdue_payables,
+        COUNT(*) FILTER (
+          WHERE pi.status IN ('issued', 'partial')
+            AND COALESCE(pi.balance_due, 0) > 0
+            AND pi.due_date IS NULL
+        )::int AS undated_payable_invoices,
+        COALESCE(SUM(pi.balance_due) FILTER (
+          WHERE pi.status IN ('issued', 'partial')
+            AND COALESCE(pi.balance_due, 0) > 0
+            AND pi.due_date IS NULL
+        ), 0) AS undated_payables
+      FROM purchase_invoices pi
+    ),
+    actual_cash AS (
+      SELECT
+        COALESCE((SELECT SUM(amount) FROM payments), 0) AS total_customer_receipts,
+        COALESCE((SELECT SUM(amount) FROM supplier_payments), 0) AS total_supplier_payments,
+        COALESCE((SELECT SUM(amount) FROM expenses), 0) AS total_expenses
+    )
+    SELECT
+      r.open_receivable_invoices,
+      r.open_receivables,
+      r.overdue_receivable_invoices,
+      r.overdue_receivables,
+      r.undated_receivable_invoices,
+      r.undated_receivables,
+      p.open_payable_invoices,
+      p.open_payables,
+      p.overdue_payable_invoices,
+      p.overdue_payables,
+      p.undated_payable_invoices,
+      p.undated_payables,
+      a.total_customer_receipts,
+      a.total_supplier_payments,
+      a.total_expenses,
+      (
+        a.total_customer_receipts
+        - a.total_supplier_payments
+        - a.total_expenses
+      ) AS current_cash_base
+    FROM receivables r
+    CROSS JOIN payables p
+    CROSS JOIN actual_cash a;
+  `;
+
+  const horizonsQuery = `
+    WITH actual_cash AS (
+      SELECT
+        COALESCE((SELECT SUM(amount) FROM payments), 0) AS total_customer_receipts,
+        COALESCE((SELECT SUM(amount) FROM supplier_payments), 0) AS total_supplier_payments,
+        COALESCE((SELECT SUM(amount) FROM expenses), 0) AS total_expenses
+    ),
+    horizons(days) AS (
+      VALUES (7), (30), (60)
+    )
+    SELECT
+      h.days AS horizon_days,
+      (
+        SELECT COUNT(*)::int
+        FROM invoices i
+        WHERE i.status IN ('issued', 'partial')
+          AND COALESCE(i.balance_due, 0) > 0
+          AND i.due_date IS NOT NULL
+          AND i.due_date <= CURRENT_DATE + (h.days * INTERVAL '1 day')
+      ) AS due_receivables_count,
+      COALESCE((
+        SELECT SUM(i.balance_due)
+        FROM invoices i
+        WHERE i.status IN ('issued', 'partial')
+          AND COALESCE(i.balance_due, 0) > 0
+          AND i.due_date IS NOT NULL
+          AND i.due_date <= CURRENT_DATE + (h.days * INTERVAL '1 day')
+      ), 0) AS expected_inflows,
+      (
+        SELECT COUNT(*)::int
+        FROM purchase_invoices pi
+        WHERE pi.status IN ('issued', 'partial')
+          AND COALESCE(pi.balance_due, 0) > 0
+          AND pi.due_date IS NOT NULL
+          AND pi.due_date <= CURRENT_DATE + (h.days * INTERVAL '1 day')
+      ) AS due_payables_count,
+      COALESCE((
+        SELECT SUM(pi.balance_due)
+        FROM purchase_invoices pi
+        WHERE pi.status IN ('issued', 'partial')
+          AND COALESCE(pi.balance_due, 0) > 0
+          AND pi.due_date IS NOT NULL
+          AND pi.due_date <= CURRENT_DATE + (h.days * INTERVAL '1 day')
+      ), 0) AS expected_outflows,
+      (
+        (
+          a.total_customer_receipts
+          - a.total_supplier_payments
+          - a.total_expenses
+        )
+        + COALESCE((
+          SELECT SUM(i.balance_due)
+          FROM invoices i
+          WHERE i.status IN ('issued', 'partial')
+            AND COALESCE(i.balance_due, 0) > 0
+            AND i.due_date IS NOT NULL
+            AND i.due_date <= CURRENT_DATE + (h.days * INTERVAL '1 day')
+        ), 0)
+        - COALESCE((
+          SELECT SUM(pi.balance_due)
+          FROM purchase_invoices pi
+          WHERE pi.status IN ('issued', 'partial')
+            AND COALESCE(pi.balance_due, 0) > 0
+            AND pi.due_date IS NOT NULL
+            AND pi.due_date <= CURRENT_DATE + (h.days * INTERVAL '1 day')
+        ), 0)
+      ) AS projected_balance
+    FROM horizons h
+    CROSS JOIN actual_cash a
+    ORDER BY h.days ASC;
+  `;
+
+  const receivablesQuery = `
+    SELECT
+      i.id,
+      i.invoice_number,
+      i.invoice_date,
+      i.due_date,
+      i.status,
+      i.total_amount,
+      i.paid_amount,
+      i.balance_due,
+      c.business_name AS customer_name,
+      c.city AS customer_city,
+      (i.due_date - CURRENT_DATE) AS days_from_today
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    WHERE i.status IN ('issued', 'partial')
+      AND COALESCE(i.balance_due, 0) > 0
+      AND i.due_date IS NOT NULL
+    ORDER BY i.due_date ASC, i.balance_due DESC, i.invoice_date ASC
+    LIMIT $1;
+  `;
+
+  const payablesQuery = `
+    SELECT
+      pi.id,
+      pi.purchase_invoice_number,
+      pi.invoice_date,
+      pi.due_date,
+      pi.status,
+      pi.total_amount,
+      pi.paid_amount,
+      pi.balance_due,
+      s.business_name AS supplier_name,
+      s.city AS supplier_city,
+      (pi.due_date - CURRENT_DATE) AS days_from_today
+    FROM purchase_invoices pi
+    INNER JOIN suppliers s ON s.id = pi.supplier_id
+    WHERE pi.status IN ('issued', 'partial')
+      AND COALESCE(pi.balance_due, 0) > 0
+      AND pi.due_date IS NOT NULL
+    ORDER BY pi.due_date ASC, pi.balance_due DESC, pi.invoice_date ASC
+    LIMIT $1;
+  `;
+
+  const [summaryResult, horizonsResult, receivablesResult, payablesResult] =
+    await Promise.all([
+      pool.query(summaryQuery),
+      pool.query(horizonsQuery),
+      pool.query(receivablesQuery, [detailLimit]),
+      pool.query(payablesQuery, [detailLimit])
+    ]);
+
+  const summary = summaryResult.rows[0] || {};
+
+  return {
+    summary: {
+      open_receivable_invoices: Number(summary.open_receivable_invoices || 0),
+      open_receivables: roundAmount(summary.open_receivables),
+      overdue_receivable_invoices: Number(
+        summary.overdue_receivable_invoices || 0
+      ),
+      overdue_receivables: roundAmount(summary.overdue_receivables),
+      undated_receivable_invoices: Number(
+        summary.undated_receivable_invoices || 0
+      ),
+      undated_receivables: roundAmount(summary.undated_receivables),
+      open_payable_invoices: Number(summary.open_payable_invoices || 0),
+      open_payables: roundAmount(summary.open_payables),
+      overdue_payable_invoices: Number(summary.overdue_payable_invoices || 0),
+      overdue_payables: roundAmount(summary.overdue_payables),
+      undated_payable_invoices: Number(summary.undated_payable_invoices || 0),
+      undated_payables: roundAmount(summary.undated_payables),
+      total_customer_receipts: roundAmount(summary.total_customer_receipts),
+      total_supplier_payments: roundAmount(summary.total_supplier_payments),
+      total_expenses: roundAmount(summary.total_expenses),
+      current_cash_base: roundAmount(summary.current_cash_base)
+    },
+    horizons: horizonsResult.rows.map((row) => ({
+      horizon_days: Number(row.horizon_days || 0),
+      due_receivables_count: Number(row.due_receivables_count || 0),
+      expected_inflows: roundAmount(row.expected_inflows),
+      due_payables_count: Number(row.due_payables_count || 0),
+      expected_outflows: roundAmount(row.expected_outflows),
+      projected_balance: roundAmount(row.projected_balance)
+    })),
+    receivables_due_soon: receivablesResult.rows.map((row) => ({
+      ...row,
+      total_amount: roundAmount(row.total_amount),
+      paid_amount: roundAmount(row.paid_amount),
+      balance_due: roundAmount(row.balance_due),
+      days_from_today: Number(row.days_from_today || 0)
+    })),
+    payables_due_soon: payablesResult.rows.map((row) => ({
+      ...row,
+      total_amount: roundAmount(row.total_amount),
+      paid_amount: roundAmount(row.paid_amount),
+      balance_due: roundAmount(row.balance_due),
+      days_from_today: Number(row.days_from_today || 0)
+    }))
+  };
+}
+
+export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
+  await ensureDashboardSchema(pool);
+
+  const summaryQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    ),
+    filtered_invoices AS (
+      SELECT
+        i.id,
+        i.customer_id,
+        i.warehouse_id,
+        i.invoice_date,
+        i.total_amount,
+        COALESCE(i.tax_amount, 0) AS tax_amount,
+        COALESCE(i.paid_amount, 0) AS paid_amount,
+        COALESCE(i.balance_due, 0) AS balance_due,
+        c.city AS customer_city,
+        COALESCE(ic.total_cogs_amount, 0) AS total_cogs_amount
+      FROM invoices i
+      INNER JOIN customers c ON c.id = i.customer_id
+      LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    )
+    SELECT
+      COUNT(*)::int AS total_invoices,
+      COUNT(DISTINCT customer_id)::int AS active_customers,
+      COUNT(DISTINCT warehouse_id)::int AS active_warehouses,
+      COUNT(DISTINCT COALESCE(NULLIF(TRIM(customer_city), ''), 'Non renseignee'))::int AS active_cities,
+      COALESCE(SUM(total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(total_amount - tax_amount), 0) AS total_net_sales_amount,
+      COALESCE(SUM(paid_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(balance_due), 0) AS total_receivables,
+      COALESCE(SUM(total_cogs_amount), 0) AS total_cogs_amount,
+      COALESCE(SUM((total_amount - tax_amount) - total_cogs_amount), 0) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(total_amount - tax_amount), 0) > 0
+          THEN ROUND(
+            (COALESCE(SUM((total_amount - tax_amount) - total_cogs_amount), 0)
+              / COALESCE(SUM(total_amount - tax_amount), 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM filtered_invoices;
+  `;
+
+  const monthlyTrendQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
+    SELECT
+      TO_CHAR(i.invoice_date, 'YYYY-MM') AS period,
+      COUNT(*)::int AS total_invoices,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) AS total_net_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(i.balance_due), 0) AS total_receivables,
+      COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS total_cogs_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount
+    FROM invoices i
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '11 months'
+    GROUP BY TO_CHAR(i.invoice_date, 'YYYY-MM')
+    ORDER BY period ASC;
+  `;
+
+  const salesByCityQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
+    SELECT
+      COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS city,
+      COUNT(i.id)::int AS total_invoices,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(i.balance_due), 0) AS total_receivables,
+      COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS total_cogs_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    GROUP BY COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee')
+    ORDER BY total_sales_amount DESC, city ASC
+    LIMIT $2;
+  `;
+
+  const salesByWarehouseQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
+    SELECT
+      w.id AS warehouse_id,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city,
+      COUNT(i.id)::int AS total_invoices,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(i.balance_due), 0) AS total_receivables,
+      COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS total_cogs_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount
+    FROM warehouses w
+    LEFT JOIN invoices i
+      ON i.warehouse_id = w.id
+      AND i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    GROUP BY w.id, w.name, w.city
+    ORDER BY total_sales_amount DESC, warehouse_name ASC;
+  `;
+
+  const salesByCustomerQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
+    SELECT
+      c.id AS customer_id,
+      c.business_name,
+      c.city,
+      COUNT(i.id)::int AS total_invoices,
+      MAX(i.invoice_date) AS last_invoice_date,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(i.balance_due), 0) AS total_receivables,
+      COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS total_cogs_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount
+    FROM customers c
+    INNER JOIN invoices i ON i.customer_id = c.id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    GROUP BY c.id, c.business_name, c.city
+    ORDER BY total_sales_amount DESC, total_collected_amount DESC
+    LIMIT $2;
+  `;
+
+  const salesByProductQuery = `
+    SELECT
+      p.id AS product_id,
+      p.name AS product_name,
+      p.sku,
+      p.category,
+      COALESCE(SUM(ii.quantity), 0) AS total_quantity_sold,
+      COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
+      COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount,
+      COALESCE(SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))), 0) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(ii.line_total), 0) > 0
+          THEN ROUND(
+            (COALESCE(SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))), 0)
+              / COALESCE(SUM(ii.line_total), 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM invoice_items ii
+    INNER JOIN invoices i ON i.id = ii.invoice_id
+    INNER JOIN products p ON p.id = ii.product_id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    GROUP BY p.id, p.name, p.sku, p.category
+    ORDER BY total_sales_amount DESC, total_quantity_sold DESC
+    LIMIT $2;
+  `;
+
+  const decliningProductsQuery = `
+    WITH product_windows AS (
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.sku,
+        COALESCE(SUM(
+          CASE
+            WHEN i.invoice_date >= CURRENT_DATE - INTERVAL '30 days'
+              THEN ii.quantity
+            ELSE 0
+          END
+        ), 0) AS current_quantity,
+        COALESCE(SUM(
+          CASE
+            WHEN i.invoice_date >= CURRENT_DATE - INTERVAL '30 days'
+              THEN ii.line_total
+            ELSE 0
+          END
+        ), 0) AS current_sales_amount,
+        COALESCE(SUM(
+          CASE
+            WHEN i.invoice_date >= CURRENT_DATE - INTERVAL '60 days'
+             AND i.invoice_date < CURRENT_DATE - INTERVAL '30 days'
+              THEN ii.quantity
+            ELSE 0
+          END
+        ), 0) AS previous_quantity,
+        COALESCE(SUM(
+          CASE
+            WHEN i.invoice_date >= CURRENT_DATE - INTERVAL '60 days'
+             AND i.invoice_date < CURRENT_DATE - INTERVAL '30 days'
+              THEN ii.line_total
+            ELSE 0
+          END
+        ), 0) AS previous_sales_amount
+      FROM products p
+      LEFT JOIN invoice_items ii ON ii.product_id = p.id
+      LEFT JOIN invoices i
+        ON i.id = ii.invoice_id
+       AND i.status IN ('issued', 'partial', 'paid')
+       AND i.invoice_date >= CURRENT_DATE - INTERVAL '60 days'
+      GROUP BY p.id, p.name, p.sku
+    )
+    SELECT
+      product_id,
+      product_name,
+      sku,
+      previous_quantity,
+      current_quantity,
+      previous_sales_amount,
+      current_sales_amount,
+      ROUND(current_quantity - previous_quantity, 2) AS quantity_delta,
+      CASE
+        WHEN previous_quantity > 0
+          THEN ROUND(((current_quantity - previous_quantity) / previous_quantity) * 100, 2)
+        ELSE NULL
+      END AS quantity_change_percent,
+      ROUND(current_sales_amount - previous_sales_amount, 2) AS sales_delta,
+      CASE
+        WHEN previous_sales_amount > 0
+          THEN ROUND(((current_sales_amount - previous_sales_amount) / previous_sales_amount) * 100, 2)
+        ELSE NULL
+      END AS sales_change_percent
+    FROM product_windows
+    WHERE previous_quantity > 0
+      AND current_quantity < previous_quantity
+    ORDER BY (previous_sales_amount - current_sales_amount) DESC, previous_quantity DESC, product_name ASC
+    LIMIT $1;
+  `;
+
+  const dormantClientsQuery = `
+    WITH customer_stats AS (
+      SELECT
+        c.id AS customer_id,
+        c.business_name,
+        c.city,
+        MAX(i.invoice_date) AS last_invoice_date,
+        COUNT(i.id)::int AS total_invoices,
+        COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+        COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+        COALESCE(SUM(i.balance_due), 0) AS total_receivables
+      FROM customers c
+      INNER JOIN invoices i ON i.customer_id = c.id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+      GROUP BY c.id, c.business_name, c.city
+    )
+    SELECT
+      customer_id,
+      business_name,
+      city,
+      last_invoice_date,
+      total_invoices,
+      total_sales_amount,
+      total_collected_amount,
+      total_receivables,
+      (CURRENT_DATE - last_invoice_date)::int AS days_since_last_invoice
+    FROM customer_stats
+    WHERE (CURRENT_DATE - last_invoice_date) >= $1
+    ORDER BY days_since_last_invoice DESC, total_sales_amount DESC, business_name ASC
+    LIMIT $2;
+  `;
+
+  const reactivationCandidatesQuery = `
+    WITH customer_stats AS (
+      SELECT
+        c.id AS customer_id,
+        c.business_name,
+        c.city,
+        MAX(i.invoice_date) AS last_invoice_date,
+        COUNT(i.id)::int AS total_invoices,
+        COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+        COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+        COALESCE(SUM(i.balance_due), 0) AS total_receivables
+      FROM customers c
+      INNER JOIN invoices i ON i.customer_id = c.id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+      GROUP BY c.id, c.business_name, c.city
+    )
+    SELECT
+      customer_id,
+      business_name,
+      city,
+      last_invoice_date,
+      total_invoices,
+      total_sales_amount,
+      total_collected_amount,
+      total_receivables,
+      (CURRENT_DATE - last_invoice_date)::int AS days_since_last_invoice
+    FROM customer_stats
+    WHERE (CURRENT_DATE - last_invoice_date) >= 30
+      AND COALESCE(total_receivables, 0) <= 0
+    ORDER BY total_sales_amount DESC, days_since_last_invoice DESC, business_name ASC
+    LIMIT $1;
+  `;
+
+  const [
+    summaryResult,
+    monthlyTrendResult,
+    salesByCityResult,
+    salesByWarehouseResult,
+    salesByCustomerResult,
+    salesByProductResult,
+    decliningProductsResult,
+    dormantClientsResult,
+    reactivationCandidatesResult
+  ] = await Promise.all([
+    pool.query(summaryQuery, [periodDays]),
+    pool.query(monthlyTrendQuery),
+    pool.query(salesByCityQuery, [periodDays, topLimit]),
+    pool.query(salesByWarehouseQuery, [periodDays]),
+    pool.query(salesByCustomerQuery, [periodDays, topLimit]),
+    pool.query(salesByProductQuery, [periodDays, topLimit]),
+    pool.query(decliningProductsQuery, [topLimit]),
+    pool.query(dormantClientsQuery, [45, topLimit]),
+    pool.query(reactivationCandidatesQuery, [topLimit])
+  ]);
+
+  const summary = summaryResult.rows[0] || {};
+
+  return {
+    filters: {
+      period_days: Number(periodDays || 0),
+      top_limit: Number(topLimit || 0),
+      dormant_days: 45,
+      reactivation_days: 30
+    },
+    summary: {
+      total_invoices: Number(summary.total_invoices || 0),
+      active_customers: Number(summary.active_customers || 0),
+      active_warehouses: Number(summary.active_warehouses || 0),
+      active_cities: Number(summary.active_cities || 0),
+      total_sales_amount: roundAmount(summary.total_sales_amount),
+      total_net_sales_amount: roundAmount(summary.total_net_sales_amount),
+      total_collected_amount: roundAmount(summary.total_collected_amount),
+      total_receivables: roundAmount(summary.total_receivables),
+      total_cogs_amount: roundAmount(summary.total_cogs_amount),
+      gross_profit_amount: roundAmount(summary.gross_profit_amount),
+      gross_margin_percent: Number(summary.gross_margin_percent || 0)
+    },
+    monthly_trend: monthlyTrendResult.rows.map((row) => ({
+      ...row,
+      total_invoices: Number(row.total_invoices || 0),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_net_sales_amount: roundAmount(row.total_net_sales_amount),
+      total_collected_amount: roundAmount(row.total_collected_amount),
+      total_receivables: roundAmount(row.total_receivables),
+      total_cogs_amount: roundAmount(row.total_cogs_amount),
+      gross_profit_amount: roundAmount(row.gross_profit_amount)
+    })),
+    sales_by_city: salesByCityResult.rows.map((row) => ({
+      ...row,
+      total_invoices: Number(row.total_invoices || 0),
+      total_customers: Number(row.total_customers || 0),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_collected_amount: roundAmount(row.total_collected_amount),
+      total_receivables: roundAmount(row.total_receivables),
+      total_cogs_amount: roundAmount(row.total_cogs_amount),
+      gross_profit_amount: roundAmount(row.gross_profit_amount)
+    })),
+    sales_by_warehouse: salesByWarehouseResult.rows.map((row) => ({
+      ...row,
+      total_invoices: Number(row.total_invoices || 0),
+      total_customers: Number(row.total_customers || 0),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_collected_amount: roundAmount(row.total_collected_amount),
+      total_receivables: roundAmount(row.total_receivables),
+      total_cogs_amount: roundAmount(row.total_cogs_amount),
+      gross_profit_amount: roundAmount(row.gross_profit_amount)
+    })),
+    sales_by_customer: salesByCustomerResult.rows.map((row) => ({
+      ...row,
+      total_invoices: Number(row.total_invoices || 0),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_collected_amount: roundAmount(row.total_collected_amount),
+      total_receivables: roundAmount(row.total_receivables),
+      total_cogs_amount: roundAmount(row.total_cogs_amount),
+      gross_profit_amount: roundAmount(row.gross_profit_amount)
+    })),
+    sales_by_product: salesByProductResult.rows.map((row) => ({
+      ...row,
+      total_quantity_sold: roundAmount(row.total_quantity_sold),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_cogs_amount: roundAmount(row.total_cogs_amount),
+      gross_profit_amount: roundAmount(row.gross_profit_amount),
+      gross_margin_percent: Number(row.gross_margin_percent || 0)
+    })),
+    declining_products: decliningProductsResult.rows.map((row) => ({
+      ...row,
+      previous_quantity: roundAmount(row.previous_quantity),
+      current_quantity: roundAmount(row.current_quantity),
+      previous_sales_amount: roundAmount(row.previous_sales_amount),
+      current_sales_amount: roundAmount(row.current_sales_amount),
+      quantity_delta: roundAmount(row.quantity_delta),
+      quantity_change_percent:
+        row.quantity_change_percent === null
+          ? null
+          : Number(row.quantity_change_percent),
+      sales_delta: roundAmount(row.sales_delta),
+      sales_change_percent:
+        row.sales_change_percent === null
+          ? null
+          : Number(row.sales_change_percent)
+    })),
+    dormant_clients: dormantClientsResult.rows.map((row) => ({
+      ...row,
+      total_invoices: Number(row.total_invoices || 0),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_collected_amount: roundAmount(row.total_collected_amount),
+      total_receivables: roundAmount(row.total_receivables),
+      days_since_last_invoice: Number(row.days_since_last_invoice || 0)
+    })),
+    reactivation_candidates: reactivationCandidatesResult.rows.map((row) => ({
+      ...row,
+      total_invoices: Number(row.total_invoices || 0),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_collected_amount: roundAmount(row.total_collected_amount),
+      total_receivables: roundAmount(row.total_receivables),
+      days_since_last_invoice: Number(row.days_since_last_invoice || 0)
+    }))
+  };
 }
 
 export async function getAccountingMonthlyOverview() {

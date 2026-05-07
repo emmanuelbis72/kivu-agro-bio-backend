@@ -4,6 +4,7 @@ import {
   getAccountingDashboardOverviewHandler,
   getGlobalStatsHandler,
   getStockVariationReportHandler,
+  getCommercialDashboardHandler,
   getAccountingGlobalStatsHandler,
   getAccountingMonthlyOverviewHandler,
   getAccountClassBalancesHandler,
@@ -22,6 +23,7 @@ import {
 const router = express.Router();
 
 router.get("/overview", getDashboardOverviewHandler);
+router.get("/commercial-overview", getCommercialDashboardHandler);
 router.get("/accounting-overview", getAccountingDashboardOverviewHandler);
 router.get("/stock-variations-report", getStockVariationReportHandler);
 

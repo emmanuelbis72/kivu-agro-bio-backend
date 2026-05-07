@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import { getAccountById, getAccountByNumber } from "../models/account.model.js";
 import { getCustomerById } from "../models/customer.model.js";
+import { getSupplierById } from "../models/supplier.model.js";
 import { getProductById } from "../models/product.model.js";
 import {
   getExpenseCategoryAccountByCategory,
@@ -66,6 +67,29 @@ async function resolveCustomerReceivableAccount(customerId, overrides = {}) {
 
   return resolvePostableAccount(
     process.env.ACCOUNTING_CUSTOMER_ACCOUNT_NUMBER || null
+  );
+}
+
+async function resolveSupplierPayableAccount(supplierId, overrides = {}) {
+  const overrideAccount = await resolvePostableAccount(
+    overrides.supplier_account_number || null
+  );
+
+  if (overrideAccount) {
+    return overrideAccount;
+  }
+
+  const supplier = await getSupplierById(supplierId);
+  const supplierAccount = await resolvePostableAccountById(
+    supplier?.payable_account_id || null
+  );
+
+  if (supplierAccount) {
+    return supplierAccount;
+  }
+
+  return resolvePostableAccount(
+    process.env.ACCOUNTING_SUPPLIER_ACCOUNT_NUMBER || null
   );
 }
 
@@ -531,7 +555,7 @@ export async function autoPostExpenseEntry({
         debit: amount,
         credit: 0,
         partner_type: "supplier",
-        partner_id: null
+        partner_id: expense.supplier_id || null
       },
       {
         account_id: paymentAccount.id,
@@ -539,7 +563,129 @@ export async function autoPostExpenseEntry({
         debit: 0,
         credit: amount,
         partner_type: "supplier",
-        partner_id: null
+        partner_id: expense.supplier_id || null
+      }
+    ]
+  });
+
+  return {
+    status: "posted",
+    journal_entry_id: result.entry.id,
+    entry_number: result.entry.entry_number
+  };
+}
+
+export async function autoPostPurchaseInvoiceEntry({
+  purchaseInvoice,
+  accounting = {},
+  created_by = null
+}) {
+  const supplierAccount = await resolveSupplierPayableAccount(
+    purchaseInvoice.supplier_id,
+    accounting
+  );
+  const inventoryAccount = await resolveInventoryAccount(accounting);
+
+  if (!supplierAccount || !inventoryAccount) {
+    return {
+      status: "skipped",
+      reason:
+        "Parametrage comptable achat incomplet : compte fournisseur ou compte de stock manquant/invalide."
+    };
+  }
+
+  const amount = roundAmount(purchaseInvoice.total_amount);
+
+  const result = await createAndPostEntry({
+    entry_date: purchaseInvoice.invoice_date,
+    journal_code: "AF",
+    description: `Achat lie a la facture fournisseur ${purchaseInvoice.purchase_invoice_number}`,
+    reference_type: "purchase_invoice",
+    reference_id: purchaseInvoice.id,
+    source_module: "purchase_invoice",
+    created_by,
+    validated_by: created_by,
+    lines: [
+      {
+        account_id: inventoryAccount.id,
+        description: "Debit stock",
+        debit: amount,
+        credit: 0,
+        partner_type: "supplier",
+        partner_id: purchaseInvoice.supplier_id
+      },
+      {
+        account_id: supplierAccount.id,
+        description: "Credit fournisseur",
+        debit: 0,
+        credit: amount,
+        partner_type: "supplier",
+        partner_id: purchaseInvoice.supplier_id
+      }
+    ]
+  });
+
+  return {
+    status: "posted",
+    journal_entry_id: result.entry.id,
+    entry_number: result.entry.entry_number
+  };
+}
+
+export async function autoPostSupplierPaymentEntry({
+  supplierPayment,
+  purchaseInvoice = null,
+  accounting = {},
+  created_by = null
+}) {
+  const supplierAccount = await resolveSupplierPayableAccount(
+    supplierPayment.supplier_id,
+    accounting
+  );
+  const paymentAccount = await resolvePaymentAccount(
+    supplierPayment.payment_method,
+    accounting
+  );
+
+  if (!supplierAccount || !paymentAccount) {
+    return {
+      status: "skipped",
+      reason:
+        "Parametrage comptable paiement fournisseur incomplet : compte fournisseur ou compte de tresorerie manquant/invalide."
+    };
+  }
+
+  const amount = roundAmount(supplierPayment.amount);
+  const referenceLabel =
+    purchaseInvoice?.purchase_invoice_number ||
+    supplierPayment.reference ||
+    `SP-${supplierPayment.id}`;
+
+  const result = await createAndPostEntry({
+    entry_date: supplierPayment.payment_date,
+    journal_code: "TR",
+    description: `Reglement fournisseur ${referenceLabel}`,
+    reference_type: "supplier_payment",
+    reference_id: supplierPayment.id,
+    source_module: "supplier_payment",
+    created_by,
+    validated_by: created_by,
+    lines: [
+      {
+        account_id: supplierAccount.id,
+        description: "Debit fournisseur",
+        debit: amount,
+        credit: 0,
+        partner_type: "supplier",
+        partner_id: supplierPayment.supplier_id
+      },
+      {
+        account_id: paymentAccount.id,
+        description: "Credit tresorerie",
+        debit: 0,
+        credit: amount,
+        partner_type: "supplier",
+        partner_id: supplierPayment.supplier_id
       }
     ]
   });

@@ -5,6 +5,7 @@ import {
   updateExpense,
   deleteExpense
 } from "../models/expense.model.js";
+import { getSupplierById } from "../models/supplier.model.js";
 import { autoPostExpenseEntry } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
 
@@ -50,7 +51,45 @@ function validateExpensePayload(body) {
     );
   }
 
+  if (
+    body.supplier_id !== undefined &&
+    body.supplier_id !== null &&
+    body.supplier_id !== "" &&
+    (!Number.isInteger(Number(body.supplier_id)) || Number(body.supplier_id) <= 0)
+  ) {
+    errors.push("Le champ 'supplier_id' doit etre un entier positif ou nul.");
+  }
+
   return errors;
+}
+
+async function normalizeExpenseSupplierPayload(body) {
+  const supplierId =
+    body.supplier_id === undefined ||
+    body.supplier_id === null ||
+    body.supplier_id === ""
+      ? null
+      : Number(body.supplier_id);
+
+  if (!supplierId) {
+    return {
+      supplier_id: null,
+      supplier: body.supplier?.trim() || null
+    };
+  }
+
+  const supplier = await getSupplierById(supplierId);
+
+  if (!supplier) {
+    const error = new Error("Fournisseur introuvable.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return {
+    supplier_id: supplier.id,
+    supplier: supplier.business_name
+  };
 }
 
 export async function createExpenseHandler(req, res, next) {
@@ -65,13 +104,16 @@ export async function createExpenseHandler(req, res, next) {
       });
     }
 
+    const supplierPayload = await normalizeExpenseSupplierPayload(req.body);
+
     const expense = await createExpense({
       expense_date: req.body.expense_date,
       category: req.body.category.trim(),
       description: req.body.description.trim(),
       amount: Number(req.body.amount),
       payment_method: req.body.payment_method?.trim() || "cash",
-      supplier: req.body.supplier?.trim(),
+      supplier_id: supplierPayload.supplier_id,
+      supplier: supplierPayload.supplier,
       reference: req.body.reference?.trim(),
       notes: req.body.notes?.trim()
     });
@@ -114,6 +156,13 @@ export async function createExpenseHandler(req, res, next) {
       }
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message
+      });
+    }
+
     next(error);
   }
 }
@@ -196,13 +245,16 @@ export async function updateExpenseHandler(req, res, next) {
       });
     }
 
+    const supplierPayload = await normalizeExpenseSupplierPayload(mergedPayload);
+
     const updatedExpense = await updateExpense(id, {
       expense_date: mergedPayload.expense_date,
       category: String(mergedPayload.category).trim(),
       description: String(mergedPayload.description).trim(),
       amount: Number(mergedPayload.amount),
       payment_method: mergedPayload.payment_method?.trim() || "cash",
-      supplier: mergedPayload.supplier?.trim(),
+      supplier_id: supplierPayload.supplier_id,
+      supplier: supplierPayload.supplier,
       reference: mergedPayload.reference?.trim(),
       notes: mergedPayload.notes?.trim()
     });
@@ -213,6 +265,13 @@ export async function updateExpenseHandler(req, res, next) {
       data: updatedExpense
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message
+      });
+    }
+
     next(error);
   }
 }

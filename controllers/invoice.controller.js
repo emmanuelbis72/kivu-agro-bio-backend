@@ -20,6 +20,49 @@ function isNonNegativeNumber(value) {
   return !Number.isNaN(Number(value)) && Number(value) >= 0;
 }
 
+function normalizeBusinessDate(value, fieldLabel, { required = false } = {}) {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    if (required) {
+      return {
+        error: `Le champ '${fieldLabel}' est obligatoire.`
+      };
+    }
+
+    return { value: null };
+  }
+
+  const normalized = String(value).trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return {
+      error: `Le champ '${fieldLabel}' doit etre au format YYYY-MM-DD.`
+    };
+  }
+
+  const [year, month, day] = normalized.split("-").map(Number);
+
+  if (year < 2000 || year > 2100) {
+    return {
+      error: `Le champ '${fieldLabel}' doit avoir une annee comprise entre 2000 et 2100.`
+    };
+  }
+
+  const date = new Date(`${normalized}T00:00:00.000Z`);
+
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() + 1 !== month ||
+    date.getUTCDate() !== day
+  ) {
+    return {
+      error: `Le champ '${fieldLabel}' contient une date invalide.`
+    };
+  }
+
+  return { value: normalized };
+}
+
 function normalizeStockForm(value) {
   if (value === undefined || value === null || value === "") {
     return null;
@@ -37,8 +80,8 @@ function normalizeUnit(value) {
 }
 
 function addDays(dateString, days) {
-  const date = new Date(dateString);
-  date.setDate(date.getDate() + Number(days || 0));
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
   return date.toISOString().split("T")[0];
 }
 
@@ -47,8 +90,20 @@ export async function createInvoiceHandler(req, res, next) {
     const customer_id = Number(req.body.customer_id);
     const warehouse_id = Number(req.body.warehouse_id);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
-    const invoice_date =
-      req.body.invoice_date || new Date().toISOString().split("T")[0];
+    const normalizedInvoiceDate = normalizeBusinessDate(
+      req.body.invoice_date || new Date().toISOString().split("T")[0],
+      "invoice_date",
+      { required: true }
+    );
+
+    if (normalizedInvoiceDate.error) {
+      return res.status(400).json({
+        success: false,
+        message: normalizedInvoiceDate.error
+      });
+    }
+
+    const invoice_date = normalizedInvoiceDate.value;
 
     if (!isPositiveInteger(customer_id)) {
       return res.status(400).json({
@@ -193,8 +248,20 @@ export async function createInvoiceHandler(req, res, next) {
       });
     }
 
-    const due_date =
-      req.body.due_date || addDays(invoice_date, customer.payment_terms_days);
+    const normalizedDueDate = normalizeBusinessDate(
+      req.body.due_date || addDays(invoice_date, customer.payment_terms_days),
+      "due_date",
+      { required: true }
+    );
+
+    if (normalizedDueDate.error) {
+      return res.status(400).json({
+        success: false,
+        message: normalizedDueDate.error
+      });
+    }
+
+    const due_date = normalizedDueDate.value;
     const invoice_number = await getNextInvoiceNumberForDate(invoice_date);
 
     const invoice = await createInvoiceWithItems({
@@ -287,8 +354,20 @@ export async function updateInvoiceHandler(req, res, next) {
     const customer_id = Number(req.body.customer_id);
     const warehouse_id = Number(req.body.warehouse_id);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
-    const invoice_date =
-      req.body.invoice_date || new Date().toISOString().split("T")[0];
+    const normalizedInvoiceDate = normalizeBusinessDate(
+      req.body.invoice_date || new Date().toISOString().split("T")[0],
+      "invoice_date",
+      { required: true }
+    );
+
+    if (normalizedInvoiceDate.error) {
+      return res.status(400).json({
+        success: false,
+        message: normalizedInvoiceDate.error
+      });
+    }
+
+    const invoice_date = normalizedInvoiceDate.value;
 
     if (!isPositiveInteger(customer_id)) {
       return res.status(400).json({
@@ -433,8 +512,20 @@ export async function updateInvoiceHandler(req, res, next) {
       });
     }
 
-    const due_date =
-      req.body.due_date || addDays(invoice_date, customer.payment_terms_days);
+    const normalizedDueDate = normalizeBusinessDate(
+      req.body.due_date || addDays(invoice_date, customer.payment_terms_days),
+      "due_date",
+      { required: true }
+    );
+
+    if (normalizedDueDate.error) {
+      return res.status(400).json({
+        success: false,
+        message: normalizedDueDate.error
+      });
+    }
+
+    const due_date = normalizedDueDate.value;
 
     const invoice = await updateInvoiceWithItems(id, {
       customer_id,
