@@ -20,7 +20,8 @@ import {
   getAccountClassBalances,
   getRecentJournalEntries,
   getCashForecast,
-  getCommercialDashboard
+  getCommercialDashboard,
+  getAccountingHealthSnapshot
 } from "../models/dashboard.model.js";
 
 function parsePositiveLimit(value, defaultValue = 10, maxValue = 100) {
@@ -134,14 +135,16 @@ export async function getAccountingDashboardOverviewHandler(req, res, next) {
       monthlyOverview,
       classBalances,
       recentJournalEntries,
-      cashForecast
+      cashForecast,
+      accountingHealth
     ] = await Promise.all([
       getAccountingGlobalStats(),
       getGlobalStats(),
       getAccountingMonthlyOverview(),
       getAccountClassBalances(),
       getRecentJournalEntries(recentLimit),
-      getCashForecast(recentLimit)
+      getCashForecast(recentLimit),
+      getAccountingHealthSnapshot()
     ]);
 
     return res.status(200).json({
@@ -152,7 +155,8 @@ export async function getAccountingDashboardOverviewHandler(req, res, next) {
         accounting_monthly_overview: monthlyOverview,
         account_class_balances: classBalances,
         recent_journal_entries: recentJournalEntries,
-        cash_forecast: cashForecast
+        cash_forecast: cashForecast,
+        accounting_health: accountingHealth
       }
     });
   } catch (error) {

@@ -6,6 +6,11 @@ import {
   updateCustomer,
   deleteCustomer
 } from "../models/customer.model.js";
+import {
+  buildExportFilename,
+  createCustomerAccountStatementPdfBuffer,
+  sendDownloadBuffer
+} from "../services/reportExport.service.js";
 
 function validateCustomerPayload(body) {
   const errors = [];
@@ -170,6 +175,38 @@ export async function getCustomerAccountStatementHandler(req, res, next) {
       success: true,
       data: statement
     });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function exportCustomerAccountStatementPdfHandler(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "ID client invalide."
+      });
+    }
+
+    const statement = await getCustomerAccountStatement(id);
+
+    if (!statement) {
+      return res.status(404).json({
+        success: false,
+        message: "Client introuvable."
+      });
+    }
+
+    const buffer = await createCustomerAccountStatementPdfBuffer(statement);
+    const filename = buildExportFilename(
+      `etat-compte-client-${statement.customer?.business_name || id}`,
+      "pdf"
+    );
+
+    return sendDownloadBuffer(res, buffer, filename, "application/pdf");
   } catch (error) {
     next(error);
   }

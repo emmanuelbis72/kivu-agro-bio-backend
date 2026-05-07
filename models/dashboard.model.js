@@ -346,6 +346,198 @@ export async function getAccountingGlobalStats() {
   return result.rows[0];
 }
 
+export async function getAccountingHealthSnapshot() {
+  await ensurePurchaseInvoicesSchema(pool);
+
+  const [
+    documentStatusResult,
+    journalStatusResult,
+    imbalancedResult,
+    orphanResult,
+    paymentMethodMappingsResult,
+    paymentMethodCoverageResult,
+    expenseCategoryUsageResult
+  ] = await Promise.all([
+    pool.query(`
+      SELECT
+        (SELECT COUNT(*)::int FROM payments WHERE accounting_entry_id IS NULL OR COALESCE(accounting_status, '') <> 'posted') AS payments_to_fix,
+        (SELECT COUNT(*)::int FROM supplier_payments WHERE accounting_entry_id IS NULL OR COALESCE(accounting_status, '') <> 'posted') AS supplier_payments_to_fix,
+        (SELECT COUNT(*)::int FROM invoices WHERE COALESCE(status, 'issued') <> 'cancelled' AND (accounting_entry_id IS NULL OR COALESCE(accounting_status, '') <> 'posted')) AS invoices_to_fix,
+        (SELECT COUNT(*)::int FROM purchase_invoices WHERE COALESCE(status, 'issued') <> 'cancelled' AND (accounting_entry_id IS NULL OR COALESCE(accounting_status, '') <> 'posted')) AS purchase_invoices_to_fix,
+        (SELECT COUNT(*)::int FROM expenses WHERE accounting_entry_id IS NULL OR COALESCE(accounting_status, '') <> 'posted') AS expenses_to_fix;
+    `),
+    pool.query(`
+      SELECT
+        COUNT(*)::int AS total_entries,
+        COUNT(*) FILTER (WHERE status = 'draft')::int AS draft_entries,
+        COUNT(*) FILTER (WHERE status = 'posted')::int AS posted_entries,
+        COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_entries
+      FROM journal_entries;
+    `),
+    pool.query(`
+      SELECT COUNT(*)::int AS imbalanced_entries
+      FROM (
+        SELECT je.id
+        FROM journal_entries je
+        INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
+        WHERE je.status = 'posted'
+        GROUP BY je.id
+        HAVING ROUND(COALESCE(SUM(jel.debit), 0)::numeric, 2)
+             <> ROUND(COALESCE(SUM(jel.credit), 0)::numeric, 2)
+      ) AS imbalanced;
+    `),
+    pool.query(`
+      SELECT
+        (
+          (SELECT COUNT(*) FROM payments p LEFT JOIN journal_entries je ON je.id = p.accounting_entry_id WHERE p.accounting_entry_id IS NOT NULL AND je.id IS NULL) +
+          (SELECT COUNT(*) FROM supplier_payments sp LEFT JOIN journal_entries je ON je.id = sp.accounting_entry_id WHERE sp.accounting_entry_id IS NOT NULL AND je.id IS NULL) +
+          (SELECT COUNT(*) FROM invoices i LEFT JOIN journal_entries je ON je.id = i.accounting_entry_id WHERE i.accounting_entry_id IS NOT NULL AND je.id IS NULL) +
+          (SELECT COUNT(*) FROM purchase_invoices pi LEFT JOIN journal_entries je ON je.id = pi.accounting_entry_id WHERE pi.accounting_entry_id IS NOT NULL AND je.id IS NULL) +
+          (SELECT COUNT(*) FROM expenses e LEFT JOIN journal_entries je ON je.id = e.accounting_entry_id WHERE e.accounting_entry_id IS NOT NULL AND je.id IS NULL)
+        )::int AS orphan_links;
+    `),
+    pool.query(`
+      SELECT
+        COUNT(*)::int AS payment_method_mappings_count,
+        ARRAY(
+          SELECT expected_method
+          FROM unnest(ARRAY['cash', 'mobile_money', 'bank_transfer', 'card']) AS expected_method
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM payment_method_accounts pma
+            WHERE pma.payment_method = expected_method
+          )
+        ) AS missing_payment_methods
+      FROM payment_method_accounts;
+    `),
+    pool.query(`
+      SELECT
+        COUNT(*)::int AS expense_category_mappings_count,
+        ARRAY(
+          SELECT DISTINCT e.category
+          FROM expenses e
+          WHERE COALESCE(TRIM(e.category), '') <> ''
+            AND NOT EXISTS (
+              SELECT 1
+              FROM expense_category_accounts eca
+              WHERE LOWER(TRIM(eca.category)) = LOWER(TRIM(e.category))
+            )
+          ORDER BY e.category
+        ) AS unmapped_expense_categories
+      FROM expense_category_accounts;
+    `),
+    pool.query(`
+      SELECT
+        COUNT(*)::int AS configured_expense_categories
+      FROM expense_category_accounts;
+    `)
+  ]);
+
+  const documentStatus = documentStatusResult.rows[0] || {};
+  const journalStatus = journalStatusResult.rows[0] || {};
+  const imbalanced = imbalancedResult.rows[0] || {};
+  const orphan = orphanResult.rows[0] || {};
+  const paymentCoverage = paymentMethodMappingsResult.rows[0] || {};
+  const expenseCategoryCoverage = paymentMethodCoverageResult.rows[0] || {};
+  const expenseCategoryCount = expenseCategoryUsageResult.rows[0] || {};
+
+  const issues = [];
+
+  const totals = {
+    payments_to_fix: Number(documentStatus.payments_to_fix || 0),
+    supplier_payments_to_fix: Number(documentStatus.supplier_payments_to_fix || 0),
+    invoices_to_fix: Number(documentStatus.invoices_to_fix || 0),
+    purchase_invoices_to_fix: Number(documentStatus.purchase_invoices_to_fix || 0),
+    expenses_to_fix: Number(documentStatus.expenses_to_fix || 0),
+    draft_entries: Number(journalStatus.draft_entries || 0),
+    imbalanced_entries: Number(imbalanced.imbalanced_entries || 0),
+    orphan_links: Number(orphan.orphan_links || 0),
+    payment_method_mappings_count: Number(
+      paymentCoverage.payment_method_mappings_count || 0
+    ),
+    configured_expense_categories: Number(
+      expenseCategoryCount.configured_expense_categories || 0
+    )
+  };
+
+  if (totals.payments_to_fix > 0) {
+    issues.push(`${totals.payments_to_fix} paiement(s) a recomptabiliser`);
+  }
+  if (totals.supplier_payments_to_fix > 0) {
+    issues.push(
+      `${totals.supplier_payments_to_fix} paiement(s) fournisseur a recomptabiliser`
+    );
+  }
+  if (totals.invoices_to_fix > 0) {
+    issues.push(`${totals.invoices_to_fix} facture(s) client non postee(s)`);
+  }
+  if (totals.purchase_invoices_to_fix > 0) {
+    issues.push(
+      `${totals.purchase_invoices_to_fix} facture(s) fournisseur non postee(s)`
+    );
+  }
+  if (totals.expenses_to_fix > 0) {
+    issues.push(`${totals.expenses_to_fix} depense(s) non postee(s)`);
+  }
+  if (totals.draft_entries > 0) {
+    issues.push(`${totals.draft_entries} ecriture(s) en brouillon`);
+  }
+  if (totals.imbalanced_entries > 0) {
+    issues.push(`${totals.imbalanced_entries} ecriture(s) desequilibree(s)`);
+  }
+  if (totals.orphan_links > 0) {
+    issues.push(`${totals.orphan_links} lien(s) comptables orphelin(s)`);
+  }
+
+  const missingPaymentMethods = Array.isArray(
+    paymentCoverage.missing_payment_methods
+  )
+    ? paymentCoverage.missing_payment_methods.filter(Boolean)
+    : [];
+  const unmappedExpenseCategories = Array.isArray(
+    expenseCategoryCoverage.unmapped_expense_categories
+  )
+    ? expenseCategoryCoverage.unmapped_expense_categories.filter(Boolean)
+    : [];
+
+  if (missingPaymentMethods.length > 0) {
+    issues.push(
+      `modes de paiement sans mapping: ${missingPaymentMethods.join(", ")}`
+    );
+  }
+  if (unmappedExpenseCategories.length > 0) {
+    issues.push(
+      `categories de depense sans mapping: ${unmappedExpenseCategories.join(", ")}`
+    );
+  }
+
+  const status =
+    totals.imbalanced_entries > 0 ||
+    totals.orphan_links > 0 ||
+    missingPaymentMethods.length > 0
+      ? "critical"
+      : issues.length > 0
+      ? "attention"
+      : "healthy";
+
+  return {
+    status,
+    issues,
+    totals: {
+      ...totals,
+      total_entries: Number(journalStatus.total_entries || 0),
+      posted_entries: Number(journalStatus.posted_entries || 0),
+      cancelled_entries: Number(journalStatus.cancelled_entries || 0)
+    },
+    coverage: {
+      payment_method_mappings_count: totals.payment_method_mappings_count,
+      missing_payment_methods: missingPaymentMethods,
+      configured_expense_categories: totals.configured_expense_categories,
+      unmapped_expense_categories: unmappedExpenseCategories
+    }
+  };
+}
+
 export async function getCashForecast(detailLimit = 10) {
   await ensurePurchaseInvoicesSchema(pool);
 

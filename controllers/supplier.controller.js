@@ -6,6 +6,11 @@ import {
   deleteSupplier
 } from "../models/supplier.model.js";
 import { getSupplierAccountStatement } from "../models/purchaseInvoice.model.js";
+import {
+  buildExportFilename,
+  createSupplierAccountStatementPdfBuffer,
+  sendDownloadBuffer
+} from "../services/reportExport.service.js";
 
 const allowedSupplierTypes = [
   "vendor",
@@ -182,6 +187,38 @@ export async function getSupplierAccountStatementHandler(req, res, next) {
       success: true,
       data: statement
     });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function exportSupplierAccountStatementPdfHandler(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "ID fournisseur invalide."
+      });
+    }
+
+    const statement = await getSupplierAccountStatement(id);
+
+    if (!statement) {
+      return res.status(404).json({
+        success: false,
+        message: "Fournisseur introuvable."
+      });
+    }
+
+    const buffer = await createSupplierAccountStatementPdfBuffer(statement);
+    const filename = buildExportFilename(
+      `etat-compte-fournisseur-${statement.supplier?.business_name || id}`,
+      "pdf"
+    );
+
+    return sendDownloadBuffer(res, buffer, filename, "application/pdf");
   } catch (error) {
     next(error);
   }
