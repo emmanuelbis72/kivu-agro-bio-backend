@@ -8,13 +8,22 @@ import {
   getRecentJournalEntries,
   getAccountingMonthlyOverview,
   getAccountClassBalances,
-  getRecentPayments
+  getRecentPayments,
+  getCashForecast,
+  getCommercialDashboard,
+  getAccountingHealthSnapshot,
+  getLowRotationProducts
 } from "../../models/dashboard.model.js";
 import {
   getBalanceSheet,
   getIncomeStatement,
   getTrialBalance
 } from "../../models/accountingReport.model.js";
+import { getMonthlyClosePack } from "../../models/monthlyClose.model.js";
+import { getAllBudgets, getBudgetVsActual } from "../../models/budget.model.js";
+import { getAllPurchaseInvoices } from "../../models/purchaseInvoice.model.js";
+import { getAllPurchaseOrders } from "../../models/purchaseOrder.model.js";
+import { getProductionBatches } from "../../models/production.model.js";
 import { getAllExpenses } from "../../models/expense.model.js";
 import { getAllInvoices } from "../../models/invoice.model.js";
 import { detectIntent } from "./naturalQuery.service.js";
@@ -49,6 +58,55 @@ function round2(value) {
 function getEnvNumber(name, fallback) {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+function average(values = []) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return 0;
+  }
+
+  return (
+    values.reduce((sum, value) => sum + Number(value || 0), 0) / values.length
+  );
+}
+
+async function safeExecute(task, fallback) {
+  try {
+    return await task();
+  } catch (error) {
+    console.warn("[AI] Optional context skipped:", error.message);
+    return fallback;
+  }
+}
+
+function getPreviousClosedMonth() {
+  const now = new Date();
+  const previousMonthDate = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)
+  );
+
+  return {
+    year: previousMonthDate.getUTCFullYear(),
+    month: previousMonthDate.getUTCMonth() + 1
+  };
+}
+
+async function getPrimaryBudgetComparison() {
+  const budgets = await getAllBudgets();
+  const currentYear = new Date().getUTCFullYear();
+  const primaryBudget =
+    budgets.find(
+      (budget) => budget.is_active && Number(budget.fiscal_year) === currentYear
+    ) ||
+    budgets.find((budget) => budget.is_active) ||
+    budgets[0] ||
+    null;
+
+  if (!primaryBudget) {
+    return null;
+  }
+
+  return getBudgetVsActual(primaryBudget.id);
 }
 
 function toIsoDate(value) {
@@ -98,16 +156,18 @@ function sanitizeReasoningResponse(reasoning = {}, period = "global") {
   const opportunities = Array.isArray(reasoning.opportunities)
     ? reasoning.opportunities
     : [];
-  const recommendations = Array.isArray(reasoning.actions)
-    ? reasoning.actions
-    : Array.isArray(reasoning.recommendations)
-    ? reasoning.recommendations
-    : [];
+  const actions = Array.isArray(reasoning.actions) ? reasoning.actions : [];
+  const recommendations =
+    actions.length > 0
+      ? actions
+      : Array.isArray(reasoning.recommendations)
+      ? reasoning.recommendations
+      : [];
 
   return {
     intent: "ai_reasoning",
     period,
-    source_module: "ai_ceo",
+    source_module: "ai_assistant",
     summary: truncateText(reasoning.summary, 900),
     answer: truncateText(reasoning.analysis, 5000),
     metrics: sanitizeMetrics(reasoning.metrics),
@@ -199,6 +259,14 @@ function getReasoningFocus(intent) {
       return "customers";
     case "expense_pressure_analysis":
       return "expenses";
+    case "procurement_overview":
+      return "procurement";
+    case "production_performance":
+      return "production";
+    case "budget_vs_actual_analysis":
+      return "budget";
+    case "forecast_projection":
+      return "forecast";
     case "cash_position_analysis":
       return "cash";
     case "accounting_summary":
@@ -360,6 +428,679 @@ function compactTrialBalance(report = {}) {
   };
 }
 
+function summarizeCashForecast(forecast = {}) {
+  const safeForecast = forecast || {};
+  const horizons = Array.isArray(safeForecast.horizons)
+    ? safeForecast.horizons
+    : [];
+
+  return {
+    summary: safeForecast.summary || {},
+    horizons: horizons.map((row) => ({
+      horizon_days: Number(row.horizon_days || 0),
+      expected_inflows: round2(row.expected_inflows),
+      expected_outflows: round2(row.expected_outflows),
+      projected_balance: round2(row.projected_balance)
+    })),
+    receivables_due_soon: (safeForecast.receivables_due_soon || [])
+      .slice(0, 5)
+      .map((row) => ({
+        customer_name: row.customer_name,
+        invoice_number: row.invoice_number,
+        due_date: row.due_date,
+        balance_due: round2(row.balance_due),
+        days_from_today: Number(row.days_from_today || 0)
+      })),
+    payables_due_soon: (safeForecast.payables_due_soon || [])
+      .slice(0, 5)
+      .map((row) => ({
+        supplier_name: row.supplier_name,
+        purchase_invoice_number: row.purchase_invoice_number,
+        due_date: row.due_date,
+        balance_due: round2(row.balance_due),
+        days_from_today: Number(row.days_from_today || 0)
+      }))
+  };
+}
+
+function summarizeCommercialDashboard(dashboard = {}) {
+  const safeDashboard = dashboard || {};
+  const summary = safeDashboard.summary || {};
+
+  return {
+    summary: {
+      total_sales_amount: round2(summary.total_sales_amount),
+      total_net_sales_amount: round2(summary.total_net_sales_amount),
+      total_collected_amount: round2(summary.total_collected_amount),
+      total_receivables: round2(summary.total_receivables),
+      gross_profit_amount: round2(summary.gross_profit_amount),
+      gross_margin_percent: round2(summary.gross_margin_percent),
+      total_invoices: Number(summary.total_invoices || 0),
+      active_customers: Number(summary.active_customers || 0),
+      active_warehouses: Number(summary.active_warehouses || 0),
+      active_cities: Number(summary.active_cities || 0)
+    },
+    monthly_trend: (safeDashboard.monthly_trend || []).slice(-4).map((row) => ({
+      period: row.period,
+      total_sales_amount: round2(row.total_sales_amount),
+      total_collected_amount: round2(row.total_collected_amount),
+      total_receivables: round2(row.total_receivables),
+      gross_profit_amount: round2(row.gross_profit_amount)
+    })),
+    sales_by_city: (safeDashboard.sales_by_city || []).slice(0, 4).map((row) => ({
+      city: row.city,
+      total_sales_amount: round2(row.total_sales_amount),
+      total_receivables: round2(row.total_receivables),
+      gross_profit_amount: round2(row.gross_profit_amount)
+    })),
+    sales_by_warehouse: (safeDashboard.sales_by_warehouse || [])
+      .slice(0, 4)
+      .map((row) => ({
+        warehouse_name: row.warehouse_name,
+        warehouse_city: row.warehouse_city,
+        total_sales_amount: round2(row.total_sales_amount),
+        total_receivables: round2(row.total_receivables),
+        gross_profit_amount: round2(row.gross_profit_amount)
+      })),
+    sales_by_customer: (safeDashboard.sales_by_customer || [])
+      .slice(0, 5)
+      .map((row) => ({
+        business_name: row.business_name,
+        city: row.city || null,
+        total_sales_amount: round2(row.total_sales_amount),
+        total_collected_amount: round2(row.total_collected_amount),
+        total_receivables: round2(row.total_receivables),
+        gross_profit_amount: round2(row.gross_profit_amount),
+        last_invoice_date: row.last_invoice_date
+      })),
+    sales_by_product: (safeDashboard.sales_by_product || [])
+      .slice(0, 5)
+      .map((row) => ({
+        product_name: row.product_name,
+        category: row.category || null,
+        total_quantity_sold: round2(row.total_quantity_sold),
+        total_sales_amount: round2(row.total_sales_amount),
+        gross_profit_amount: round2(row.gross_profit_amount),
+        gross_margin_percent: round2(row.gross_margin_percent)
+      })),
+    declining_products: (safeDashboard.declining_products || [])
+      .slice(0, 4)
+      .map((row) => ({
+        product_name: row.product_name,
+        previous_sales_amount: round2(row.previous_sales_amount),
+        current_sales_amount: round2(row.current_sales_amount),
+        sales_change_percent:
+          row.sales_change_percent === null
+            ? null
+            : round2(row.sales_change_percent)
+      })),
+    dormant_clients: (safeDashboard.dormant_clients || []).slice(0, 4).map((row) => ({
+      business_name: row.business_name,
+      city: row.city || null,
+      total_sales_amount: round2(row.total_sales_amount),
+      days_since_last_invoice: Number(row.days_since_last_invoice || 0)
+    })),
+    reactivation_candidates: (safeDashboard.reactivation_candidates || [])
+      .slice(0, 4)
+      .map((row) => ({
+        business_name: row.business_name,
+        city: row.city || null,
+        total_sales_amount: round2(row.total_sales_amount),
+        days_since_last_invoice: Number(row.days_since_last_invoice || 0)
+      }))
+  };
+}
+
+function summarizeAccountingHealth(health = {}) {
+  const safeHealth = health || {};
+
+  return {
+    status: safeHealth.status || "attention",
+    issues: (safeHealth.issues || []).slice(0, 6),
+    totals: {
+      payments_to_fix: Number(safeHealth?.totals?.payments_to_fix || 0),
+      supplier_payments_to_fix: Number(
+        safeHealth?.totals?.supplier_payments_to_fix || 0
+      ),
+      invoices_to_fix: Number(safeHealth?.totals?.invoices_to_fix || 0),
+      purchase_invoices_to_fix: Number(
+        safeHealth?.totals?.purchase_invoices_to_fix || 0
+      ),
+      expenses_to_fix: Number(safeHealth?.totals?.expenses_to_fix || 0),
+      draft_entries: Number(safeHealth?.totals?.draft_entries || 0),
+      imbalanced_entries: Number(safeHealth?.totals?.imbalanced_entries || 0),
+      orphan_links: Number(safeHealth?.totals?.orphan_links || 0),
+      total_entries: Number(safeHealth?.totals?.total_entries || 0),
+      posted_entries: Number(safeHealth?.totals?.posted_entries || 0)
+    },
+    coverage: {
+      payment_method_mappings_count: Number(
+        safeHealth?.coverage?.payment_method_mappings_count || 0
+      ),
+      missing_payment_methods: (
+        safeHealth?.coverage?.missing_payment_methods || []
+      ).slice(0, 6),
+      configured_expense_categories: Number(
+        safeHealth?.coverage?.configured_expense_categories || 0
+      ),
+      unmapped_expense_categories: (
+        safeHealth?.coverage?.unmapped_expense_categories || []
+      ).slice(0, 6)
+    }
+  };
+}
+
+function summarizePurchaseInvoices(invoices = []) {
+  const rows = Array.isArray(invoices) ? invoices : [];
+  const openRows = rows.filter(
+    (row) =>
+      ["issued", "partial"].includes(String(row.status || "").toLowerCase()) &&
+      Number(row.balance_due || 0) > 0
+  );
+  const totalPurchased = rows.reduce(
+    (sum, row) => sum + Number(row.total_amount || 0),
+    0
+  );
+  const totalPaid = rows.reduce((sum, row) => sum + Number(row.paid_amount || 0), 0);
+  const totalBalanceDue = openRows.reduce(
+    (sum, row) => sum + Number(row.balance_due || 0),
+    0
+  );
+  const topSuppliers = new Map();
+
+  rows.forEach((row) => {
+    const key = String(row.supplier_name || "Sans fournisseur");
+    const current = topSuppliers.get(key) || {
+      supplier_name: key,
+      total_amount: 0,
+      balance_due: 0
+    };
+
+    current.total_amount += Number(row.total_amount || 0);
+    current.balance_due += Number(row.balance_due || 0);
+    topSuppliers.set(key, current);
+  });
+
+  return {
+    summary: {
+      total_invoices: rows.length,
+      open_invoices: openRows.length,
+      total_purchased: round2(totalPurchased),
+      total_paid: round2(totalPaid),
+      total_balance_due: round2(totalBalanceDue)
+    },
+    top_suppliers: Array.from(topSuppliers.values())
+      .sort((left, right) => right.total_amount - left.total_amount)
+      .slice(0, 5)
+      .map((row) => ({
+        supplier_name: row.supplier_name,
+        total_amount: round2(row.total_amount),
+        balance_due: round2(row.balance_due)
+      })),
+    recent_invoices: rows.slice(0, 5).map((row) => ({
+      purchase_invoice_number: row.purchase_invoice_number,
+      supplier_name: row.supplier_name,
+      invoice_date: row.invoice_date,
+      due_date: row.due_date,
+      status: row.status,
+      total_amount: round2(row.total_amount),
+      balance_due: round2(row.balance_due)
+    }))
+  };
+}
+
+function summarizePurchaseOrders(orders = []) {
+  const rows = Array.isArray(orders) ? orders : [];
+  const openStatuses = new Set(["draft", "ordered", "partially_received"]);
+  const openRows = rows.filter((row) =>
+    openStatuses.has(String(row.status || "").toLowerCase())
+  );
+
+  return {
+    summary: {
+      total_orders: rows.length,
+      open_orders: openRows.length,
+      total_ordered_amount: round2(
+        rows.reduce((sum, row) => sum + Number(row.total_amount || 0), 0)
+      )
+    },
+    recent_orders: rows.slice(0, 5).map((row) => ({
+      purchase_order_number: row.purchase_order_number,
+      supplier_name: row.supplier_name,
+      warehouse_name: row.warehouse_name,
+      order_date: row.order_date,
+      expected_date: row.expected_date,
+      status: row.status,
+      total_amount: round2(row.total_amount),
+      total_ordered_quantity: round2(row.total_ordered_quantity),
+      total_received_quantity: round2(row.total_received_quantity)
+    }))
+  };
+}
+
+function summarizeProductionBatches(batches = []) {
+  const rows = Array.isArray(batches) ? batches : [];
+  const productTotals = new Map();
+
+  rows.forEach((row) => {
+    const key = String(row.finished_product_name || "Produit fini");
+    const current = productTotals.get(key) || {
+      finished_product_name: key,
+      total_quantity_produced: 0
+    };
+
+    current.total_quantity_produced += Number(row.quantity_produced || 0);
+    productTotals.set(key, current);
+  });
+
+  return {
+    summary: {
+      total_batches: rows.length,
+      total_quantity_produced: round2(
+        rows.reduce((sum, row) => sum + Number(row.quantity_produced || 0), 0)
+      )
+    },
+    top_finished_products: Array.from(productTotals.values())
+      .sort(
+        (left, right) =>
+          right.total_quantity_produced - left.total_quantity_produced
+      )
+      .slice(0, 5)
+      .map((row) => ({
+        finished_product_name: row.finished_product_name,
+        total_quantity_produced: round2(row.total_quantity_produced)
+      })),
+    recent_batches: rows.slice(0, 5).map((row) => ({
+      batch_number: row.batch_number,
+      production_date: row.production_date,
+      warehouse_name: row.warehouse_name,
+      finished_product_name: row.finished_product_name,
+      quantity_produced: round2(row.quantity_produced),
+      status: row.status
+    }))
+  };
+}
+
+function summarizeBudgetComparison(comparison) {
+  if (!comparison) {
+    return null;
+  }
+
+  const rows = Array.isArray(comparison.rows) ? comparison.rows : [];
+  const monthRows = Array.isArray(comparison.month_rows)
+    ? comparison.month_rows
+    : [];
+
+  return {
+    budget: {
+      id: comparison?.budget?.id,
+      name: comparison?.budget?.name,
+      fiscal_year: Number(comparison?.budget?.fiscal_year || 0),
+      warehouse_name: comparison?.budget?.warehouse_name || null
+    },
+    summary: {
+      total_planned: round2(comparison?.summary?.total_planned),
+      total_actual: round2(comparison?.summary?.total_actual),
+      total_variance: round2(comparison?.summary?.total_variance),
+      attainment_percent: round2(comparison?.summary?.attainment_percent)
+    },
+    top_category_variances: rows
+      .slice()
+      .sort(
+        (left, right) =>
+          Math.abs(Number(right.variance_total || 0)) -
+          Math.abs(Number(left.variance_total || 0))
+      )
+      .slice(0, 5)
+      .map((row) => ({
+        category_label: row.category_label,
+        category_type: row.category_type,
+        planned_total: round2(row.planned_total),
+        actual_total: round2(row.actual_total),
+        variance_total: round2(row.variance_total),
+        attainment_percent: round2(row.attainment_percent)
+      })),
+    top_month_variances: monthRows
+      .slice()
+      .sort(
+        (left, right) =>
+          Math.abs(Number(right.variance_total || 0)) -
+          Math.abs(Number(left.variance_total || 0))
+      )
+      .slice(0, 4)
+      .map((row) => ({
+        month_number: Number(row.month_number || 0),
+        month_label: row.month_label,
+        planned_total: round2(row.planned_total),
+        actual_total: round2(row.actual_total),
+        variance_total: round2(row.variance_total)
+      }))
+  };
+}
+
+function summarizeMonthlyClosePack(pack) {
+  if (!pack) {
+    return null;
+  }
+
+  return {
+    period: pack.period,
+    executive_summary: pack.executive_summary || {},
+    accounting_snapshot: pack.accounting_snapshot || {},
+    close_checklist: {
+      close_status: pack?.close_checklist?.close_status || "attention",
+      critical_count: Number(pack?.close_checklist?.critical_count || 0),
+      attention_count: Number(pack?.close_checklist?.attention_count || 0),
+      key_items: (pack?.close_checklist?.items || [])
+        .filter((item) => item.status !== "done")
+        .slice(0, 5)
+        .map((item) => ({
+          label: item.label,
+          status: item.status,
+          detail: item.detail
+        }))
+    },
+    cash_projection: {
+      horizons: (pack?.cash_projection?.horizons || []).slice(0, 3),
+      receivables_due: (pack?.cash_projection?.receivables_due || [])
+        .slice(0, 4)
+        .map((row) => ({
+          customer_name: row.customer_name,
+          invoice_number: row.invoice_number,
+          balance_due: round2(row.balance_due),
+          days_from_cutoff: row.days_from_cutoff
+        })),
+      payables_due: (pack?.cash_projection?.payables_due || [])
+        .slice(0, 4)
+        .map((row) => ({
+          supplier_name: row.supplier_name,
+          purchase_invoice_number: row.purchase_invoice_number,
+          balance_due: round2(row.balance_due),
+          days_from_cutoff: row.days_from_cutoff
+        }))
+    }
+  };
+}
+
+function buildPredictiveSignals({
+  businessRules = {},
+  commercialDashboard,
+  cashForecast,
+  stockAlerts = [],
+  lowRotationProducts = [],
+  budgetComparison,
+  purchaseInvoiceSummary,
+  productionSummary
+}) {
+  const commercialTrend = commercialDashboard?.monthly_trend || [];
+  const recentTrend = commercialTrend.slice(-3);
+  const averageMonthlySales = round2(
+    average(recentTrend.map((row) => row.total_sales_amount))
+  );
+  const averageMonthlyCollections = round2(
+    average(recentTrend.map((row) => row.total_collected_amount))
+  );
+  const averageMonthlyMargin = round2(
+    average(
+      recentTrend.map((row) => {
+        const netSales = Number(row.total_sales_amount || 0);
+        if (netSales <= 0) return 0;
+        return (Number(row.gross_profit_amount || 0) / netSales) * 100;
+      })
+    )
+  );
+  const j7 = (cashForecast?.horizons || []).find(
+    (row) => Number(row.horizon_days || 0) === 7
+  );
+  const j30 = (cashForecast?.horizons || []).find(
+    (row) => Number(row.horizon_days || 0) === 30
+  );
+  const j60 = (cashForecast?.horizons || []).find(
+    (row) => Number(row.horizon_days || 0) === 60
+  );
+  const minimumCashThreshold = Number(
+    businessRules.minimum_cash_threshold_usd || 3000
+  );
+  const signals = [];
+
+  if (j30 && Number(j30.projected_balance || 0) < minimumCashThreshold) {
+    signals.push(
+      `Projection J+30 sous le seuil de cash: ${round2(
+        j30.projected_balance
+      )} USD pour un minimum cible de ${round2(minimumCashThreshold)} USD.`
+    );
+  }
+
+  if ((commercialDashboard?.declining_products || []).length > 0) {
+    const leadDecline = commercialDashboard.declining_products[0];
+    signals.push(
+      `Produit en baisse a surveiller: ${leadDecline.product_name} (${round2(
+        leadDecline.sales_change_percent
+      )}% sur 30 jours).`
+    );
+  }
+
+  if (Number(stockAlerts.length || 0) > 0) {
+    signals.push(
+      `${stockAlerts.length} alerte(s) stock peuvent freiner les ventes projetees.`
+    );
+  }
+
+  if (Number(lowRotationProducts.length || 0) > 0) {
+    signals.push(
+      `${lowRotationProducts.length} produit(s) a faible rotation immobilisent potentiellement du cash.`
+    );
+  }
+
+  if (
+    Number(budgetComparison?.summary?.total_variance || 0) > 0 &&
+    round2(budgetComparison.summary.total_variance) > 0
+  ) {
+    signals.push(
+      `Le realise depasse le budget de ${round2(
+        budgetComparison.summary.total_variance
+      )} USD sur le perimetre budgetaire actif.`
+    );
+  }
+
+  if (
+    Number(purchaseInvoiceSummary?.summary?.total_balance_due || 0) >
+    Number(cashForecast?.summary?.open_payables || 0)
+  ) {
+    signals.push(
+      "Les dettes fournisseurs ouvertes depassent la capacite de cash visible a court terme."
+    );
+  }
+
+  if (Number(productionSummary?.summary?.total_batches || 0) === 0) {
+    signals.push("Aucune production recente visible pour soutenir la croissance.");
+  }
+
+  return {
+    sales_run_rate_30d_usd: averageMonthlySales,
+    collections_run_rate_30d_usd: averageMonthlyCollections,
+    average_gross_margin_percent: averageMonthlyMargin,
+    projected_cash_balance_j7: round2(j7?.projected_balance),
+    projected_cash_balance_j30: round2(j30?.projected_balance),
+    projected_cash_balance_j60: round2(j60?.projected_balance),
+    current_stock_alerts: Number(stockAlerts.length || 0),
+    low_rotation_products_count: Number(lowRotationProducts.length || 0),
+    budget_variance_usd: round2(budgetComparison?.summary?.total_variance),
+    supplier_balance_due_usd: round2(
+      purchaseInvoiceSummary?.summary?.total_balance_due
+    ),
+    production_batches_recent: Number(productionSummary?.summary?.total_batches || 0),
+    signals: signals.slice(0, 6)
+  };
+}
+
+function buildEnterpriseHighlights({
+  commercialSummary,
+  cashSummary,
+  accountingHealth,
+  purchaseInvoiceSummary,
+  purchaseOrderSummary,
+  productionSummary,
+  budgetComparison,
+  monthlyClosePack,
+  predictiveSignals
+}) {
+  return [
+    commercialSummary
+      ? `Commercial: ${round2(
+          commercialSummary.summary.total_sales_amount
+        )} USD de ventes, marge ${round2(
+          commercialSummary.summary.gross_margin_percent
+        )}%, encours clients ${round2(
+          commercialSummary.summary.total_receivables
+        )} USD.`
+      : null,
+    cashSummary
+      ? `Tresorerie: base cash ${round2(
+          cashSummary.summary.current_cash_base
+        )} USD, projection J+30 ${round2(
+          predictiveSignals.projected_cash_balance_j30
+        )} USD, dettes fournisseurs ouvertes ${round2(
+          cashSummary.summary.open_payables
+        )} USD.`
+      : null,
+    purchaseInvoiceSummary
+      ? `Achats/fournisseurs: ${purchaseInvoiceSummary.summary.total_invoices} facture(s) fournisseur, ${round2(
+          purchaseInvoiceSummary.summary.total_balance_due
+        )} USD a regler, ${purchaseOrderSummary?.summary?.open_orders || 0} commande(s) encore ouverte(s).`
+      : null,
+    productionSummary
+      ? `Production: ${productionSummary.summary.total_batches} batch(s) recent(s), ${round2(
+          productionSummary.summary.total_quantity_produced
+        )} unites produites.`
+      : null,
+    accountingHealth
+      ? `Comptabilite: statut ${accountingHealth.status}, ${Number(
+          accountingHealth.totals.draft_entries || 0
+        )} brouillon(s), ${Number(
+          accountingHealth.totals.imbalanced_entries || 0
+        )} ecriture(s) desequilibree(s).`
+      : null,
+    budgetComparison
+      ? `Budget: ${budgetComparison.budget.name}, ecart realise-budget ${round2(
+          budgetComparison.summary.total_variance
+        )} USD, atteinte ${round2(
+          budgetComparison.summary.attainment_percent
+        )}%.`
+      : null,
+    monthlyClosePack
+      ? `Cloture ${monthlyClosePack.period.label}: statut ${monthlyClosePack.close_checklist.close_status}, ${Number(
+          monthlyClosePack.close_checklist.critical_count || 0
+        )} point(s) critique(s).`
+      : null,
+    predictiveSignals?.signals?.[0] || null
+  ].filter(Boolean);
+}
+
+function buildFallbackReasoningMetrics(contextData = {}) {
+  const executive = contextData.executive_snapshot || {};
+  const treasury = contextData?.sectors?.treasury?.summary || {};
+  const accountingHealth = contextData?.sectors?.accounting?.health || {};
+  const predictive = contextData?.predictive_signals || {};
+  const budget = contextData?.sectors?.budget?.summary || {};
+
+  return sanitizeMetrics({
+    total_sales_amount: round2(executive.total_sales_amount),
+    total_receivables: round2(executive.total_receivables),
+    gross_margin_percent: round2(executive.gross_margin_percent),
+    current_cash_base: round2(treasury.current_cash_base),
+    overdue_receivables: round2(treasury.overdue_receivables),
+    open_payables: round2(treasury.open_payables),
+    projected_cash_balance_j30: round2(predictive.projected_cash_balance_j30),
+    stock_alerts_count: Number(predictive.current_stock_alerts || 0),
+    budget_variance_usd: round2(budget.total_variance),
+    accounting_health_status: accountingHealth.status || "attention"
+  });
+}
+
+function buildFallbackReasoningActions(contextData = {}) {
+  const treasury = contextData?.sectors?.treasury?.summary || {};
+  const stockAlerts = contextData?.sectors?.stock?.alerts || [];
+  const decliningProducts =
+    contextData?.sectors?.commercial?.declining_products || [];
+  const dormantClients =
+    contextData?.sectors?.commercial?.reactivation_candidates || [];
+  const accountingIssues = contextData?.sectors?.accounting?.health?.issues || [];
+  const productionSummary = contextData?.sectors?.production?.summary || {};
+  const budgetSummary = contextData?.sectors?.budget?.summary || {};
+  const actions = [];
+
+  if (Number(treasury.overdue_receivables || 0) > 0) {
+    actions.push(
+      `Lancer un plan de recouvrement cible sur ${round2(
+        treasury.overdue_receivables
+      )} USD de creances echees.`
+    );
+  }
+
+  if (stockAlerts.length > 0) {
+    actions.push(
+      `Securiser immediatement le stock de ${stockAlerts[0].product_name} sur ${stockAlerts[0].warehouse_name}.`
+    );
+  }
+
+  if (decliningProducts.length > 0) {
+    actions.push(
+      `Relancer la performance du produit ${decliningProducts[0].product_name} en recul commercial.`
+    );
+  }
+
+  if (dormantClients.length > 0) {
+    actions.push(
+      `Reactiver le client ${dormantClients[0].business_name} pour remettre du volume sans acquisition longue.`
+    );
+  }
+
+  if (Number(productionSummary.total_batches || 0) === 0) {
+    actions.push(
+      "Programmer un plan de production pour soutenir les ventes et eviter la rupture sur les produits leaders."
+    );
+  }
+
+  if (accountingIssues.length > 0) {
+    actions.push(
+      `Regulariser le point comptable prioritaire suivant: ${accountingIssues[0]}.`
+    );
+  }
+
+  if (Number(budgetSummary.total_variance || 0) > 0) {
+    actions.push(
+      `Corriger le depassement budgetaire cumule de ${round2(
+        budgetSummary.total_variance
+      )} USD.`
+    );
+  }
+
+  return actions.slice(0, 6);
+}
+
+function enrichReasoningResponsePayload(payload = {}, contextData = {}) {
+  const metrics =
+    payload.metrics && Object.keys(payload.metrics).length > 0
+      ? payload.metrics
+      : buildFallbackReasoningMetrics(contextData);
+  const recommendations =
+    Array.isArray(payload.recommendations) && payload.recommendations.length > 0
+      ? payload.recommendations
+      : buildFallbackReasoningActions(contextData);
+  const actions =
+    Array.isArray(payload.actions) && payload.actions.length > 0
+      ? payload.actions
+      : recommendations;
+
+  return {
+    ...payload,
+    metrics,
+    recommendations,
+    actions
+  };
+}
+
 function buildAccountingHighlights({
   accountingSummary,
   incomeStatement,
@@ -449,9 +1190,11 @@ async function buildReasoningContextData(
 ) {
   const focus = getReasoningFocus(intent);
   const reportingRange = getReasoningDateRange(period);
+  const previousClosedMonth = getPreviousClosedMonth();
   const [
     globalStats,
     stockAlerts,
+    lowRotationProducts,
     topProducts,
     topCustomers,
     expenses,
@@ -464,10 +1207,19 @@ async function buildReasoningContextData(
     incomeStatement,
     balanceSheet,
     recentPayments,
-    companyKnowledge
+    companyKnowledge,
+    commercialDashboard,
+    cashForecast,
+    accountingHealth,
+    purchaseInvoices,
+    purchaseOrders,
+    productionBatches,
+    budgetComparison,
+    monthlyClosePack
   ] = await Promise.all([
     getGlobalStats(),
     getStockAlerts(),
+    safeExecute(() => getLowRotationProducts(5), []),
     getTopProducts(10),
     getTopCustomers(10),
     getAllExpenses(),
@@ -495,7 +1247,23 @@ async function buildReasoningContextData(
     getActiveCompanyKnowledge({
       categories: ["company_profile", "strategy", "products", "distribution", "operations", "finance", "market", "investor_notes", "founder_notes"],
       limit: 25
-    })
+    }),
+    safeExecute(() => getCommercialDashboard(365, 5), null),
+    safeExecute(() => getCashForecast(5), null),
+    safeExecute(() => getAccountingHealthSnapshot(), null),
+    safeExecute(() => getAllPurchaseInvoices(), []),
+    safeExecute(() => getAllPurchaseOrders(), []),
+    safeExecute(() => getProductionBatches(12), []),
+    safeExecute(() => getPrimaryBudgetComparison(), null),
+    safeExecute(
+      () =>
+        getMonthlyClosePack({
+          year: previousClosedMonth.year,
+          month: previousClosedMonth.month,
+          detailLimit: 5
+        }),
+      null
+    )
   ]);
 
   const totalExpensesAmount = expenses.reduce(
@@ -515,6 +1283,16 @@ async function buildReasoningContextData(
   const compactTrial = compactTrialBalance(trialBalance);
   const compactIncome = compactIncomeStatement(incomeStatement);
   const compactBalance = compactBalanceSheet(balanceSheet);
+  const summarizedCommercialDashboard = summarizeCommercialDashboard(
+    commercialDashboard
+  );
+  const summarizedCashForecast = summarizeCashForecast(cashForecast);
+  const summarizedAccountingHealth = summarizeAccountingHealth(accountingHealth);
+  const summarizedPurchaseInvoices = summarizePurchaseInvoices(purchaseInvoices);
+  const summarizedPurchaseOrders = summarizePurchaseOrders(purchaseOrders);
+  const summarizedProduction = summarizeProductionBatches(productionBatches);
+  const summarizedBudget = summarizeBudgetComparison(budgetComparison);
+  const summarizedMonthlyClose = summarizeMonthlyClosePack(monthlyClosePack);
   const highlightedInvoices = recentInvoices.slice(0, 5).map((invoice) => ({
     invoice_number: invoice.invoice_number,
     invoice_date: invoice.invoice_date,
@@ -560,15 +1338,123 @@ async function buildReasoningContextData(
     payment_method: payment.payment_method,
     amount: round2(payment.amount)
   }));
+  const highlightedReceivableCustomers = getTopReceivableCustomers(
+    topCustomers,
+    5
+  ).map((customer) => ({
+    business_name: customer.business_name,
+    city: customer.city || null,
+    total_billed: round2(customer.total_billed),
+    total_paid: round2(customer.total_paid),
+    total_balance_due: round2(customer.total_balance_due)
+  }));
+  const highlightedLowRotationProducts = (lowRotationProducts || [])
+    .slice(0, 5)
+    .map((product) => ({
+      product_name: product.product_name,
+      sku: product.sku,
+      category: product.category || null,
+      total_quantity_sold: Number(product.total_quantity_sold || 0)
+    }));
   const highlightedKnowledge = compactCompanyKnowledge(companyKnowledge).slice(
     0,
     5
   );
+  const predictiveSignals = buildPredictiveSignals({
+    businessRules,
+    commercialDashboard: commercialDashboard || {},
+    cashForecast: cashForecast || {},
+    stockAlerts,
+    lowRotationProducts,
+    budgetComparison: summarizedBudget,
+    purchaseInvoiceSummary: summarizedPurchaseInvoices,
+    productionSummary: summarizedProduction
+  });
+  const executiveSnapshot = {
+    ...summarizedGlobalStats,
+    current_cash_base: round2(summarizedCashForecast?.summary?.current_cash_base),
+    open_payables: round2(summarizedCashForecast?.summary?.open_payables),
+    projected_cash_balance_j30: round2(
+      predictiveSignals.projected_cash_balance_j30
+    ),
+    accounting_health_status: summarizedAccountingHealth?.status || "attention",
+    budget_variance_usd: round2(summarizedBudget?.summary?.total_variance)
+  };
+  const sectors = {
+    commercial: summarizedCommercialDashboard,
+    treasury: summarizedCashForecast,
+    stock: {
+      alerts: highlightedStockAlerts,
+      low_rotation_products: highlightedLowRotationProducts,
+      top_products: highlightedProducts
+    },
+    customers: {
+      top_receivables: highlightedReceivableCustomers,
+      top_customers: highlightedCustomers,
+      receivables_due_soon:
+        summarizedCashForecast?.receivables_due_soon?.slice(0, 5) || [],
+      recent_invoices: highlightedInvoices
+    },
+    expenses: {
+      total_amount: round2(totalExpensesAmount),
+      count: expenses.length,
+      top_categories: expenseCategories,
+      recent_items: expenses.slice(0, 5).map((expense) => ({
+        expense_date: expense.expense_date,
+        category: expense.category,
+        description: expense.description,
+        amount: round2(expense.amount)
+      }))
+    },
+    accounting: {
+      summary: summarizedAccountingStats,
+      health: summarizedAccountingHealth,
+      monthly_overview: compactAccountingOverview,
+      account_class_balances: compactAccountingBalances,
+      trial_balance: compactTrial,
+      income_statement: compactIncome,
+      balance_sheet: compactBalance,
+      recent_entries: highlightedEntries,
+      recent_payments: highlightedPayments,
+      reporting_highlights: buildAccountingHighlights({
+        accountingSummary: summarizedAccountingStats,
+        incomeStatement: compactIncome,
+        balanceSheet: compactBalance,
+        trialBalance: compactTrial,
+        monthlyOverview: compactAccountingOverview,
+        recentEntries: highlightedEntries,
+        recentPayments: highlightedPayments,
+        expenses
+      })
+    },
+    procurement: {
+      purchase_invoices: summarizedPurchaseInvoices,
+      purchase_orders: summarizedPurchaseOrders,
+      payables_due_soon:
+        summarizedCashForecast?.payables_due_soon?.slice(0, 5) || []
+    },
+    production: summarizedProduction,
+    budget: summarizedBudget,
+    monthly_close: summarizedMonthlyClose,
+    forecasting: predictiveSignals
+  };
+  const focusDataMap = {
+    sales: sectors.commercial,
+    stock: sectors.stock,
+    customers: sectors.customers,
+    expenses: sectors.expenses,
+    procurement: sectors.procurement,
+    production: sectors.production,
+    budget: sectors.budget,
+    forecast: sectors.forecasting,
+    cash: sectors.treasury,
+    accounting: sectors.accounting
+  };
 
   const baseContext = {
     focus,
     reporting_period: reportingRange,
-    executive_snapshot: summarizedGlobalStats,
+    executive_snapshot: executiveSnapshot,
     executive_highlights: buildReasoningHighlights({
       globalStats: summarizedGlobalStats,
       stockAlerts,
@@ -580,112 +1466,27 @@ async function buildReasoningContextData(
       recentEntries,
       businessRules
     }),
-    accounting_reporting_highlights: buildAccountingHighlights({
-      accountingSummary: summarizedAccountingStats,
-      incomeStatement: compactIncome,
-      balanceSheet: compactBalance,
-      trialBalance: compactTrial,
-      monthlyOverview: compactAccountingOverview,
-      recentEntries: highlightedEntries,
-      recentPayments: highlightedPayments,
-      expenses
-    })
+    enterprise_highlights: buildEnterpriseHighlights({
+      commercialSummary: summarizedCommercialDashboard,
+      cashSummary: summarizedCashForecast,
+      accountingHealth: summarizedAccountingHealth,
+      purchaseInvoiceSummary: summarizedPurchaseInvoices,
+      purchaseOrderSummary: summarizedPurchaseOrders,
+      productionSummary: summarizedProduction,
+      budgetComparison: summarizedBudget,
+      monthlyClosePack: summarizedMonthlyClose,
+      predictiveSignals
+    }),
+    accounting_reporting_highlights: sectors.accounting.reporting_highlights,
+    predictive_signals: predictiveSignals,
+    sectors
   };
 
-  switch (focus) {
-    case "sales":
-      return {
-        ...baseContext,
-        sales: {
-          top_products: highlightedProducts,
-          top_customers: highlightedCustomers,
-          recent_invoices: highlightedInvoices
-        },
-        knowledge: highlightedKnowledge
-      };
-    case "stock":
-      return {
-        ...baseContext,
-        stock: {
-          alerts: highlightedStockAlerts,
-          top_products: highlightedProducts
-        },
-        knowledge: highlightedKnowledge
-      };
-    case "customers":
-      return {
-        ...baseContext,
-        customers: {
-          top_customers: highlightedCustomers,
-          recent_invoices: highlightedInvoices
-        },
-        knowledge: highlightedKnowledge
-      };
-    case "expenses":
-      return {
-        ...baseContext,
-        expenses: {
-          total_amount: round2(totalExpensesAmount),
-          count: expenses.length,
-          top_categories: expenseCategories,
-          recent_items: expenses.slice(0, 5).map((expense) => ({
-            expense_date: expense.expense_date,
-            category: expense.category,
-            description: expense.description,
-            amount: round2(expense.amount)
-          }))
-        },
-        knowledge: highlightedKnowledge
-      };
-    case "cash":
-      return {
-        ...baseContext,
-        cash: {
-          top_customers: highlightedCustomers,
-          top_expense_categories: expenseCategories,
-          recent_invoices: highlightedInvoices
-        },
-        knowledge: highlightedKnowledge
-      };
-    case "accounting":
-      return {
-        ...baseContext,
-        accounting: {
-          summary: summarizedAccountingStats,
-          monthly_overview: compactAccountingOverview,
-          account_class_balances: compactAccountingBalances,
-          trial_balance: compactTrial,
-          income_statement: compactIncome,
-          balance_sheet: compactBalance,
-          recent_entries: highlightedEntries,
-          recent_payments: highlightedPayments,
-          reporting_highlights: baseContext.accounting_reporting_highlights
-        },
-        knowledge: highlightedKnowledge
-      };
-    default:
-      return {
-        ...baseContext,
-        sales: {
-          top_products: highlightedProducts,
-          top_customers: highlightedCustomers,
-          recent_invoices: highlightedInvoices
-        },
-        stock: {
-          alerts: highlightedStockAlerts
-        },
-        expenses: {
-          total_amount: round2(totalExpensesAmount),
-          top_categories: expenseCategories
-        },
-        accounting: {
-          summary: summarizedAccountingStats,
-          reporting_highlights: baseContext.accounting_reporting_highlights,
-          recent_entries: highlightedEntries
-        },
-        knowledge: highlightedKnowledge
-      };
-  }
+  return {
+    ...baseContext,
+    focus_data: focusDataMap[focus] || sectors.commercial,
+    knowledge: highlightedKnowledge
+  };
 }
 
 function getTopExpenseCategories(expenses = [], limit = 5) {
@@ -1204,8 +2005,8 @@ export async function askAIQuestion({ question, context = {} }) {
   const intentResult = detectIntent(question);
   const businessRules = await getBusinessRulesMap();
   const assistantBudgetMs = Math.min(
-    getEnvNumber("AI_ASSISTANT_TIMEOUT_MS", 50000),
-    55000
+    getEnvNumber("AI_ASSISTANT_TIMEOUT_MS", 90000),
+    115000
   );
 
   const useReasoning =
@@ -1243,7 +2044,7 @@ export async function askAIQuestion({ question, context = {} }) {
       const response = {
         intent: "ai_reasoning",
         period: "global",
-        source_module: "ai_ceo",
+        source_module: "ai_assistant",
         summary: reasoning.summary || "",
         answer: reasoning.analysis || "",
         metrics: reasoning.metrics || {},
@@ -1267,15 +2068,19 @@ export async function askAIQuestion({ question, context = {} }) {
         },
         intentResult.period || "global"
       );
+      const enrichedResponse = enrichReasoningResponsePayload(
+        safeResponse,
+        mergedContextData
+      );
 
       pushHistory({
         question,
-        intent: safeResponse.intent,
-        summary: safeResponse.summary,
-        created_at: safeResponse.generated_at
+        intent: enrichedResponse.intent,
+        summary: enrichedResponse.summary,
+        created_at: enrichedResponse.generated_at
       });
 
-      return safeResponse;
+      return enrichedResponse;
     } catch (error) {
       console.error("DeepSeek failed → fallback to existing engine:", error);
     }

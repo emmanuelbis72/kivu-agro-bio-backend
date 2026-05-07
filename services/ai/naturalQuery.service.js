@@ -5,33 +5,15 @@ function containsAny(text, keywords = []) {
 function normalizePeriod(question) {
   const q = question.toLowerCase();
 
-  if (
-    containsAny(q, [
-      "aujourd",
-      "ce jour",
-      "today"
-    ])
-  ) {
+  if (containsAny(q, ["aujourd", "ce jour", "today"])) {
     return "today";
   }
 
-  if (
-    containsAny(q, [
-      "cette semaine",
-      "semaine",
-      "this week"
-    ])
-  ) {
+  if (containsAny(q, ["cette semaine", "semaine", "this week"])) {
     return "this_week";
   }
 
-  if (
-    containsAny(q, [
-      "ce mois",
-      "mois",
-      "this month"
-    ])
-  ) {
+  if (containsAny(q, ["ce mois", "mois", "this month"])) {
     return "this_month";
   }
 
@@ -44,11 +26,13 @@ export function detectIntent(question) {
 
   if (
     containsAny(normalizedQuestion, [
+      "reapprovision",
       "réapprovision",
       "rupture",
       "stock critique",
       "stock faible",
       "restock",
+      "reappro",
       "réappro"
     ])
   ) {
@@ -63,13 +47,16 @@ export function detectIntent(question) {
     containsAny(normalizedQuestion, [
       "clients me doivent",
       "client risque",
+      "clients risques",
       "clients risqués",
+      "impaye",
       "impayé",
       "impayes",
-      "créance",
+      "impayés",
       "creance",
-      "débiteur",
-      "debiteur"
+      "créance",
+      "debiteur",
+      "débiteur"
     ])
   ) {
     return {
@@ -81,11 +68,12 @@ export function detectIntent(question) {
 
   if (
     containsAny(normalizedQuestion, [
-      "dépense",
       "depense",
+      "dépense",
       "charges",
-      "coûts",
       "couts",
+      "coûts",
+      "reduire les couts",
       "réduire les coûts",
       "réduire les couts"
     ])
@@ -99,12 +87,95 @@ export function detectIntent(question) {
 
   if (
     containsAny(normalizedQuestion, [
-      "trésorerie",
+      "achat",
+      "achats",
+      "fournisseur",
+      "fournisseurs",
+      "approvisionnement",
+      "commande d'achat",
+      "commande d achat",
+      "facture fournisseur",
+      "dettes fournisseurs",
+      "dettes fournisseur"
+    ])
+  ) {
+    return {
+      intent: "procurement_overview",
+      period,
+      confidence: 0.87
+    };
+  }
+
+  if (
+    containsAny(normalizedQuestion, [
+      "production",
+      "batch",
+      "fabrication",
+      "rendement",
+      "recette",
+      "matiere premiere",
+      "matière première",
+      "matieres premieres",
+      "matières premières"
+    ])
+  ) {
+    return {
+      intent: "production_performance",
+      period,
+      confidence: 0.86
+    };
+  }
+
+  if (
+    containsAny(normalizedQuestion, [
+      "budget",
+      "realise",
+      "réalisé",
+      "vs reel",
+      "vs réel",
+      "ecart budget",
+      "écart budget",
+      "depassement budget",
+      "dépassement budget"
+    ])
+  ) {
+    return {
+      intent: "budget_vs_actual_analysis",
+      period,
+      confidence: 0.88
+    };
+  }
+
+  if (
+    containsAny(normalizedQuestion, [
+      "prevision",
+      "prévision",
+      "projection",
+      "projeter",
+      "forecast",
+      "scenario",
+      "scénario",
+      "plan de tresorerie",
+      "plan de trésorerie",
+      "predire",
+      "prédire"
+    ])
+  ) {
+    return {
+      intent: "forecast_projection",
+      period,
+      confidence: 0.88
+    };
+  }
+
+  if (
+    containsAny(normalizedQuestion, [
       "tresorerie",
+      "trésorerie",
       "cash",
       "encaissement",
-      "liquidité",
-      "liquidite"
+      "liquidite",
+      "liquidité"
     ])
   ) {
     return {
@@ -117,20 +188,22 @@ export function detectIntent(question) {
   if (
     containsAny(normalizedQuestion, [
       "comptable",
-      "comptabilité",
       "comptabilite",
+      "comptabilité",
       "journal",
       "balance",
       "bilan",
-      "résultat",
       "resultat",
+      "résultat",
       "reporting",
       "reporting comptable",
       "etat financier",
+      "état financier",
       "compte de resultat",
+      "compte de résultat",
       "grand livre",
-      "écriture",
-      "ecriture"
+      "ecriture",
+      "écriture"
     ])
   ) {
     return {
@@ -142,10 +215,11 @@ export function detectIntent(question) {
 
   if (
     containsAny(normalizedQuestion, [
-      "pourquoi les ventes ont baissé",
+      "pourquoi les ventes ont baisse",
       "pourquoi les ventes ont baissé",
       "pourquoi les ventes baissent",
       "baisse des ventes",
+      "ventes ont baisse",
       "ventes ont baissé",
       "ventes baissent"
     ])

@@ -7,6 +7,12 @@ export function composeAIResponse({
   intentResult,
   analysis
 }) {
+  const recommendations = analysis.recommendations || [];
+  const actions =
+    Array.isArray(analysis.actions) && analysis.actions.length > 0
+      ? analysis.actions
+      : recommendations;
+
   return {
     question,
     intent: intentResult.intent,
@@ -16,7 +22,11 @@ export function composeAIResponse({
     answer: analysis.answer,
     metrics: analysis.metrics || {},
     drivers: analysis.drivers || [],
-    recommendations: analysis.recommendations || [],
+    risks: analysis.risks || [],
+    opportunities: analysis.opportunities || [],
+    recommendations,
+    actions,
+    priority_level: analysis.priority_level || "MEDIUM",
     source_module: analysis.source_module || null,
     generated_at: new Date().toISOString()
   };

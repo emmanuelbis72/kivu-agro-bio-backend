@@ -51,6 +51,53 @@ function extractFirstJsonObject(text) {
   return input.slice(firstBrace, lastBrace + 1);
 }
 
+function extractJsonLikeStringField(text, fieldName) {
+  const pattern = new RegExp(
+    `"${fieldName}"\\s*:\\s*"([\\s\\S]*?)"(?=\\s*,\\s*"(?:[a-zA-Z0-9_]+)"\\s*:|\\s*}\\s*$)`,
+    "i"
+  );
+  const match = String(text || "").match(pattern);
+
+  if (!match?.[1]) {
+    return "";
+  }
+
+  return match[1]
+    .replace(/\\"/g, '"')
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\\\/g, "\\")
+    .trim();
+}
+
+function extractJsonLikeArrayField(text, fieldName) {
+  const pattern = new RegExp(`"${fieldName}"\\s*:\\s*\\[([\\s\\S]*?)\\]`, "i");
+  const match = String(text || "").match(pattern);
+
+  if (!match?.[1]) {
+    return [];
+  }
+
+  const items = [];
+  const itemPattern = /"((?:\\.|[^"])*)"/g;
+  let itemMatch;
+
+  while ((itemMatch = itemPattern.exec(match[1])) !== null) {
+    const value = String(itemMatch[1] || "")
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, "\n")
+      .replace(/\\t/g, "\t")
+      .replace(/\\\\/g, "\\")
+      .trim();
+
+    if (value) {
+      items.push(value);
+    }
+  }
+
+  return items;
+}
+
 function normalizePriorityLevel(value) {
   const normalized = String(value || "").trim().toUpperCase();
 
@@ -95,6 +142,44 @@ function normalizeTextBlock(value, fallback = "") {
   }
 
   return fallback;
+}
+
+function deriveSummaryFromText(text, fallback = "Analyse strategique generee.") {
+  const cleaned = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) {
+    return fallback;
+  }
+
+  const sentenceSummary = cleaned
+    .split(/(?<=[.!?])\s+/)
+    .slice(0, 2)
+    .join(" ")
+    .trim();
+
+  if (sentenceSummary) {
+    return sentenceSummary.slice(0, 320);
+  }
+
+  return cleaned.slice(0, 320) || fallback;
+}
+
+function extractTaggedLines(text, tags = []) {
+  const normalizedTags = tags.map((tag) => String(tag || "").toLowerCase());
+
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-*]\s*/, "").trim())
+    .filter((line) =>
+      normalizedTags.some((tag) => line.toLowerCase().startsWith(tag))
+    )
+    .map((line) => line.replace(/^[^:]+:\s*/i, "").trim())
+    .filter(Boolean)
+    .slice(0, 6);
 }
 
 function normalizeReasoningPayload(payload, rawText = "") {
@@ -143,8 +228,7 @@ function isWeakReasoningPayload(payload) {
     !summary ||
     summary === "Analyse stratégique générée." ||
     !analysis ||
-    analysis.startsWith("{") ||
-    (recommendations === 0 && actions === 0)
+    analysis.startsWith("{")
   );
 }
 
@@ -167,6 +251,35 @@ function safeParseReasoningContent(content) {
     } catch (_) {
       // continue
     }
+  }
+
+  const partialSummary = extractJsonLikeStringField(cleaned, "summary");
+  const partialAnalysis = extractJsonLikeStringField(cleaned, "analysis");
+  const partialRisks = extractJsonLikeArrayField(cleaned, "risks");
+  const partialOpportunities = extractJsonLikeArrayField(
+    cleaned,
+    "opportunities"
+  );
+  const partialRecommendations = extractJsonLikeArrayField(
+    cleaned,
+    "recommendations"
+  );
+  const partialActions = extractJsonLikeArrayField(cleaned, "actions");
+
+  if (partialSummary || partialAnalysis) {
+    return normalizeReasoningPayload(
+      {
+        summary: partialSummary,
+        analysis: partialAnalysis || cleaned,
+        risks: partialRisks,
+        opportunities: partialOpportunities,
+        recommendations: partialRecommendations,
+        actions: partialActions,
+        priority_level: "MEDIUM",
+        confidence_score: 0.82
+      },
+      cleaned
+    );
   }
 
   return normalizeReasoningPayload(
@@ -201,6 +314,45 @@ function buildAssistantPrompt({ question, businessRules, contextData }) {
           "- Si des donnees comptables sont presentes, integre-les dans le diagnostic.",
           '- Remplis \"metrics\" avec les indicateurs les plus utiles pour la decision.'
         ].join("\n");
+  const focusLabels = {
+    sales: "performance commerciale",
+    stock: "stock et disponibilite produit",
+    customers: "clients et recouvrement",
+    expenses: "depenses et efficacite des couts",
+    procurement: "achats et fournisseurs",
+    production: "production et capacite",
+    budget: "budget vs realise",
+    forecast: "projection et planification",
+    cash: "tresorerie et arbitrage cash",
+    accounting: "comptabilite et reporting financier",
+    general: "pilotage global d'entreprise"
+  };
+  const sectorLabels = {
+    commercial: "commercial",
+    treasury: "tresorerie",
+    stock: "stock",
+    customers: "clients / recouvrement",
+    expenses: "depenses",
+    accounting: "comptabilite / finance",
+    procurement: "achats / fournisseurs",
+    production: "production",
+    budget: "budget vs realise",
+    monthly_close: "cloture mensuelle",
+    forecasting: "previsions"
+  };
+  const availableSectors = Object.entries(contextData?.sectors || {})
+    .filter(([, value]) => value && Object.keys(value).length > 0)
+    .map(([key]) => sectorLabels[key] || key);
+  const enrichedInstructions = [
+    extraInstructions,
+    "Instructions transversales:",
+    "- Exploite tous les secteurs disponibles du contexte, pas uniquement le focus prioritaire.",
+    "- Croise commercial, tresorerie, stock, achats, production, comptabilite, budget, cloture et previsions quand ces donnees existent.",
+    "- Fais ressortir les liens de cause a effet et projette la trajectoire a court terme quand les horizons de cash ou les tendances sont disponibles.",
+    "- Si plusieurs secteurs critiques sont presents, ne te limite pas a une lecture trop courte: fais une synthese dense et utile pour la direction.",
+    '- Structure \"analysis\" par sections explicites si plusieurs secteurs sont disponibles.',
+    '- Remplis \"metrics\" avec 8 a 12 indicateurs vraiment utiles quand les donnees existent.'
+  ].join("\n");
 
   return `
 Tu es KABOT, copilote CEO/CFO de KIVU AGRO BIO.
@@ -220,7 +372,13 @@ Règles:
 Business rules:
 ${JSON.stringify(businessRules)}
 
-${extraInstructions}
+Focus prioritaire:
+${focusLabels[focus] || focus}
+
+Secteurs disponibles:
+${availableSectors.length > 0 ? availableSectors.join(", ") : "vision globale"}
+
+${enrichedInstructions}
 
 Contexte:
 ${JSON.stringify(contextData)}
@@ -349,10 +507,29 @@ async function callDeepSeekOnce({
     }
 
     const choice = data?.choices?.[0];
-    const content = choice?.message?.content;
+    const rawContent = choice?.message?.content;
+    const content = Array.isArray(rawContent)
+      ? rawContent
+          .map((item) => {
+            if (typeof item === "string") {
+              return item;
+            }
+
+            if (item && typeof item === "object") {
+              if (typeof item.text === "string") return item.text;
+              if (typeof item.content === "string") return item.content;
+            }
+
+            return "";
+          })
+          .join("\n")
+          .trim()
+      : typeof rawContent === "string"
+      ? rawContent.trim()
+      : "";
     const finishReason = choice?.finish_reason || null;
 
-    if (!content || typeof content !== "string") {
+    if (!content) {
       throw new Error("DeepSeek API returned empty content.");
     }
 
@@ -394,7 +571,7 @@ export async function runDeepseekReasoning({
       ? Math.max(1, configuredRetries)
       : configuredRetries;
   const retryDelayMs = getEnvNumber("DEEPSEEK_RETRY_DELAY_MS", 1500);
-  const defaultMaxTokens = profile === "assistant" ? 700 : 1000;
+  const defaultMaxTokens = profile === "assistant" ? 1200 : 1000;
   const baseMaxTokens = Math.min(
     getEnvNumber("DEEPSEEK_MAX_TOKENS", defaultMaxTokens),
     2000
@@ -432,15 +609,6 @@ export async function runDeepseekReasoning({
         timeoutMs,
         prompt
       });
-
-      if (
-        profile === "assistant" &&
-        (result.finishReason === "length" || isWeakReasoningPayload(result.payload))
-      ) {
-        const error = new Error("DeepSeek assistant payload incomplete.");
-        error.code = "DEEPSEEK_INCOMPLETE_PAYLOAD";
-        throw error;
-      }
 
       return result.payload;
     } catch (error) {
