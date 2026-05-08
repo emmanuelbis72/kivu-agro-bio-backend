@@ -19,6 +19,14 @@ function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function isJournalEntryNumberConflict(error) {
+  return (
+    error?.code === "23505" &&
+    String(error?.constraint || "").trim() ===
+      "journal_entries_entry_number_key"
+  );
+}
+
 async function resolvePostableAccountById(accountId) {
   if (!accountId) {
     return null;
@@ -218,34 +226,53 @@ async function createAndPostEntry({
   validated_by,
   lines
 }) {
-  const entry_number = await getNextJournalEntryNumber(journal_code, entry_date);
+  const normalizedLines = lines.map((line, index) => ({
+    ...line,
+    line_number: index + 1
+  }));
 
-  const entry = await createJournalEntryWithLines({
-    entry_number,
-    entry_date,
-    journal_code,
-    description,
-    reference_type,
-    reference_id,
-    source_module,
-    status: "draft",
-    fiscal_period_id: null,
-    created_by: created_by || null,
-    lines: lines.map((line, index) => ({
-      ...line,
-      line_number: index + 1
-    }))
-  });
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const entry_number = await getNextJournalEntryNumber(
+      journal_code,
+      entry_date
+    );
 
-  const posted = await postJournalEntry(
-    entry.id,
-    validated_by || created_by || null
+    try {
+      const entry = await createJournalEntryWithLines({
+        entry_number,
+        entry_date,
+        journal_code,
+        description,
+        reference_type,
+        reference_id,
+        source_module,
+        status: "draft",
+        fiscal_period_id: null,
+        created_by: created_by || null,
+        lines: normalizedLines
+      });
+
+      const posted = await postJournalEntry(
+        entry.id,
+        validated_by || created_by || null
+      );
+
+      return {
+        entry,
+        posted
+      };
+    } catch (error) {
+      if (isJournalEntryNumberConflict(error) && attempt < 5) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error(
+    "Impossible de generer un numero d'ecriture comptable unique apres plusieurs tentatives."
   );
-
-  return {
-    entry,
-    posted
-  };
 }
 
 export async function autoPostInvoiceEntry({

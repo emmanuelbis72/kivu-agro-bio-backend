@@ -115,16 +115,27 @@ export async function getAllJournalEntries({
 
 export async function getNextJournalEntryNumber(journalCode, entryDate) {
   const year = new Date(entryDate).getFullYear();
+  const prefix = `${journalCode}-${year}-`;
 
   const query = `
-    SELECT COUNT(*)::int AS count
+    SELECT
+      COALESCE(
+        MAX(
+          CASE
+            WHEN REPLACE(entry_number, $2, '') ~ '^[0-9]+$'
+              THEN CAST(REPLACE(entry_number, $2, '') AS INTEGER)
+            ELSE NULL
+          END
+        ),
+        0
+      ) AS max_sequence
     FROM journal_entries
     WHERE journal_code = $1
-      AND EXTRACT(YEAR FROM entry_date) = $2;
+      AND entry_number LIKE $3;
   `;
 
-  const result = await pool.query(query, [journalCode, year]);
-  const nextNumber = result.rows[0].count + 1;
+  const result = await pool.query(query, [journalCode, prefix, `${prefix}%`]);
+  const nextNumber = Number(result.rows[0]?.max_sequence || 0) + 1;
 
   return `${journalCode}-${year}-${String(nextNumber).padStart(5, "0")}`;
 }
