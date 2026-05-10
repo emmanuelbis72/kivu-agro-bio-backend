@@ -12,6 +12,36 @@ async function ensureProductsSchema(executor = pool) {
   `);
 }
 
+function isProductsPrimaryKeyConflict(error) {
+  return (
+    error?.code === "23505" &&
+    String(error?.constraint || "").trim() === "products_pkey"
+  );
+}
+
+async function syncProductsIdSequence(executor = pool) {
+  const sequenceResult = await executor.query(`
+    SELECT pg_get_serial_sequence('products', 'id') AS sequence_name;
+  `);
+
+  const sequenceName = sequenceResult.rows[0]?.sequence_name || null;
+
+  if (!sequenceName) {
+    return;
+  }
+
+  await executor.query(
+    `
+      SELECT setval(
+        $1,
+        GREATEST((SELECT COALESCE(MAX(id), 0) FROM products), 1),
+        EXISTS (SELECT 1 FROM products)
+      );
+    `,
+    [sequenceName]
+  );
+}
+
 export async function createProduct(data) {
   const executor = getExecutor(data.client);
   const query = `
@@ -49,8 +79,20 @@ export async function createProduct(data) {
   ];
 
   await ensureProductsSchema(executor);
-  const result = await executor.query(query, values);
-  return result.rows[0];
+  await syncProductsIdSequence(executor);
+
+  try {
+    const result = await executor.query(query, values);
+    return result.rows[0];
+  } catch (error) {
+    if (!isProductsPrimaryKeyConflict(error)) {
+      throw error;
+    }
+
+    await syncProductsIdSequence(executor);
+    const retryResult = await executor.query(query, values);
+    return retryResult.rows[0];
+  }
 }
 
 export async function getAllProducts() {

@@ -16,13 +16,14 @@ function formatDate(value) {
 }
 
 function drawTableRow(doc, y, values, widths, options = {}) {
-  const startX = 50;
-  const rowHeight = options.rowHeight || 24;
+  const startX = options.startX || 36;
+  const rowHeight = options.rowHeight || 22;
   const isHeader = Boolean(options.isHeader);
-  const fontSize = options.fontSize || 10;
-  const verticalPadding = options.verticalPadding || 6;
+  const fontSize = options.fontSize || 9;
+  const verticalPadding = options.verticalPadding || 5;
   const lineGap = options.lineGap || 2;
   const totalWidth = widths.reduce((sum, width) => sum + width, 0);
+  const alignments = options.alignments || [];
 
   let currentX = startX;
 
@@ -41,7 +42,7 @@ function drawTableRow(doc, y, values, widths, options = {}) {
       .fillColor("#1F2937")
       .text(String(values[i] ?? ""), currentX + 6, y + verticalPadding - 1, {
         width: widths[i] - 12,
-        align: i >= 2 ? "right" : "left",
+        align: alignments[i] || (i >= 2 ? "right" : "left"),
         lineGap
       });
 
@@ -58,77 +59,116 @@ function drawTableRow(doc, y, values, widths, options = {}) {
 }
 
 function getCustomerLines(invoice) {
+  const warehouseName = String(invoice.warehouse_name || "")
+    .trim()
+    .toLowerCase();
+
   return [
     invoice.customer_name,
     invoice.customer_address,
     invoice.customer_phone,
     invoice.customer_email
-  ].filter((value) => value && String(value).trim() && String(value).trim() !== "-");
+  ]
+    .filter(
+      (value) =>
+        value && String(value).trim() && String(value).trim() !== "-"
+    )
+    .filter((value, index) => {
+      if (index === 0) {
+        return true;
+      }
+
+      const normalized = String(value).trim().toLowerCase();
+
+      if (warehouseName && normalized === warehouseName) {
+        return false;
+      }
+
+      if (
+        normalized.startsWith("depot ") ||
+        normalized.startsWith("dépôt ")
+      ) {
+        return false;
+      }
+
+      return true;
+    });
 }
 
 export function buildInvoicePdf(doc, invoice) {
   const pageWidth = doc.page.width;
-  const marginX = 50;
-  const footerTopY = doc.page.height - 50;
+  const pageHeight = doc.page.height;
+  const marginX = 36;
+  const topMargin = 34;
+  const bottomLimit = pageHeight - 18;
 
   doc.info.Title = `Facture ${invoice.invoice_number}`;
   doc.info.Author = "KIVU AGRO BIO";
   doc.info.Subject = "Facture client";
 
-  doc.font("Helvetica-Bold").fontSize(22).fillColor("#166534");
-  doc.text("KIVU AGRO BIO", marginX, 45);
+  doc.font("Helvetica-Bold").fontSize(20).fillColor("#166534");
+  doc.text("KIVU AGRO BIO", marginX, topMargin);
 
-  doc.font("Helvetica").fontSize(10).fillColor("#4B5563");
-  doc.text("Produits naturels de sante et superaliments", marginX, 74);
-  doc.text("Republique Democratique du Congo", marginX, 88);
+  doc.font("Helvetica").fontSize(9).fillColor("#4B5563");
+  doc.text(
+    "Produits naturels de sante et superaliments",
+    marginX,
+    topMargin + 24
+  );
 
-  doc
-    .roundedRect(pageWidth - 220, 42, 170, 58, 10)
-    .fillAndStroke("#F0FDF4", "#BBF7D0");
+  const badgeWidth = 132;
+  const badgeHeight = 34;
+  const badgeX = pageWidth - marginX - badgeWidth;
 
-  doc.fillColor("#166534").font("Helvetica-Bold").fontSize(16);
-  doc.text("FACTURE", pageWidth - 195, 58);
+  doc.roundedRect(badgeX, topMargin, badgeWidth, badgeHeight, 8).fillAndStroke(
+    "#F0FDF4",
+    "#BBF7D0"
+  );
 
-  doc.fillColor("#111827").font("Helvetica").fontSize(10);
-  doc.text(invoice.invoice_number, pageWidth - 195, 80);
+  doc.fillColor("#166534").font("Helvetica-Bold").fontSize(10);
+  doc.text("FACTURE", badgeX + 10, topMargin + 7);
 
-  doc
-    .moveTo(marginX, 118)
-    .lineTo(pageWidth - marginX, 118)
-    .strokeColor("#D1D5DB")
-    .stroke();
-
-  doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827");
-  doc.text("Facture a", marginX, 136);
-
-  doc.font("Helvetica").fontSize(10).fillColor("#374151");
-  const customerLines = getCustomerLines(invoice);
-  let customerY = 154;
-
-  customerLines.forEach((line) => {
-    doc.text(String(line), marginX, customerY, { width: 220 });
-    customerY += 16;
+  doc.fillColor("#111827").font("Helvetica").fontSize(9);
+  doc.text(invoice.invoice_number, badgeX + 10, topMargin + 18, {
+    width: badgeWidth - 20,
+    align: "left"
   });
 
-  const infoX = pageWidth - 250;
   doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827");
-  doc.text("Informations facture", infoX, 136);
+  doc.text("Facturé à", marginX, topMargin + 52);
 
-  doc.font("Helvetica-Bold").fontSize(10).fillColor("#374151");
-  doc.text("Date facture :", infoX, 154, { continued: true });
-  doc.font("Helvetica").fillColor("#111827");
-  doc.text(` ${formatDate(invoice.invoice_date)}`);
+  doc.font("Helvetica").fontSize(9).fillColor("#374151");
+  const customerLines = getCustomerLines(invoice);
+  let customerY = topMargin + 68;
 
-  let tableY = Math.max(customerY + 18, 192);
+  customerLines.forEach((line) => {
+    doc.text(String(line), marginX, customerY, { width: 240 });
+    customerY += 14;
+  });
 
-  const colWidths = [105, 165, 40, 85, 100];
+  const infoX = pageWidth - 160;
+  doc.font("Helvetica-Bold").fontSize(9).fillColor("#374151");
+  doc.text("Date facture", infoX, topMargin + 52, {
+    width: 120,
+    align: "left"
+  });
+  doc.font("Helvetica").fontSize(9).fillColor("#111827");
+  doc.text(formatDate(invoice.invoice_date), infoX, topMargin + 66, {
+    width: 120,
+    align: "left"
+  });
+
+  let tableY = Math.max(customerY + 10, topMargin + 100);
+
+  const colWidths = [96, 174, 30, 92, 117];
   const tableHeader = ["Barcode", "Produit", "Qte", "Prix unitaire", "Total ligne"];
 
   tableY = drawTableRow(doc, tableY, tableHeader, colWidths, {
+    startX: marginX,
     isHeader: true,
-    rowHeight: 26,
+    rowHeight: 24,
     fontSize: 9,
-    verticalPadding: 7
+    verticalPadding: 6
   });
 
   const items = Array.isArray(invoice.items) ? invoice.items : [];
@@ -150,69 +190,54 @@ export function buildInvoicePdf(doc, invoice) {
       width: colWidths[1] - 12,
       lineGap: 2
     });
-    const rowHeight = Math.max(24, Math.ceil(Math.max(barcodeHeight, productHeight) + 10));
+    const rowHeight = Math.max(
+      22,
+      Math.ceil(Math.max(barcodeHeight, productHeight) + 8)
+    );
 
-    if (tableY + rowHeight > 690) {
+    if (tableY + rowHeight > bottomLimit - 44) {
       doc.addPage();
-      tableY = 60;
-      tableY = drawTableRow(doc, tableY, tableHeader, colWidths, {
-        isHeader: true,
-        rowHeight: 26,
-        fontSize: 9,
-        verticalPadding: 7
-      });
+      tableY = 28;
     }
 
     tableY = drawTableRow(doc, tableY, rowValues, colWidths, {
+      startX: marginX,
       rowHeight,
       fontSize: 9,
-      verticalPadding: 5
+      verticalPadding: 4
     });
   }
 
-  const noteText = invoice.notes || "Merci pour votre confiance.";
-  const noteHeight = doc.heightOfString(noteText, {
-    width: pageWidth - marginX * 2,
-    lineGap: 2
-  });
-  const requiredBottomSpace = 24 + 52 + 20 + 18 + noteHeight + 24;
+  const requiredBottomSpace = 34;
 
-  if (tableY + requiredBottomSpace > footerTopY - 12) {
+  if (tableY + requiredBottomSpace > bottomLimit) {
     doc.addPage();
-    tableY = 60;
+    tableY = 32;
   }
 
-  const summaryBoxY = tableY + 24;
-  const summaryX = pageWidth - 250;
-  const summaryW = 200;
+  const summaryY = Math.min(tableY + 12, bottomLimit - 20);
+  const summaryX = pageWidth - marginX - 210;
+  const summaryW = 210;
 
   doc
-    .roundedRect(summaryX, summaryBoxY, summaryW, 52, 10)
-    .fillAndStroke("#F9FAFB", "#E5E7EB");
+    .moveTo(summaryX, summaryY - 6)
+    .lineTo(summaryX + summaryW, summaryY - 6)
+    .strokeColor("#D1D5DB")
+    .stroke();
 
   doc.font("Helvetica-Bold").fontSize(12).fillColor("#111827");
-  doc.text("Solde du", summaryX + 12, summaryBoxY + 17, { width: 90 });
-  doc.text(formatMoney(invoice.balance_due), summaryX + 92, summaryBoxY + 17, {
-    width: 96,
+  doc.text("Solde du", summaryX, summaryY, { width: 80 });
+  doc.text(formatMoney(invoice.balance_due), summaryX + 80, summaryY, {
+    width: summaryW - 80,
     align: "right"
   });
-
-  const noteY = Math.max(summaryBoxY + 72, tableY + 24);
-  doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827");
-  doc.text("Notes", marginX, noteY);
-
-  doc.font("Helvetica").fontSize(10).fillColor("#4B5563");
-  doc.text(noteText, marginX, noteY + 18, {
-    width: pageWidth - marginX * 2
-  });
-
 }
 
 export function createInvoicePdfBuffer(invoice) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
       size: "A4",
-      margin: 50
+      margin: 36
     });
 
     const chunks = [];
