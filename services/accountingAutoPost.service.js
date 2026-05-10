@@ -19,6 +19,21 @@ function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function isIncomeAccount(account) {
+  if (!account || !account.is_active || !account.is_postable) {
+    return false;
+  }
+
+  const accountClass = String(account.account_class || "").trim();
+  const accountType = String(account.account_type || "").trim().toLowerCase();
+
+  return (
+    accountClass.startsWith("7") ||
+    accountType === "income" ||
+    accountType === "revenue"
+  );
+}
+
 function isJournalEntryNumberConflict(error) {
   return (
     error?.code === "23505" &&
@@ -39,6 +54,24 @@ async function resolvePostableAccountById(accountId) {
   }
 
   return account;
+}
+
+async function resolvePostableIncomeAccountById(accountId) {
+  if (!accountId) {
+    return null;
+  }
+
+  const account = await getAccountById(Number(accountId));
+  return isIncomeAccount(account) ? account : null;
+}
+
+async function resolvePostableIncomeAccount(accountNumber) {
+  if (!accountNumber) {
+    return null;
+  }
+
+  const account = await getAccountByNumber(String(accountNumber).trim());
+  return isIncomeAccount(account) ? account : null;
 }
 
 async function resolvePostableAccount(accountNumber) {
@@ -101,8 +134,8 @@ async function resolveSupplierPayableAccount(supplierId, overrides = {}) {
   );
 }
 
-async function resolveProductSalesAccount(productId, overrides = {}) {
-  const overrideAccount = await resolvePostableAccount(
+async function resolveDefaultSalesAccount(overrides = {}) {
+  const overrideAccount = await resolvePostableIncomeAccount(
     overrides.sales_account_number || null
   );
 
@@ -110,8 +143,30 @@ async function resolveProductSalesAccount(productId, overrides = {}) {
     return overrideAccount;
   }
 
+  const envAccount = await resolvePostableIncomeAccount(
+    process.env.ACCOUNTING_SALES_ACCOUNT_NUMBER || null
+  );
+
+  if (envAccount) {
+    return envAccount;
+  }
+
+  const preferredAccounts = ["701000", "702000", "707000", "708000", "706000"];
+
+  for (const accountNumber of preferredAccounts) {
+    const account = await resolvePostableIncomeAccount(accountNumber);
+
+    if (account) {
+      return account;
+    }
+  }
+
+  return null;
+}
+
+async function resolveProductSalesAccount(productId, overrides = {}) {
   const product = await getProductById(productId);
-  const productAccount = await resolvePostableAccountById(
+  const productAccount = await resolvePostableIncomeAccountById(
     product?.sales_account_id || null
   );
 
@@ -119,9 +174,7 @@ async function resolveProductSalesAccount(productId, overrides = {}) {
     return productAccount;
   }
 
-  return resolvePostableAccount(
-    process.env.ACCOUNTING_SALES_ACCOUNT_NUMBER || null
-  );
+  return resolveDefaultSalesAccount(overrides);
 }
 
 async function resolveExpenseAccount(category, overrides = {}) {

@@ -432,6 +432,21 @@ async function reverseInvoiceStock(client, invoice, reason = "Correction facture
   }
 }
 
+async function cancelInvoiceJournalEntries(client, invoiceId) {
+  await client.query(
+    `
+      UPDATE journal_entries
+      SET
+        status = 'cancelled',
+        updated_at = NOW()
+      WHERE reference_type = 'invoice'
+        AND reference_id = $1
+        AND status <> 'cancelled';
+    `,
+    [invoiceId]
+  );
+}
+
 async function ensureInvoiceCanBeChanged(client, invoiceId) {
   const invoiceResult = await client.query(
     `
@@ -572,16 +587,7 @@ export async function updateInvoiceWithItems(id, data) {
       insertedItems.push(itemResult.rows[0]);
     }
 
-    if (invoice.accounting_entry_id) {
-      await client.query(
-        `
-        UPDATE journal_entries
-        SET status = 'cancelled', updated_at = NOW()
-        WHERE id = $1;
-        `,
-        [invoice.accounting_entry_id]
-      );
-    }
+    await cancelInvoiceJournalEntries(client, id);
 
     await client.query("COMMIT");
 
@@ -614,16 +620,7 @@ export async function deleteInvoiceById(id) {
     await reverseInvoiceStock(client, invoice, "Suppression facture");
     await client.query("DELETE FROM invoice_items WHERE invoice_id = $1;", [id]);
 
-    if (invoice.accounting_entry_id) {
-      await client.query(
-        `
-        UPDATE journal_entries
-        SET status = 'cancelled', updated_at = NOW()
-        WHERE id = $1;
-        `,
-        [invoice.accounting_entry_id]
-      );
-    }
+    await cancelInvoiceJournalEntries(client, id);
 
     const deletedResult = await client.query(
       `
