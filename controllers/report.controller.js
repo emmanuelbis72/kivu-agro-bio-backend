@@ -2,6 +2,7 @@ import { getCashForecast } from "../models/dashboard.model.js";
 import { getMonthlyClosePack } from "../models/monthlyClose.model.js";
 import {
   getCustomerAgingReport,
+  getProductSalesReport,
   getSupplierAgingReport,
   getSalesDetailReport,
   getStockStateReport
@@ -426,6 +427,129 @@ const reportDefinitions = {
       }
     ]
   },
+  "product-sales": {
+    title: "Analyse ventes par produit",
+    subtitle: "Analyse quantitative et financiere par produit, depot, client ou mois",
+    tableTitle: "Synthese ventes produit",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `ventes-produit-${filters.start_date || "debut"}-${filters.end_date || "fin"}-${filters.variant || "summary"}`,
+    columns: [
+      {
+        key: "analysis_label",
+        header: "Analyse",
+        width: 120,
+        xlsxWidth: 30
+      },
+      { key: "product_name", header: "Produit", width: 95, xlsxWidth: 24 },
+      { key: "sku", header: "SKU", width: 55, xlsxWidth: 14 },
+      {
+        key: "category",
+        header: "Categorie",
+        width: 65,
+        xlsxWidth: 16
+      },
+      {
+        key: "warehouse_name",
+        header: "Depot",
+        width: 70,
+        xlsxWidth: 18
+      },
+      {
+        key: "customer_name",
+        header: "Client",
+        width: 80,
+        xlsxWidth: 20
+      },
+      {
+        key: "period_month",
+        header: "Mois",
+        type: "date",
+        width: 55,
+        xlsxWidth: 14
+      },
+      {
+        key: "invoices_count",
+        header: "Fact.",
+        type: "integer",
+        width: 45,
+        xlsxWidth: 10
+      },
+      {
+        key: "total_quantity",
+        header: "Qte",
+        type: "number",
+        width: 50,
+        xlsxWidth: 12
+      },
+      {
+        key: "total_sales_amount",
+        header: "CA",
+        type: "money",
+        width: 70,
+        xlsxWidth: 16
+      },
+      {
+        key: "gross_profit_amount",
+        header: "Profit",
+        type: "money",
+        width: 70,
+        xlsxWidth: 16
+      },
+      {
+        key: "gross_margin_percent",
+        header: "Marge %",
+        type: "number",
+        width: 55,
+        xlsxWidth: 12,
+        value: (row) => Number(row.gross_margin_percent || 0)
+      }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Regroupements",
+        value: Number(summary.total_rows || 0),
+        rawValue: Number(summary.total_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Produits",
+        value: Number(summary.total_products || 0),
+        rawValue: Number(summary.total_products || 0),
+        type: "integer"
+      },
+      {
+        label: "Factures",
+        value: Number(summary.total_invoices || 0),
+        rawValue: Number(summary.total_invoices || 0),
+        type: "integer"
+      },
+      {
+        label: "Quantite",
+        value: Number(summary.total_quantity || 0),
+        rawValue: Number(summary.total_quantity || 0),
+        type: "number"
+      },
+      {
+        label: "Chiffre d'affaires",
+        value: Number(summary.total_sales_amount || 0),
+        rawValue: Number(summary.total_sales_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Profit brut",
+        value: Number(summary.gross_profit_amount || 0),
+        rawValue: Number(summary.gross_profit_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Marge %",
+        value: Number(summary.gross_margin_percent || 0),
+        rawValue: Number(summary.gross_margin_percent || 0),
+        type: "number"
+      }
+    ]
+  },
   "stock-state": {
     title: "Etat de stock",
     subtitle: "Stock par depot, seuils d'alerte et valorisation",
@@ -575,6 +699,68 @@ async function getSalesDetailPayload(query) {
   };
 }
 
+async function getProductSalesPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+  const productId = parsePositiveInteger(query.product_id);
+  const customerCity =
+    query.customer_city && String(query.customer_city).trim()
+      ? String(query.customer_city).trim()
+      : null;
+  const productCategory =
+    query.product_category && String(query.product_category).trim()
+      ? String(query.product_category).trim()
+      : null;
+  const sku =
+    query.sku && String(query.sku).trim()
+      ? String(query.sku).trim()
+      : null;
+  const invoiceStatus =
+    query.invoice_status && String(query.invoice_status).trim()
+      ? String(query.invoice_status).trim().toLowerCase()
+      : null;
+  const variant =
+    query.variant && String(query.variant).trim()
+      ? String(query.variant).trim().toLowerCase()
+      : "summary";
+
+  const data = await getProductSalesReport(
+    {
+      startDate,
+      endDate,
+      warehouseId,
+      customerId,
+      productId,
+      customerCity,
+      productCategory,
+      sku,
+      invoiceStatus,
+      variant
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      product_id: productId,
+      customer_city: customerCity,
+      product_category: productCategory,
+      sku,
+      invoice_status: invoiceStatus,
+      variant,
+      limit
+    },
+    ...data
+  };
+}
+
 async function getStockStatePayload(query) {
   const limit = parsePositiveLimit(query.limit, 500, 5000);
   const warehouseId = parsePositiveInteger(query.warehouse_id);
@@ -635,6 +821,7 @@ const reportLoaders = {
   "customer-aging": getCustomerAgingPayload,
   "supplier-aging": getSupplierAgingPayload,
   "sales-detail": getSalesDetailPayload,
+  "product-sales": getProductSalesPayload,
   "stock-state": getStockStatePayload,
   "cash-forecast": getCashForecastPayload
 };
@@ -679,6 +866,10 @@ export function getSupplierAgingReportHandler(req, res, next) {
 
 export function getSalesDetailReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "sales-detail");
+}
+
+export function getProductSalesReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "product-sales");
 }
 
 export function getStockStateReportHandler(req, res, next) {
