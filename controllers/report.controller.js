@@ -27,6 +27,17 @@ function parsePositiveInteger(value) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+function parsePositiveIntegerList(value) {
+  const rawValues = Array.isArray(value) ? value : [value];
+
+  return [...new Set(
+    rawValues
+      .flatMap((item) => String(item ?? "").split(","))
+      .map((item) => Number(String(item).trim()))
+      .filter((item) => Number.isInteger(item) && item > 0)
+  )];
+}
+
 function parseYear(value, fallbackValue) {
   const parsed = Number(value);
 
@@ -429,18 +440,12 @@ const reportDefinitions = {
   },
   "product-sales": {
     title: "Analyse ventes par produit",
-    subtitle: "Analyse quantitative et financiere par produit, depot, client ou mois",
+    subtitle: "Analyse quantitative et financiere par produit, depot et client",
     tableTitle: "Synthese ventes produit",
     pdfLayout: "landscape",
     buildFilename: (filters) =>
-      `ventes-produit-${filters.start_date || "debut"}-${filters.end_date || "fin"}-${filters.variant || "summary"}`,
+      `ventes-produit-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
     columns: [
-      {
-        key: "analysis_label",
-        header: "Analyse",
-        width: 120,
-        xlsxWidth: 30
-      },
       { key: "product_name", header: "Produit", width: 95, xlsxWidth: 24 },
       { key: "sku", header: "SKU", width: 55, xlsxWidth: 14 },
       {
@@ -460,13 +465,6 @@ const reportDefinitions = {
         header: "Client",
         width: 80,
         xlsxWidth: 20
-      },
-      {
-        key: "period_month",
-        header: "Mois",
-        type: "date",
-        width: 55,
-        xlsxWidth: 14
       },
       {
         key: "invoices_count",
@@ -497,6 +495,20 @@ const reportDefinitions = {
         xlsxWidth: 16
       },
       {
+        key: "first_invoice_date",
+        header: "Prem. vente",
+        type: "date",
+        width: 60,
+        xlsxWidth: 14
+      },
+      {
+        key: "last_invoice_date",
+        header: "Dern. vente",
+        type: "date",
+        width: 60,
+        xlsxWidth: 14
+      },
+      {
         key: "gross_margin_percent",
         header: "Marge %",
         type: "number",
@@ -516,6 +528,18 @@ const reportDefinitions = {
         label: "Produits",
         value: Number(summary.total_products || 0),
         rawValue: Number(summary.total_products || 0),
+        type: "integer"
+      },
+      {
+        label: "Depots",
+        value: Number(summary.total_warehouses || 0),
+        rawValue: Number(summary.total_warehouses || 0),
+        type: "integer"
+      },
+      {
+        label: "Clients",
+        value: Number(summary.total_customers || 0),
+        rawValue: Number(summary.total_customers || 0),
         type: "integer"
       },
       {
@@ -703,42 +727,28 @@ async function getProductSalesPayload(query) {
   const startDate = parseDateFilter(query.start_date, null);
   const endDate = parseDateFilter(query.end_date, null);
   const limit = parsePositiveLimit(query.limit, 500, 5000);
-  const warehouseId = parsePositiveInteger(query.warehouse_id);
-  const customerId = parsePositiveInteger(query.customer_id);
-  const productId = parsePositiveInteger(query.product_id);
-  const customerCity =
-    query.customer_city && String(query.customer_city).trim()
-      ? String(query.customer_city).trim()
-      : null;
-  const productCategory =
-    query.product_category && String(query.product_category).trim()
-      ? String(query.product_category).trim()
-      : null;
-  const sku =
-    query.sku && String(query.sku).trim()
-      ? String(query.sku).trim()
-      : null;
+  const warehouseIds = parsePositiveIntegerList(
+    query.warehouse_ids ?? query.warehouse_id
+  );
+  const customerIds = parsePositiveIntegerList(
+    query.customer_ids ?? query.customer_id
+  );
+  const productIds = parsePositiveIntegerList(
+    query.product_ids ?? query.product_id
+  );
   const invoiceStatus =
     query.invoice_status && String(query.invoice_status).trim()
       ? String(query.invoice_status).trim().toLowerCase()
       : null;
-  const variant =
-    query.variant && String(query.variant).trim()
-      ? String(query.variant).trim().toLowerCase()
-      : "summary";
 
   const data = await getProductSalesReport(
     {
       startDate,
       endDate,
-      warehouseId,
-      customerId,
-      productId,
-      customerCity,
-      productCategory,
-      sku,
-      invoiceStatus,
-      variant
+      warehouseIds,
+      customerIds,
+      productIds,
+      invoiceStatus
     },
     limit
   );
@@ -747,14 +757,10 @@ async function getProductSalesPayload(query) {
     filters: {
       start_date: startDate,
       end_date: endDate,
-      warehouse_id: warehouseId,
-      customer_id: customerId,
-      product_id: productId,
-      customer_city: customerCity,
-      product_category: productCategory,
-      sku,
+      warehouse_ids: warehouseIds,
+      customer_ids: customerIds,
+      product_ids: productIds,
       invoice_status: invoiceStatus,
-      variant,
       limit
     },
     ...data

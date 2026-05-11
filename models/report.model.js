@@ -60,34 +60,19 @@ function buildProductSalesFilters(filters = {}) {
     conditions.push(`i.invoice_date <= $${values.length}`);
   }
 
-  if (filters.warehouseId) {
-    values.push(filters.warehouseId);
-    conditions.push(`i.warehouse_id = $${values.length}`);
+  if (Array.isArray(filters.warehouseIds) && filters.warehouseIds.length > 0) {
+    values.push(filters.warehouseIds);
+    conditions.push(`i.warehouse_id = ANY($${values.length}::int[])`);
   }
 
-  if (filters.customerId) {
-    values.push(filters.customerId);
-    conditions.push(`i.customer_id = $${values.length}`);
+  if (Array.isArray(filters.customerIds) && filters.customerIds.length > 0) {
+    values.push(filters.customerIds);
+    conditions.push(`i.customer_id = ANY($${values.length}::int[])`);
   }
 
-  if (filters.productId) {
-    values.push(filters.productId);
-    conditions.push(`ii.product_id = $${values.length}`);
-  }
-
-  if (filters.customerCity) {
-    values.push(`%${String(filters.customerCity).trim()}%`);
-    conditions.push(`COALESCE(c.city, '') ILIKE $${values.length}`);
-  }
-
-  if (filters.productCategory) {
-    values.push(`%${String(filters.productCategory).trim()}%`);
-    conditions.push(`COALESCE(p.category, '') ILIKE $${values.length}`);
-  }
-
-  if (filters.sku) {
-    values.push(`%${String(filters.sku).trim()}%`);
-    conditions.push(`COALESCE(p.sku, '') ILIKE $${values.length}`);
+  if (Array.isArray(filters.productIds) && filters.productIds.length > 0) {
+    values.push(filters.productIds);
+    conditions.push(`ii.product_id = ANY($${values.length}::int[])`);
   }
 
   if (filters.invoiceStatus) {
@@ -494,117 +479,117 @@ export async function getProductSalesReport(filters = {}, limit = 500) {
   await ensureReportsSchema(pool);
 
   const { whereClause, values } = buildProductSalesFilters(filters);
-  const variant = String(filters.variant || "summary").trim().toLowerCase();
-
-  let variantSelectSql = `
-      NULL::integer AS warehouse_id,
-      NULL::text AS warehouse_name,
-      NULL::text AS warehouse_city,
-      NULL::integer AS customer_id,
-      NULL::text AS customer_name,
-      NULL::text AS customer_city,
-      NULL::date AS period_month,
-      p.name AS analysis_label
-  `;
-  let variantGroupBySql = `p.id, p.name, p.sku, p.category`;
-  let orderBySql = `ORDER BY total_quantity DESC, total_sales_amount DESC, p.name ASC`;
-
-  if (variant === "by_warehouse") {
-    variantSelectSql = `
-      w.id AS warehouse_id,
-      w.name AS warehouse_name,
-      w.city AS warehouse_city,
-      NULL::integer AS customer_id,
-      NULL::text AS customer_name,
-      NULL::text AS customer_city,
-      NULL::date AS period_month,
-      CONCAT(p.name, ' / ', w.name) AS analysis_label
-    `;
-    variantGroupBySql =
-      "p.id, p.name, p.sku, p.category, w.id, w.name, w.city";
-    orderBySql =
-      "ORDER BY COALESCE(w.name, '') ASC, total_quantity DESC, p.name ASC";
-  } else if (variant === "by_customer") {
-    variantSelectSql = `
-      NULL::integer AS warehouse_id,
-      NULL::text AS warehouse_name,
-      NULL::text AS warehouse_city,
-      c.id AS customer_id,
-      c.business_name AS customer_name,
-      c.city AS customer_city,
-      NULL::date AS period_month,
-      CONCAT(p.name, ' / ', c.business_name) AS analysis_label
-    `;
-    variantGroupBySql =
-      "p.id, p.name, p.sku, p.category, c.id, c.business_name, c.city";
-    orderBySql =
-      "ORDER BY COALESCE(c.business_name, '') ASC, total_quantity DESC, p.name ASC";
-  } else if (variant === "by_month") {
-    variantSelectSql = `
-      NULL::integer AS warehouse_id,
-      NULL::text AS warehouse_name,
-      NULL::text AS warehouse_city,
-      NULL::integer AS customer_id,
-      NULL::text AS customer_name,
-      NULL::text AS customer_city,
-      DATE_TRUNC('month', i.invoice_date)::date AS period_month,
-      CONCAT(
-        p.name,
-        ' / ',
-        TO_CHAR(DATE_TRUNC('month', i.invoice_date)::date, 'MM/YYYY')
-      ) AS analysis_label
-    `;
-    variantGroupBySql =
-      "p.id, p.name, p.sku, p.category, DATE_TRUNC('month', i.invoice_date)::date";
-    orderBySql =
-      "ORDER BY period_month DESC NULLS LAST, total_quantity DESC, p.name ASC";
-  }
-
   const finalValues = [...values, limit];
 
-  const query = `
+  const groupedQuery = `
+    WITH base_sales AS (
+      SELECT
+        i.id AS invoice_id,
+        i.invoice_date,
+        i.status,
+        c.id AS customer_id,
+        c.business_name AS customer_name,
+        c.city AS customer_city,
+        w.id AS warehouse_id,
+        w.name AS warehouse_name,
+        w.city AS warehouse_city,
+        p.id AS product_id,
+        p.name AS product_name,
+        p.sku,
+        p.category,
+        ii.quantity,
+        ii.line_total,
+        (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
+        (ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN warehouses w ON w.id = i.warehouse_id
+      INNER JOIN products p ON p.id = ii.product_id
+      ${whereClause}
+    )
     SELECT
-      '${variant}'::text AS analysis_variant,
-      p.id AS product_id,
-      p.name AS product_name,
-      p.sku,
-      p.category,
-      ${variantSelectSql},
-      COUNT(DISTINCT i.id)::int AS invoices_count,
-      MIN(i.invoice_date) AS first_invoice_date,
-      MAX(i.invoice_date) AS last_invoice_date,
-      COALESCE(SUM(ii.quantity), 0) AS total_quantity,
-      COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
-      COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount,
-      COALESCE(
-        SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))),
-        0
-      ) AS gross_profit_amount,
+      bs.product_id,
+      bs.product_name,
+      bs.sku,
+      bs.category,
+      bs.warehouse_id,
+      bs.warehouse_name,
+      bs.warehouse_city,
+      bs.customer_id,
+      bs.customer_name,
+      bs.customer_city,
+      COUNT(DISTINCT bs.invoice_id)::int AS invoices_count,
+      MIN(bs.invoice_date) AS first_invoice_date,
+      MAX(bs.invoice_date) AS last_invoice_date,
+      COALESCE(SUM(bs.quantity), 0) AS total_quantity,
+      COALESCE(SUM(bs.line_total), 0) AS total_sales_amount,
+      COALESCE(SUM(bs.line_cogs_amount), 0) AS total_cogs_amount,
+      COALESCE(SUM(bs.gross_profit_amount), 0) AS gross_profit_amount,
       CASE
-        WHEN COALESCE(SUM(ii.line_total), 0) > 0
+        WHEN COALESCE(SUM(bs.line_total), 0) > 0
           THEN ROUND(
-            (
-              COALESCE(
-                SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))),
-                0
-              ) / COALESCE(SUM(ii.line_total), 0)
-            ) * 100,
+            (COALESCE(SUM(bs.gross_profit_amount), 0) / COALESCE(SUM(bs.line_total), 0)) * 100,
             2
           )
         ELSE 0
       END AS gross_margin_percent
-    FROM invoice_items ii
-    INNER JOIN invoices i ON i.id = ii.invoice_id
-    INNER JOIN customers c ON c.id = i.customer_id
-    INNER JOIN warehouses w ON w.id = i.warehouse_id
-    INNER JOIN products p ON p.id = ii.product_id
-    ${whereClause}
-    GROUP BY ${variantGroupBySql}
-    ${orderBySql}
+    FROM base_sales bs
+    GROUP BY
+      bs.product_id,
+      bs.product_name,
+      bs.sku,
+      bs.category,
+      bs.warehouse_id,
+      bs.warehouse_name,
+      bs.warehouse_city,
+      bs.customer_id,
+      bs.customer_name,
+      bs.customer_city
+    ORDER BY
+      bs.product_name ASC,
+      bs.warehouse_name ASC,
+      bs.customer_name ASC,
+      MAX(bs.invoice_date) DESC
     LIMIT $${finalValues.length};
   `;
 
-  const result = await pool.query(query, finalValues);
+  const summaryQuery = `
+    WITH base_sales AS (
+      SELECT
+        i.id AS invoice_id,
+        i.customer_id,
+        i.warehouse_id,
+        ii.product_id,
+        ii.quantity,
+        ii.line_total,
+        (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
+        (ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN warehouses w ON w.id = i.warehouse_id
+      INNER JOIN products p ON p.id = ii.product_id
+      ${whereClause}
+    )
+    SELECT
+      COUNT(DISTINCT product_id)::int AS total_products,
+      COUNT(DISTINCT warehouse_id)::int AS total_warehouses,
+      COUNT(DISTINCT customer_id)::int AS total_customers,
+      COUNT(DISTINCT invoice_id)::int AS total_invoices,
+      COALESCE(SUM(quantity), 0) AS total_quantity,
+      COALESCE(SUM(line_total), 0) AS total_sales_amount,
+      COALESCE(SUM(line_cogs_amount), 0) AS total_cogs_amount,
+      COALESCE(SUM(gross_profit_amount), 0) AS gross_profit_amount
+    FROM base_sales;
+  `;
+
+  const [groupedResult, summaryResult] = await Promise.all([
+    pool.query(groupedQuery, finalValues),
+    pool.query(summaryQuery, values)
+  ]);
+
+  const result = groupedResult;
   const rows = result.rows.map((row) => ({
     ...row,
     invoices_count: Number(row.invoices_count || 0),
@@ -615,43 +600,24 @@ export async function getProductSalesReport(filters = {}, limit = 500) {
     gross_margin_percent: Number(row.gross_margin_percent || 0)
   }));
 
-  const summary = rows.reduce(
-    (acc, row) => {
-      acc.total_rows += 1;
-      acc.product_ids.add(row.product_id);
-      acc.total_invoices += Number(row.invoices_count || 0);
-      acc.total_quantity += Number(row.total_quantity || 0);
-      acc.total_sales_amount += Number(row.total_sales_amount || 0);
-      acc.total_cogs_amount += Number(row.total_cogs_amount || 0);
-      acc.gross_profit_amount += Number(row.gross_profit_amount || 0);
-      return acc;
-    },
-    {
-      total_rows: 0,
-      product_ids: new Set(),
-      total_invoices: 0,
-      total_quantity: 0,
-      total_sales_amount: 0,
-      total_cogs_amount: 0,
-      gross_profit_amount: 0
-    }
-  );
+  const summaryRow = summaryResult.rows[0] || {};
+  const totalSalesAmount = Number(summaryRow.total_sales_amount || 0);
+  const grossProfitAmount = Number(summaryRow.gross_profit_amount || 0);
 
   return {
     summary: {
-      analysis_variant: variant,
-      total_rows: summary.total_rows,
-      total_products: summary.product_ids.size,
-      total_invoices: summary.total_invoices,
-      total_quantity: roundAmount(summary.total_quantity),
-      total_sales_amount: roundAmount(summary.total_sales_amount),
-      total_cogs_amount: roundAmount(summary.total_cogs_amount),
-      gross_profit_amount: roundAmount(summary.gross_profit_amount),
+      total_rows: rows.length,
+      total_products: Number(summaryRow.total_products || 0),
+      total_warehouses: Number(summaryRow.total_warehouses || 0),
+      total_customers: Number(summaryRow.total_customers || 0),
+      total_invoices: Number(summaryRow.total_invoices || 0),
+      total_quantity: roundAmount(summaryRow.total_quantity),
+      total_sales_amount: roundAmount(totalSalesAmount),
+      total_cogs_amount: roundAmount(summaryRow.total_cogs_amount),
+      gross_profit_amount: roundAmount(grossProfitAmount),
       gross_margin_percent:
-        summary.total_sales_amount > 0
-          ? roundAmount(
-              (summary.gross_profit_amount / summary.total_sales_amount) * 100
-            )
+        totalSalesAmount > 0
+          ? roundAmount((grossProfitAmount / totalSalesAmount) * 100)
           : 0
     },
     rows
