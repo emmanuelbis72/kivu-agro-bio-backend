@@ -267,6 +267,7 @@ export async function createInvoiceHandler(req, res, next) {
     const invoice = await createInvoiceWithItems({
       invoice_number,
       customer_id,
+      customer_name: customer.business_name,
       warehouse_id,
       invoice_date,
       due_date,
@@ -529,6 +530,7 @@ export async function updateInvoiceHandler(req, res, next) {
 
     const invoice = await updateInvoiceWithItems(id, {
       customer_id,
+      customer_name: customer.business_name,
       warehouse_id,
       invoice_date,
       due_date,

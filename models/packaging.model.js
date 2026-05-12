@@ -3,7 +3,7 @@ import {
   ensureTableSchema,
   queryWithSchemaOrColumnRetry
 } from "../utils/schemaSelfHealing.util.js";
-import { performStockExit } from "./stock.model.js";
+import { performStockEntry, performStockExit } from "./stock.model.js";
 
 export const PACKAGING_TYPES = [
   "oil_bottle",
@@ -48,7 +48,7 @@ function normalizeOptionalText(value) {
 }
 
 function buildConsumptionFilters(filters = {}) {
-  const conditions = [];
+  const conditions = [`pc.status = 'active'`];
   const values = [];
   let index = 1;
 
@@ -94,10 +94,55 @@ function buildConsumptionFilters(filters = {}) {
   };
 }
 
+function buildReplenishmentFilters(filters = {}) {
+  const conditions = [`pr.status = 'active'`];
+  const values = [];
+  let index = 1;
+
+  if (filters.start_date) {
+    conditions.push(`pr.replenishment_date >= $${index++}`);
+    values.push(filters.start_date);
+  }
+
+  if (filters.end_date) {
+    conditions.push(`pr.replenishment_date <= $${index++}`);
+    values.push(filters.end_date);
+  }
+
+  if (filters.warehouse_id) {
+    conditions.push(`pr.warehouse_id = $${index++}`);
+    values.push(Number(filters.warehouse_id));
+  }
+
+  if (filters.product_id) {
+    conditions.push(`pr.product_id = $${index++}`);
+    values.push(Number(filters.product_id));
+  }
+
+  if (filters.packaging_type) {
+    conditions.push(`pr.packaging_type = $${index++}`);
+    values.push(filters.packaging_type);
+  }
+
+  return {
+    whereClause: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "",
+    values,
+    nextIndex: index
+  };
+}
+
 async function ensurePackagingSchema(executor = pool) {
   await executor.query(`
     ALTER TABLE products
     ADD COLUMN IF NOT EXISTS packaging_type VARCHAR(40);
+  `);
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS packaging_product_id INTEGER REFERENCES products(id) ON DELETE SET NULL;
+  `);
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS packaging_quantity_per_unit NUMERIC(14,2);
   `);
 
   await ensureTableSchema({
@@ -117,6 +162,10 @@ async function ensurePackagingSchema(executor = pool) {
         purpose VARCHAR(40),
         notes TEXT,
         stock_movement_id INTEGER REFERENCES stock_movements(id) ON DELETE SET NULL,
+        source_type VARCHAR(40),
+        source_id INTEGER,
+        trigger_mode VARCHAR(20) NOT NULL DEFAULT 'manual',
+        status VARCHAR(20) NOT NULL DEFAULT 'active',
         created_by INTEGER,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -127,6 +176,58 @@ async function ensurePackagingSchema(executor = pool) {
   await executor.query(`
     ALTER TABLE packaging_consumptions
     ADD COLUMN IF NOT EXISTS stock_movement_id INTEGER REFERENCES stock_movements(id) ON DELETE SET NULL;
+  `);
+  await executor.query(`
+    ALTER TABLE packaging_consumptions
+    ADD COLUMN IF NOT EXISTS source_type VARCHAR(40);
+  `);
+  await executor.query(`
+    ALTER TABLE packaging_consumptions
+    ADD COLUMN IF NOT EXISTS source_id INTEGER;
+  `);
+  await executor.query(`
+    ALTER TABLE packaging_consumptions
+    ADD COLUMN IF NOT EXISTS trigger_mode VARCHAR(20) NOT NULL DEFAULT 'manual';
+  `);
+  await executor.query(`
+    ALTER TABLE packaging_consumptions
+    ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active';
+  `);
+
+  await ensureTableSchema({
+    executor: (sql) => executor.query(sql),
+    relationName: "packaging_replenishments",
+    createSql: `
+      CREATE TABLE IF NOT EXISTS packaging_replenishments (
+        id SERIAL PRIMARY KEY,
+        replenishment_number VARCHAR(40) NOT NULL UNIQUE,
+        replenishment_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+        packaging_type VARCHAR(40) NOT NULL,
+        quantity NUMERIC(14,2) NOT NULL CHECK (quantity > 0),
+        source_name VARCHAR(160),
+        notes TEXT,
+        stock_movement_id INTEGER REFERENCES stock_movements(id) ON DELETE SET NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'active',
+        created_by INTEGER,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `
+  });
+
+  await executor.query(`
+    ALTER TABLE packaging_replenishments
+    ADD COLUMN IF NOT EXISTS stock_movement_id INTEGER REFERENCES stock_movements(id) ON DELETE SET NULL;
+  `);
+  await executor.query(`
+    ALTER TABLE packaging_replenishments
+    ADD COLUMN IF NOT EXISTS source_name VARCHAR(160);
+  `);
+  await executor.query(`
+    ALTER TABLE packaging_replenishments
+    ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active';
   `);
 }
 
@@ -169,6 +270,156 @@ async function getNextPackagingConsumptionNumber(executor, consumptionDate) {
 
   const nextSequence = Number(result.rows[0]?.max_sequence || 0) + 1;
   return `${prefix}${String(nextSequence).padStart(5, "0")}`;
+}
+
+async function getNextPackagingReplenishmentNumber(executor, replenishmentDate) {
+  const year = new Date(replenishmentDate).getFullYear();
+  const prefix = `APP-EMB-${year}-`;
+
+  const result = await executor.query(
+    `
+      SELECT
+        COALESCE(
+          MAX(
+            CASE
+              WHEN REPLACE(replenishment_number, $1, '') ~ '^[0-9]+$'
+                THEN CAST(REPLACE(replenishment_number, $1, '') AS INTEGER)
+              ELSE NULL
+            END
+          ),
+          0
+        ) AS max_sequence
+      FROM packaging_replenishments
+      WHERE replenishment_number LIKE $2;
+    `,
+    [prefix, `${prefix}%`]
+  );
+
+  const nextSequence = Number(result.rows[0]?.max_sequence || 0) + 1;
+  return `${prefix}${String(nextSequence).padStart(5, "0")}`;
+}
+
+async function createPackagingConsumptionEntry(client, data) {
+  const product = await getPackagingProductRecord(client, data.product_id);
+
+  if (!product) {
+    const error = new Error("Produit emballage introuvable.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (product.product_role !== "packaging_material") {
+    const error = new Error(
+      "Le produit selectionne n'est pas configure comme emballage."
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const packagingType =
+    normalizePackagingType(data.packaging_type) ||
+    normalizePackagingType(product.packaging_type);
+
+  if (!packagingType) {
+    const error = new Error(
+      "Veuillez d'abord classer cet emballage dans un type valide."
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const consumptionNumber = await getNextPackagingConsumptionNumber(
+    client,
+    data.consumption_date
+  );
+
+  const insertResult = await client.query(
+    `
+      INSERT INTO packaging_consumptions (
+        consumption_number,
+        consumption_date,
+        warehouse_id,
+        product_id,
+        packaging_type,
+        quantity,
+        consumer_name,
+        consumer_type,
+        purpose,
+        notes,
+        source_type,
+        source_id,
+        trigger_mode,
+        status,
+        created_by
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'active',$14)
+      RETURNING *;
+    `,
+    [
+      consumptionNumber,
+      data.consumption_date,
+      data.warehouse_id,
+      data.product_id,
+      packagingType,
+      data.quantity,
+      data.consumer_name,
+      normalizeOptionalText(data.consumer_type),
+      normalizeOptionalText(data.purpose),
+      normalizeOptionalText(data.notes),
+      normalizeOptionalText(data.source_type),
+      data.source_id ?? null,
+      normalizeOptionalText(data.trigger_mode) || "manual",
+      data.created_by || null
+    ]
+  );
+
+  const consumption = insertResult.rows[0];
+
+  const stockExit = await performStockExit({
+    client,
+    warehouse_id: data.warehouse_id,
+    product_id: data.product_id,
+    quantity: data.quantity,
+    unit_cost: Number(product.cost_price || 0),
+    reference_type:
+      normalizeOptionalText(data.reference_type) || "packaging_consumption",
+    reference_id: consumption.id,
+    notes:
+      normalizeOptionalText(data.notes) ||
+      `Consommation emballage par ${data.consumer_name}`,
+    created_by: data.created_by || null
+  });
+
+  await client.query(
+    `
+      UPDATE packaging_consumptions
+      SET
+        stock_movement_id = $1,
+        updated_at = NOW()
+      WHERE id = $2;
+    `,
+    [stockExit.movement.id, consumption.id]
+  );
+
+  const finalResult = await client.query(
+    `
+      SELECT
+        pc.*,
+        p.name AS product_name,
+        p.sku,
+        p.barcode,
+        w.name AS warehouse_name,
+        w.city AS warehouse_city
+      FROM packaging_consumptions pc
+      INNER JOIN products p ON p.id = pc.product_id
+      INNER JOIN warehouses w ON w.id = pc.warehouse_id
+      WHERE pc.id = $1
+      LIMIT 1;
+    `,
+    [consumption.id]
+  );
+
+  return finalResult.rows[0] || null;
 }
 
 export async function getPackagingProducts() {
@@ -224,6 +475,35 @@ export async function getPackagingProducts() {
   return result.rows;
 }
 
+export async function getFinishedProductPackagingConfigs() {
+  const query = `
+    SELECT
+      fp.id AS finished_product_id,
+      fp.name AS finished_product_name,
+      fp.category AS finished_product_category,
+      fp.sku AS finished_product_sku,
+      fp.packaging_product_id,
+      fp.packaging_quantity_per_unit,
+      pp.name AS packaging_product_name,
+      pp.sku AS packaging_product_sku,
+      pp.packaging_type,
+      pp.unit AS packaging_unit,
+      pp.is_active AS packaging_is_active
+    FROM products fp
+    LEFT JOIN products pp ON pp.id = fp.packaging_product_id
+    WHERE fp.product_role = 'finished_product'
+    ORDER BY fp.name ASC;
+  `;
+
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensurePackagingSchema(pool),
+    query
+  });
+
+  return result.rows;
+}
+
 export async function updatePackagingProductType(productId, packagingType) {
   const normalizedType = normalizePackagingType(packagingType);
 
@@ -253,6 +533,65 @@ export async function updatePackagingProductType(productId, packagingType) {
       RETURNING *;
     `,
     [normalizedType, productId]
+  );
+
+  return result.rows[0] || null;
+}
+
+export async function updateFinishedProductPackagingConfig(
+  finishedProductId,
+  packagingProductId,
+  packagingQuantityPerUnit
+) {
+  await ensurePackagingSchema(pool);
+
+  const finishedProduct = await getPackagingProductRecord(pool, finishedProductId);
+
+  if (!finishedProduct) {
+    return null;
+  }
+
+  if (finishedProduct.product_role !== "finished_product") {
+    const error = new Error(
+      "Seuls les produits finis peuvent recevoir une configuration d'emballage."
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (packagingProductId !== null) {
+    const packagingProduct = await getPackagingProductRecord(pool, packagingProductId);
+
+    if (!packagingProduct) {
+      const error = new Error("Produit emballage introuvable.");
+      error.statusCode = 404;
+      throw error;
+    }
+
+    if (packagingProduct.product_role !== "packaging_material") {
+      const error = new Error(
+        "Le produit lie doit etre un emballage."
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+
+  const result = await pool.query(
+    `
+      UPDATE products
+      SET
+        packaging_product_id = $1,
+        packaging_quantity_per_unit = $2,
+        updated_at = NOW()
+      WHERE id = $3
+      RETURNING *;
+    `,
+    [
+      packagingProductId,
+      packagingProductId === null ? null : packagingQuantityPerUnit,
+      finishedProductId
+    ]
   );
 
   return result.rows[0] || null;
@@ -291,6 +630,9 @@ export async function getPackagingConsumptions({
       pc.consumer_type,
       pc.purpose,
       pc.notes,
+      pc.source_type,
+      pc.source_id,
+      pc.trigger_mode,
       pc.stock_movement_id,
       pc.created_by,
       pc.created_at,
@@ -317,10 +659,64 @@ export async function getPackagingConsumptions({
   return result.rows;
 }
 
+export async function getPackagingReplenishments({
+  start_date = null,
+  end_date = null,
+  warehouse_id = null,
+  product_id = null,
+  packaging_type = null,
+  limit = 100
+} = {}) {
+  const filters = buildReplenishmentFilters({
+    start_date,
+    end_date,
+    warehouse_id,
+    product_id,
+    packaging_type
+  });
+
+  const query = `
+    SELECT
+      pr.id,
+      pr.replenishment_number,
+      pr.replenishment_date,
+      pr.warehouse_id,
+      pr.product_id,
+      pr.packaging_type,
+      pr.quantity,
+      pr.source_name,
+      pr.notes,
+      pr.stock_movement_id,
+      pr.created_by,
+      pr.created_at,
+      p.name AS product_name,
+      p.sku,
+      p.barcode,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city
+    FROM packaging_replenishments pr
+    INNER JOIN products p ON p.id = pr.product_id
+    INNER JOIN warehouses w ON w.id = pr.warehouse_id
+    ${filters.whereClause}
+    ORDER BY pr.replenishment_date DESC, pr.id DESC
+    LIMIT $${filters.nextIndex};
+  `;
+
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensurePackagingSchema(pool),
+    query,
+    values: [...filters.values, Number(limit) > 0 ? Number(limit) : 100]
+  });
+
+  return result.rows;
+}
+
 export async function getPackagingOverview(filters = {}) {
   await ensurePackagingSchema(pool);
 
   const consumptionFilters = buildConsumptionFilters(filters);
+  const replenishmentFilters = buildReplenishmentFilters(filters);
 
   const summaryQuery = `
     SELECT
@@ -329,6 +725,14 @@ export async function getPackagingOverview(filters = {}) {
       COUNT(DISTINCT pc.consumer_name)::int AS consumers_count
     FROM packaging_consumptions pc
     ${consumptionFilters.whereClause};
+  `;
+
+  const replenishmentSummaryQuery = `
+    SELECT
+      COALESCE(SUM(pr.quantity), 0) AS total_replenished,
+      COUNT(*)::int AS replenishment_count
+    FROM packaging_replenishments pr
+    ${replenishmentFilters.whereClause};
   `;
 
   const stockConditions = [`p.product_role = 'packaging_material'`];
@@ -343,6 +747,11 @@ export async function getPackagingOverview(filters = {}) {
   if (filters.warehouse_id) {
     stockConditions.push(`ws.warehouse_id = $${stockIndex++}`);
     stockValues.push(Number(filters.warehouse_id));
+  }
+
+  if (filters.product_id) {
+    stockConditions.push(`p.id = $${stockIndex++}`);
+    stockValues.push(Number(filters.product_id));
   }
 
   const stockWhereClause = `WHERE ${stockConditions.join(" AND ")}`;
@@ -408,9 +817,14 @@ export async function getPackagingOverview(filters = {}) {
     ...filters,
     limit: 12
   });
+  const recentReplenishments = await getPackagingReplenishments({
+    ...filters,
+    limit: 12
+  });
 
   const [
     summaryResult,
+    replenishmentSummaryResult,
     stockSummaryResult,
     stockByTypeResult,
     consumptionByTypeResult,
@@ -418,6 +832,7 @@ export async function getPackagingOverview(filters = {}) {
     monthlyConsumptionResult
   ] = await Promise.all([
     pool.query(summaryQuery, consumptionFilters.values),
+    pool.query(replenishmentSummaryQuery, replenishmentFilters.values),
     pool.query(stockSummaryQuery, stockValues),
     pool.query(stockByTypeQuery, stockValues),
     pool.query(consumptionByTypeQuery, consumptionFilters.values),
@@ -430,6 +845,12 @@ export async function getPackagingOverview(filters = {}) {
       total_consumed: Number(summaryResult.rows[0]?.total_consumed || 0),
       consumption_count: Number(summaryResult.rows[0]?.consumption_count || 0),
       consumers_count: Number(summaryResult.rows[0]?.consumers_count || 0),
+      total_replenished: Number(
+        replenishmentSummaryResult.rows[0]?.total_replenished || 0
+      ),
+      replenishment_count: Number(
+        replenishmentSummaryResult.rows[0]?.replenishment_count || 0
+      ),
       current_stock: Number(stockSummaryResult.rows[0]?.current_stock || 0),
       packaging_products_count: Number(
         stockSummaryResult.rows[0]?.packaging_products_count || 0
@@ -458,11 +879,36 @@ export async function getPackagingOverview(filters = {}) {
       total_consumed: Number(row.total_consumed || 0),
       consumption_count: Number(row.consumption_count || 0)
     })),
-    recent_consumptions: recentConsumptions
+    recent_consumptions: recentConsumptions,
+    recent_replenishments: recentReplenishments
   };
 }
 
 export async function createPackagingConsumption(data) {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await ensurePackagingSchema(client);
+    const finalResult = await createPackagingConsumptionEntry(client, {
+      ...data,
+      source_type: data.source_type || null,
+      source_id: data.source_id ?? null,
+      trigger_mode: data.trigger_mode || "manual",
+      reference_type: data.reference_type || "packaging_consumption"
+    });
+
+    await client.query("COMMIT");
+    return finalResult || null;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function createPackagingReplenishment(data) {
   const client = await pool.connect();
 
   try {
@@ -497,96 +943,212 @@ export async function createPackagingConsumption(data) {
       throw error;
     }
 
-    const consumptionNumber = await getNextPackagingConsumptionNumber(
+    const replenishmentNumber = await getNextPackagingReplenishmentNumber(
       client,
-      data.consumption_date
+      data.replenishment_date
     );
 
     const insertResult = await client.query(
       `
-        INSERT INTO packaging_consumptions (
-          consumption_number,
-          consumption_date,
+        INSERT INTO packaging_replenishments (
+          replenishment_number,
+          replenishment_date,
           warehouse_id,
           product_id,
           packaging_type,
           quantity,
-          consumer_name,
-          consumer_type,
-          purpose,
+          source_name,
           notes,
+          status,
           created_by
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9)
         RETURNING *;
       `,
       [
-        consumptionNumber,
-        data.consumption_date,
+        replenishmentNumber,
+        data.replenishment_date,
         data.warehouse_id,
         data.product_id,
         packagingType,
         data.quantity,
-        data.consumer_name,
-        normalizeOptionalText(data.consumer_type),
-        normalizeOptionalText(data.purpose),
+        normalizeOptionalText(data.source_name),
         normalizeOptionalText(data.notes),
         data.created_by || null
       ]
     );
 
-    const consumption = insertResult.rows[0];
+    const replenishment = insertResult.rows[0];
 
-    const stockExit = await performStockExit({
+    const stockEntry = await performStockEntry({
       client,
       warehouse_id: data.warehouse_id,
       product_id: data.product_id,
       quantity: data.quantity,
       unit_cost: Number(product.cost_price || 0),
-      reference_type: "packaging_consumption",
-      reference_id: consumption.id,
+      reference_type: "packaging_replenishment",
+      reference_id: replenishment.id,
       notes:
         normalizeOptionalText(data.notes) ||
-        `Consommation emballage par ${data.consumer_name}`,
+        `Approvisionnement emballage ${replenishmentNumber}`,
       created_by: data.created_by || null
     });
 
-    const updateResult = await client.query(
+    await client.query(
       `
-        UPDATE packaging_consumptions
+        UPDATE packaging_replenishments
         SET
           stock_movement_id = $1,
           updated_at = NOW()
-        WHERE id = $2
-        RETURNING *;
+        WHERE id = $2;
       `,
-      [stockExit.movement.id, consumption.id]
+      [stockEntry.movement.id, replenishment.id]
     );
 
-    const finalResult = await client.query(
+    const rowResult = await client.query(
       `
         SELECT
-          pc.*,
+          pr.*,
           p.name AS product_name,
           p.sku,
           p.barcode,
           w.name AS warehouse_name,
           w.city AS warehouse_city
-        FROM packaging_consumptions pc
-        INNER JOIN products p ON p.id = pc.product_id
-        INNER JOIN warehouses w ON w.id = pc.warehouse_id
-        WHERE pc.id = $1
+        FROM packaging_replenishments pr
+        INNER JOIN products p ON p.id = pr.product_id
+        INNER JOIN warehouses w ON w.id = pr.warehouse_id
+        WHERE pr.id = $1
         LIMIT 1;
       `,
-      [updateResult.rows[0].id]
+      [replenishment.id]
     );
 
     await client.query("COMMIT");
-    return finalResult.rows[0] || null;
+    return rowResult.rows[0] || null;
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
   } finally {
     client.release();
   }
+}
+
+export async function consumePackagingForInvoice({
+  client,
+  invoice,
+  items,
+  customer_name = null,
+  created_by = null
+}) {
+  await ensurePackagingSchema(client);
+
+  for (const item of items || []) {
+    const configResult = await client.query(
+      `
+        SELECT
+          fp.id AS finished_product_id,
+          fp.name AS finished_product_name,
+          fp.packaging_product_id,
+          COALESCE(fp.packaging_quantity_per_unit, 0) AS packaging_quantity_per_unit,
+          pp.name AS packaging_product_name,
+          pp.packaging_type,
+          pp.product_role AS packaging_product_role
+        FROM products fp
+        LEFT JOIN products pp ON pp.id = fp.packaging_product_id
+        WHERE fp.id = $1
+        LIMIT 1;
+      `,
+      [item.product_id]
+    );
+
+    const config = configResult.rows[0] || null;
+
+    if (
+      !config ||
+      !config.packaging_product_id ||
+      Number(config.packaging_quantity_per_unit || 0) <= 0
+    ) {
+      continue;
+    }
+
+    if (config.packaging_product_role !== "packaging_material") {
+      const error = new Error(
+        `L'emballage lie au produit ${config.finished_product_name} est invalide.`
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const quantityToConsume =
+      Number(item.quantity || 0) * Number(config.packaging_quantity_per_unit || 0);
+
+    if (quantityToConsume <= 0) {
+      continue;
+    }
+
+    await createPackagingConsumptionEntry(client, {
+      warehouse_id: invoice.warehouse_id,
+      product_id: config.packaging_product_id,
+      packaging_type: config.packaging_type || null,
+      quantity: quantityToConsume,
+      consumption_date: invoice.invoice_date,
+      consumer_name: customer_name || `Facture ${invoice.invoice_number}`,
+      consumer_type: "client",
+      purpose: "conditioning",
+      notes: `Consommation automatique liee a la facture ${invoice.invoice_number} pour ${config.finished_product_name}`,
+      source_type: "invoice",
+      source_id: invoice.id,
+      trigger_mode: "automatic",
+      reference_type: "packaging_consumption",
+      created_by
+    });
+  }
+}
+
+export async function reversePackagingConsumptionsBySource({
+  client,
+  source_type,
+  source_id,
+  reason = "Annulation consommation emballage",
+  created_by = null
+}) {
+  await ensurePackagingSchema(client);
+
+  const result = await client.query(
+    `
+      SELECT *
+      FROM packaging_consumptions
+      WHERE source_type = $1
+        AND source_id = $2
+        AND status = 'active'
+      ORDER BY id ASC;
+    `,
+    [source_type, source_id]
+  );
+
+  for (const row of result.rows) {
+    await performStockEntry({
+      client,
+      warehouse_id: row.warehouse_id,
+      product_id: row.product_id,
+      quantity: row.quantity,
+      reference_type: "packaging_consumption_reversal",
+      reference_id: row.id,
+      notes: `${reason} - ${row.consumption_number}`,
+      created_by
+    });
+
+    await client.query(
+      `
+        UPDATE packaging_consumptions
+        SET
+          status = 'reversed',
+          updated_at = NOW()
+        WHERE id = $1;
+      `,
+      [row.id]
+    );
+  }
+
+  return result.rows.length;
 }

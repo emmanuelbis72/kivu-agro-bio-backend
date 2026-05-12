@@ -2,12 +2,16 @@ import { getProductById } from "../models/product.model.js";
 import { getWarehouseById } from "../models/warehouse.model.js";
 import {
   createPackagingConsumption,
+  createPackagingReplenishment,
+  getFinishedProductPackagingConfigs,
   getPackagingConsumptions,
   getPackagingOverview,
   getPackagingProducts,
+  getPackagingReplenishments,
   PACKAGING_CONSUMER_TYPES,
   PACKAGING_PURPOSES,
   PACKAGING_TYPES,
+  updateFinishedProductPackagingConfig,
   updatePackagingProductType
 } from "../models/packaging.model.js";
 
@@ -181,6 +185,81 @@ export async function createPackagingConsumptionHandler(req, res, next) {
   }
 }
 
+export async function createPackagingReplenishmentHandler(req, res, next) {
+  try {
+    const warehouse_id = Number(req.body.warehouse_id);
+    const product_id = Number(req.body.product_id);
+    const quantity = Number(req.body.quantity);
+    const packaging_type = normalizeOptionalString(req.body.packaging_type);
+    const replenishment_date = normalizeDate(req.body.replenishment_date);
+    const errors = [];
+
+    if (!isPositiveInteger(warehouse_id)) {
+      errors.push("Le champ 'warehouse_id' doit etre un entier positif.");
+    }
+
+    if (!isPositiveInteger(product_id)) {
+      errors.push("Le champ 'product_id' doit etre un entier positif.");
+    }
+
+    if (!isPositiveNumber(quantity)) {
+      errors.push("Le champ 'quantity' doit etre un nombre > 0.");
+    }
+
+    if (packaging_type && !PACKAGING_TYPES.includes(packaging_type)) {
+      errors.push(
+        "Le champ 'packaging_type' est invalide. Valeurs attendues: oil_bottle, butter_bottle, kraft_paper."
+      );
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation echouee.",
+        errors
+      });
+    }
+
+    const [warehouse, product] = await Promise.all([
+      getWarehouseById(warehouse_id),
+      getProductById(product_id)
+    ]);
+
+    if (!warehouse) {
+      return res.status(404).json({
+        success: false,
+        message: "Depot introuvable."
+      });
+    }
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Produit emballage introuvable."
+      });
+    }
+
+    const result = await createPackagingReplenishment({
+      warehouse_id,
+      product_id,
+      quantity,
+      packaging_type,
+      replenishment_date,
+      source_name: req.body.source_name?.trim() || null,
+      notes: req.body.notes?.trim() || null,
+      created_by: req.body.created_by ? Number(req.body.created_by) : null
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Approvisionnement d'emballage enregistre avec succes.",
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function getPackagingConsumptionsHandler(req, res, next) {
   try {
     const warehouse_id = req.query.warehouse_id
@@ -247,6 +326,62 @@ export async function getPackagingConsumptionsHandler(req, res, next) {
   }
 }
 
+export async function getPackagingReplenishmentsHandler(req, res, next) {
+  try {
+    const warehouse_id = req.query.warehouse_id
+      ? Number(req.query.warehouse_id)
+      : null;
+    const product_id = req.query.product_id ? Number(req.query.product_id) : null;
+    const limit = req.query.limit ? Number(req.query.limit) : 100;
+    const packaging_type = normalizeOptionalString(req.query.packaging_type);
+
+    if (warehouse_id !== null && !isPositiveInteger(warehouse_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'warehouse_id' est invalide."
+      });
+    }
+
+    if (product_id !== null && !isPositiveInteger(product_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'product_id' est invalide."
+      });
+    }
+
+    if (!isPositiveInteger(limit)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'limit' doit etre un entier positif."
+      });
+    }
+
+    if (packaging_type && !PACKAGING_TYPES.includes(packaging_type)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'packaging_type' est invalide."
+      });
+    }
+
+    const rows = await getPackagingReplenishments({
+      start_date: req.query.start_date || null,
+      end_date: req.query.end_date || null,
+      warehouse_id,
+      product_id,
+      packaging_type,
+      limit
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: rows.length,
+      data: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function getPackagingOverviewHandler(req, res, next) {
   try {
     const warehouse_id = req.query.warehouse_id
@@ -297,6 +432,94 @@ export async function getPackagingOverviewHandler(req, res, next) {
     return res.status(200).json({
       success: true,
       data
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getFinishedProductPackagingConfigsHandler(
+  req,
+  res,
+  next
+) {
+  try {
+    const rows = await getFinishedProductPackagingConfigs();
+
+    return res.status(200).json({
+      success: true,
+      count: rows.length,
+      data: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateFinishedProductPackagingConfigHandler(
+  req,
+  res,
+  next
+) {
+  try {
+    const finishedProductId = Number(req.params.productId);
+    const packagingProductId =
+      req.body.packaging_product_id === undefined ||
+      req.body.packaging_product_id === null ||
+      req.body.packaging_product_id === ""
+        ? null
+        : Number(req.body.packaging_product_id);
+    const packagingQuantityPerUnit =
+      req.body.packaging_quantity_per_unit === undefined ||
+      req.body.packaging_quantity_per_unit === null ||
+      req.body.packaging_quantity_per_unit === ""
+        ? null
+        : Number(req.body.packaging_quantity_per_unit);
+
+    if (!isPositiveInteger(finishedProductId)) {
+      return res.status(400).json({
+        success: false,
+        message: "ID produit fini invalide."
+      });
+    }
+
+    if (
+      packagingProductId !== null &&
+      !isPositiveInteger(packagingProductId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "ID emballage invalide."
+      });
+    }
+
+    if (
+      packagingProductId !== null &&
+      (!Number.isFinite(packagingQuantityPerUnit) || packagingQuantityPerUnit <= 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "La quantite d'emballage par unite doit etre > 0."
+      });
+    }
+
+    const result = await updateFinishedProductPackagingConfig(
+      finishedProductId,
+      packagingProductId,
+      packagingProductId === null ? null : packagingQuantityPerUnit
+    );
+
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        message: "Produit fini introuvable."
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Configuration emballage du produit mise a jour avec succes.",
+      data: result
     });
   } catch (error) {
     next(error);

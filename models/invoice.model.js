@@ -1,5 +1,9 @@
 import { pool } from "../config/db.js";
 import { performStockExit } from "./stock.model.js";
+import {
+  consumePackagingForInvoice,
+  reversePackagingConsumptionsBySource
+} from "./packaging.model.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 
 async function ensureInvoicesSchema(executor = pool) {
@@ -318,6 +322,14 @@ export async function createInvoiceWithItems(data) {
       });
     }
 
+    await consumePackagingForInvoice({
+      client,
+      invoice,
+      items: data.items,
+      customer_name: data.customer_name || null,
+      created_by: data.created_by || null
+    });
+
     await client.query("COMMIT");
 
     return {
@@ -499,6 +511,13 @@ export async function updateInvoiceWithItems(id, data) {
     }
 
     await reverseInvoiceStock(client, invoice, "Annulation avant modification facture");
+    await reversePackagingConsumptionsBySource({
+      client,
+      source_type: "invoice",
+      source_id: id,
+      reason: `Annulation consommation emballage facture ${invoice.invoice_number}`,
+      created_by: data.created_by || invoice.created_by || null
+    });
     await client.query("DELETE FROM invoice_items WHERE invoice_id = $1;", [id]);
 
     const invoiceUpdateResult = await client.query(
@@ -587,6 +606,14 @@ export async function updateInvoiceWithItems(id, data) {
       insertedItems.push(itemResult.rows[0]);
     }
 
+    await consumePackagingForInvoice({
+      client,
+      invoice: updatedInvoice,
+      items: data.items,
+      customer_name: data.customer_name || null,
+      created_by: data.created_by || invoice.created_by || null
+    });
+
     await cancelInvoiceJournalEntries(client, id);
 
     await client.query("COMMIT");
@@ -618,6 +645,13 @@ export async function deleteInvoiceById(id) {
     }
 
     await reverseInvoiceStock(client, invoice, "Suppression facture");
+    await reversePackagingConsumptionsBySource({
+      client,
+      source_type: "invoice",
+      source_id: id,
+      reason: `Suppression facture ${invoice.invoice_number}`,
+      created_by: invoice.created_by || null
+    });
     await client.query("DELETE FROM invoice_items WHERE invoice_id = $1;", [id]);
 
     await cancelInvoiceJournalEntries(client, id);
