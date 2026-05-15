@@ -7,6 +7,7 @@ import {
   getPackagingOverviewHandler,
   getPackagingProductsHandler,
   getPackagingReplenishmentsHandler,
+  getPackagingUsageByInvoiceHandler,
   updateFinishedProductPackagingConfigHandler,
   updatePackagingProductTypeHandler
 } from "../controllers/packaging.controller.js";
@@ -28,5 +29,6 @@ router.get("/consumptions", getPackagingConsumptionsHandler);
 router.post("/consumptions", createPackagingConsumptionHandler);
 router.get("/replenishments", getPackagingReplenishmentsHandler);
 router.post("/replenishments", createPackagingReplenishmentHandler);
+router.get("/usage-by-invoice", getPackagingUsageByInvoiceHandler);
 
 export default router;

@@ -8,7 +8,8 @@ import { performStockEntry, performStockExit } from "./stock.model.js";
 export const PACKAGING_TYPES = [
   "oil_bottle",
   "butter_bottle",
-  "kraft_paper"
+  "kraft_paper",
+  "essential_oil_bottle"
 ];
 
 export const PACKAGING_CONSUMER_TYPES = [
@@ -482,6 +483,7 @@ export async function getFinishedProductPackagingConfigs() {
       fp.name AS finished_product_name,
       fp.category AS finished_product_category,
       fp.sku AS finished_product_sku,
+      fp.packaging_type AS required_packaging_type,
       fp.packaging_product_id,
       fp.packaging_quantity_per_unit,
       pp.name AS packaging_product_name,
@@ -541,7 +543,8 @@ export async function updatePackagingProductType(productId, packagingType) {
 export async function updateFinishedProductPackagingConfig(
   finishedProductId,
   packagingProductId,
-  packagingQuantityPerUnit
+  packagingQuantityPerUnit,
+  requiredPackagingType = null
 ) {
   await ensurePackagingSchema(pool);
 
@@ -575,19 +578,42 @@ export async function updateFinishedProductPackagingConfig(
       error.statusCode = 400;
       throw error;
     }
+
+    if (
+      requiredPackagingType &&
+      packagingProduct.packaging_type &&
+      normalizePackagingType(packagingProduct.packaging_type) !==
+        normalizePackagingType(requiredPackagingType)
+    ) {
+      const error = new Error(
+        "Le type choisi pour le produit fini ne correspond pas au type de l'emballage lie."
+      );
+      error.statusCode = 400;
+      throw error;
+    }
   }
+
+  const normalizedRequiredType =
+    normalizePackagingType(requiredPackagingType) ||
+    (packagingProductId !== null
+      ? (
+          await getPackagingProductRecord(pool, packagingProductId)
+        )?.packaging_type || null
+      : null);
 
   const result = await pool.query(
     `
       UPDATE products
       SET
-        packaging_product_id = $1,
-        packaging_quantity_per_unit = $2,
+        packaging_type = $1,
+        packaging_product_id = $2,
+        packaging_quantity_per_unit = $3,
         updated_at = NOW()
-      WHERE id = $3
+      WHERE id = $4
       RETURNING *;
     `,
     [
+      normalizedRequiredType,
       packagingProductId,
       packagingProductId === null ? null : packagingQuantityPerUnit,
       finishedProductId
@@ -639,11 +665,19 @@ export async function getPackagingConsumptions({
       p.name AS product_name,
       p.sku,
       p.barcode,
+      i.invoice_number,
+      i.invoice_date AS source_invoice_date,
+      c.business_name AS source_customer_name,
       w.name AS warehouse_name,
       w.city AS warehouse_city
     FROM packaging_consumptions pc
     INNER JOIN products p ON p.id = pc.product_id
     INNER JOIN warehouses w ON w.id = pc.warehouse_id
+    LEFT JOIN invoices i
+      ON pc.source_type = 'invoice'
+     AND i.id = pc.source_id
+    LEFT JOIN customers c
+      ON c.id = i.customer_id
     ${filters.whereClause}
     ORDER BY pc.consumption_date DESC, pc.id DESC
     LIMIT $${filters.nextIndex};
@@ -710,6 +744,77 @@ export async function getPackagingReplenishments({
   });
 
   return result.rows;
+}
+
+export async function getPackagingUsageByInvoice({
+  start_date = null,
+  end_date = null,
+  warehouse_id = null,
+  product_id = null,
+  packaging_type = null,
+  consumer_name = null,
+  limit = 100
+} = {}) {
+  const filters = buildConsumptionFilters({
+    start_date,
+    end_date,
+    warehouse_id,
+    product_id,
+    packaging_type,
+    consumer_name
+  });
+
+  const whereClause = filters.whereClause
+    ? `${filters.whereClause} AND pc.source_type = 'invoice'`
+    : `WHERE pc.source_type = 'invoice' AND pc.status = 'active'`;
+
+  const query = `
+    SELECT
+      i.id AS invoice_id,
+      i.invoice_number,
+      i.invoice_date,
+      c.id AS customer_id,
+      c.business_name AS customer_name,
+      w.id AS warehouse_id,
+      w.name AS warehouse_name,
+      pc.packaging_type,
+      COUNT(*)::int AS consumption_lines_count,
+      COUNT(DISTINCT pc.product_id)::int AS packaging_products_count,
+      COALESCE(SUM(pc.quantity), 0) AS total_quantity
+    FROM packaging_consumptions pc
+    INNER JOIN invoices i
+      ON i.id = pc.source_id
+    INNER JOIN customers c
+      ON c.id = i.customer_id
+    INNER JOIN warehouses w
+      ON w.id = pc.warehouse_id
+    ${whereClause}
+    GROUP BY
+      i.id,
+      i.invoice_number,
+      i.invoice_date,
+      c.id,
+      c.business_name,
+      w.id,
+      w.name,
+      pc.packaging_type
+    ORDER BY i.invoice_date DESC, i.invoice_number DESC, pc.packaging_type ASC
+    LIMIT $${filters.nextIndex};
+  `;
+
+  const result = await queryWithSchemaOrColumnRetry({
+    executor: (sql, values = []) => pool.query(sql, values),
+    ensureSchema: () => ensurePackagingSchema(pool),
+    query,
+    values: [...filters.values, Number(limit) > 0 ? Number(limit) : 100]
+  });
+
+  return result.rows.map((row) => ({
+    ...row,
+    consumption_lines_count: Number(row.consumption_lines_count || 0),
+    packaging_products_count: Number(row.packaging_products_count || 0),
+    total_quantity: Number(row.total_quantity || 0)
+  }));
 }
 
 export async function getPackagingOverview(filters = {}) {
@@ -1048,6 +1153,7 @@ export async function consumePackagingForInvoice({
         SELECT
           fp.id AS finished_product_id,
           fp.name AS finished_product_name,
+          fp.packaging_type AS required_packaging_type,
           fp.packaging_product_id,
           COALESCE(fp.packaging_quantity_per_unit, 0) AS packaging_quantity_per_unit,
           pp.name AS packaging_product_name,
@@ -1089,7 +1195,10 @@ export async function consumePackagingForInvoice({
     await createPackagingConsumptionEntry(client, {
       warehouse_id: invoice.warehouse_id,
       product_id: config.packaging_product_id,
-      packaging_type: config.packaging_type || null,
+      packaging_type:
+        normalizePackagingType(config.required_packaging_type) ||
+        normalizePackagingType(config.packaging_type) ||
+        null,
       quantity: quantityToConsume,
       consumption_date: invoice.invoice_date,
       consumer_name: customer_name || `Facture ${invoice.invoice_number}`,

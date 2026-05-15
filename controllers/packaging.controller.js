@@ -8,6 +8,7 @@ import {
   getPackagingOverview,
   getPackagingProducts,
   getPackagingReplenishments,
+  getPackagingUsageByInvoice,
   PACKAGING_CONSUMER_TYPES,
   PACKAGING_PURPOSES,
   PACKAGING_TYPES,
@@ -66,7 +67,7 @@ export async function updatePackagingProductTypeHandler(req, res, next) {
       return res.status(400).json({
         success: false,
         message:
-          "Le champ 'packaging_type' est invalide. Valeurs attendues: oil_bottle, butter_bottle, kraft_paper."
+          "Le champ 'packaging_type' est invalide. Valeurs attendues: oil_bottle, butter_bottle, kraft_paper, essential_oil_bottle."
       });
     }
 
@@ -119,7 +120,7 @@ export async function createPackagingConsumptionHandler(req, res, next) {
 
     if (packaging_type && !PACKAGING_TYPES.includes(packaging_type)) {
       errors.push(
-        "Le champ 'packaging_type' est invalide. Valeurs attendues: oil_bottle, butter_bottle, kraft_paper."
+        "Le champ 'packaging_type' est invalide. Valeurs attendues: oil_bottle, butter_bottle, kraft_paper, essential_oil_bottle."
       );
     }
 
@@ -208,7 +209,7 @@ export async function createPackagingReplenishmentHandler(req, res, next) {
 
     if (packaging_type && !PACKAGING_TYPES.includes(packaging_type)) {
       errors.push(
-        "Le champ 'packaging_type' est invalide. Valeurs attendues: oil_bottle, butter_bottle, kraft_paper."
+        "Le champ 'packaging_type' est invalide. Valeurs attendues: oil_bottle, butter_bottle, kraft_paper, essential_oil_bottle."
       );
     }
 
@@ -294,7 +295,8 @@ export async function getPackagingConsumptionsHandler(req, res, next) {
     if (packaging_type && !PACKAGING_TYPES.includes(packaging_type)) {
       return res.status(400).json({
         success: false,
-        message: "Le parametre 'packaging_type' est invalide."
+        message:
+          "Le parametre 'packaging_type' est invalide. Types attendus: oil_bottle, butter_bottle, kraft_paper, essential_oil_bottle."
       });
     }
 
@@ -359,7 +361,8 @@ export async function getPackagingReplenishmentsHandler(req, res, next) {
     if (packaging_type && !PACKAGING_TYPES.includes(packaging_type)) {
       return res.status(400).json({
         success: false,
-        message: "Le parametre 'packaging_type' est invalide."
+        message:
+          "Le parametre 'packaging_type' est invalide. Types attendus: oil_bottle, butter_bottle, kraft_paper, essential_oil_bottle."
       });
     }
 
@@ -369,6 +372,64 @@ export async function getPackagingReplenishmentsHandler(req, res, next) {
       warehouse_id,
       product_id,
       packaging_type,
+      limit
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: rows.length,
+      data: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getPackagingUsageByInvoiceHandler(req, res, next) {
+  try {
+    const warehouse_id = req.query.warehouse_id
+      ? Number(req.query.warehouse_id)
+      : null;
+    const product_id = req.query.product_id ? Number(req.query.product_id) : null;
+    const limit = req.query.limit ? Number(req.query.limit) : 100;
+    const packaging_type = normalizeOptionalString(req.query.packaging_type);
+
+    if (warehouse_id !== null && !isPositiveInteger(warehouse_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'warehouse_id' est invalide."
+      });
+    }
+
+    if (product_id !== null && !isPositiveInteger(product_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'product_id' est invalide."
+      });
+    }
+
+    if (!isPositiveInteger(limit)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'limit' doit etre un entier positif."
+      });
+    }
+
+    if (packaging_type && !PACKAGING_TYPES.includes(packaging_type)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Le parametre 'packaging_type' est invalide. Types attendus: oil_bottle, butter_bottle, kraft_paper, essential_oil_bottle."
+      });
+    }
+
+    const rows = await getPackagingUsageByInvoice({
+      start_date: req.query.start_date || null,
+      end_date: req.query.end_date || null,
+      warehouse_id,
+      product_id,
+      packaging_type,
+      consumer_name: req.query.consumer_name || null,
       limit
     });
 
@@ -463,6 +524,7 @@ export async function updateFinishedProductPackagingConfigHandler(
 ) {
   try {
     const finishedProductId = Number(req.params.productId);
+    const requiredPackagingType = normalizeOptionalString(req.body.packaging_type);
     const packagingProductId =
       req.body.packaging_product_id === undefined ||
       req.body.packaging_product_id === null ||
@@ -503,10 +565,21 @@ export async function updateFinishedProductPackagingConfigHandler(
       });
     }
 
+    if (
+      requiredPackagingType &&
+      !PACKAGING_TYPES.includes(requiredPackagingType)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Le type d'emballage du produit est invalide."
+      });
+    }
+
     const result = await updateFinishedProductPackagingConfig(
       finishedProductId,
       packagingProductId,
-      packagingProductId === null ? null : packagingQuantityPerUnit
+      packagingProductId === null ? null : packagingQuantityPerUnit,
+      requiredPackagingType
     );
 
     if (!result) {
