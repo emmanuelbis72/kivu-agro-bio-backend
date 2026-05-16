@@ -85,6 +85,26 @@ function addDays(dateString, days) {
   return date.toISOString().split("T")[0];
 }
 
+function findDuplicateInvoiceProductId(items = []) {
+  const seen = new Set();
+
+  for (const rawItem of items) {
+    const productId = Number(rawItem?.product_id);
+
+    if (!Number.isInteger(productId) || productId <= 0) {
+      continue;
+    }
+
+    if (seen.has(productId)) {
+      return productId;
+    }
+
+    seen.add(productId);
+  }
+
+  return null;
+}
+
 export async function createInvoiceHandler(req, res, next) {
   try {
     const customer_id = Number(req.body.customer_id);
@@ -123,6 +143,16 @@ export async function createInvoiceHandler(req, res, next) {
       return res.status(400).json({
         success: false,
         message: "La facture doit contenir au moins une ligne."
+      });
+    }
+
+    const duplicateProductId = findDuplicateInvoiceProductId(items);
+
+    if (duplicateProductId) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Une meme facture ne peut pas contenir deux lignes pour le meme produit."
       });
     }
 
@@ -388,6 +418,16 @@ export async function updateInvoiceHandler(req, res, next) {
       return res.status(400).json({
         success: false,
         message: "La facture doit contenir au moins une ligne."
+      });
+    }
+
+    const duplicateProductId = findDuplicateInvoiceProductId(items);
+
+    if (duplicateProductId) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Une meme facture ne peut pas contenir deux lignes pour le meme produit."
       });
     }
 
