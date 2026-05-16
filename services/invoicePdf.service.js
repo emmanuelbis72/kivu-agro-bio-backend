@@ -160,21 +160,30 @@ export function buildInvoicePdf(doc, invoice) {
 
   let tableY = Math.max(customerY + 10, topMargin + 100);
 
-  const colWidths = [96, 174, 30, 92, 117];
-  const tableHeader = ["Barcode", "Produit", "Qte", "Prix unitaire", "Total ligne"];
+  const colWidths = [30, 82, 156, 30, 92, 119];
+  const tableHeader = [
+    "No",
+    "Barcode",
+    "Produit",
+    "Qte",
+    "Prix unitaire",
+    "Total ligne"
+  ];
 
   tableY = drawTableRow(doc, tableY, tableHeader, colWidths, {
     startX: marginX,
     isHeader: true,
     rowHeight: 24,
     fontSize: 9,
-    verticalPadding: 6
+    verticalPadding: 6,
+    alignments: ["center", "left", "left", "right", "right", "right"]
   });
 
   const items = Array.isArray(invoice.items) ? invoice.items : [];
 
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     const rowValues = [
+      index + 1,
       item.barcode || "-",
       item.product_name || "-",
       item.quantity ?? "-",
@@ -204,7 +213,8 @@ export function buildInvoicePdf(doc, invoice) {
       startX: marginX,
       rowHeight,
       fontSize: 9,
-      verticalPadding: 4
+      verticalPadding: 4,
+      alignments: ["center", "left", "left", "right", "right", "right"]
     });
   }
 
