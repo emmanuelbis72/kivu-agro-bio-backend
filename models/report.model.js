@@ -86,6 +86,51 @@ function buildProductSalesFilters(filters = {}) {
   };
 }
 
+function buildProductLedgerFilters(filters = {}) {
+  const conditions = [`i.status IN ('issued', 'partial', 'paid')`];
+  const values = [];
+
+  if (filters.startDate) {
+    values.push(filters.startDate);
+    conditions.push(`i.invoice_date >= $${values.length}`);
+  }
+
+  if (filters.endDate) {
+    values.push(filters.endDate);
+    conditions.push(`i.invoice_date <= $${values.length}`);
+  }
+
+  if (Array.isArray(filters.warehouseIds) && filters.warehouseIds.length > 0) {
+    values.push(filters.warehouseIds);
+    conditions.push(`i.warehouse_id = ANY($${values.length}::int[])`);
+  }
+
+  if (Array.isArray(filters.customerIds) && filters.customerIds.length > 0) {
+    values.push(filters.customerIds);
+    conditions.push(`i.customer_id = ANY($${values.length}::int[])`);
+  }
+
+  if (Array.isArray(filters.productIds) && filters.productIds.length > 0) {
+    values.push(filters.productIds);
+    conditions.push(`ii.product_id = ANY($${values.length}::int[])`);
+  }
+
+  if (filters.invoiceStatus) {
+    values.push(filters.invoiceStatus);
+    conditions.push(`i.status = $${values.length}`);
+  }
+
+  if (filters.invoiceNumber) {
+    values.push(`%${String(filters.invoiceNumber).trim()}%`);
+    conditions.push(`LOWER(i.invoice_number) LIKE LOWER($${values.length})`);
+  }
+
+  return {
+    whereClause: `WHERE ${conditions.join(" AND ")}`,
+    values
+  };
+}
+
 function buildStockStateFilters(filters = {}) {
   const conditions = [];
   const values = [];
@@ -615,6 +660,144 @@ export async function getProductSalesReport(filters = {}, limit = 500) {
       total_sales_amount: roundAmount(totalSalesAmount),
       total_cogs_amount: roundAmount(summaryRow.total_cogs_amount),
       gross_profit_amount: roundAmount(grossProfitAmount),
+      gross_margin_percent:
+        totalSalesAmount > 0
+          ? roundAmount((grossProfitAmount / totalSalesAmount) * 100)
+          : 0
+    },
+    rows
+  };
+}
+
+export async function getProductLedgerReport(filters = {}, limit = 500) {
+  await ensureReportsSchema(pool);
+
+  const { whereClause, values } = buildProductLedgerFilters(filters);
+  const finalValues = [...values, limit];
+
+  const rowsQuery = `
+    SELECT
+      i.id AS invoice_id,
+      i.invoice_number,
+      i.invoice_date,
+      i.status AS invoice_status,
+      COALESCE(i.total_amount, 0) AS invoice_total_amount,
+      COALESCE(i.paid_amount, 0) AS invoice_paid_amount,
+      COALESCE(i.balance_due, 0) AS invoice_balance_due,
+      c.id AS customer_id,
+      c.business_name AS customer_name,
+      c.city AS customer_city,
+      w.id AS warehouse_id,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city,
+      p.id AS product_id,
+      p.name AS product_name,
+      p.sku,
+      p.category,
+      ii.quantity,
+      ii.unit_price,
+      ii.line_total,
+      COALESCE(p.cost_price, 0) AS unit_cost,
+      (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
+      (ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))) AS gross_profit_amount,
+      CASE
+        WHEN ii.line_total > 0
+          THEN ROUND(
+            ((ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))) / ii.line_total) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM invoice_items ii
+    INNER JOIN invoices i ON i.id = ii.invoice_id
+    INNER JOIN customers c ON c.id = i.customer_id
+    INNER JOIN warehouses w ON w.id = i.warehouse_id
+    INNER JOIN products p ON p.id = ii.product_id
+    ${whereClause}
+    ORDER BY i.invoice_date DESC, i.id DESC, p.name ASC, ii.id ASC
+    LIMIT $${finalValues.length};
+  `;
+
+  const summaryQuery = `
+    WITH filtered_lines AS (
+      SELECT
+        i.id AS invoice_id,
+        i.customer_id,
+        i.warehouse_id,
+        ii.product_id,
+        ii.quantity,
+        ii.line_total,
+        (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
+        (ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))) AS gross_profit_amount,
+        COALESCE(i.paid_amount, 0) AS invoice_paid_amount,
+        COALESCE(i.balance_due, 0) AS invoice_balance_due
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN warehouses w ON w.id = i.warehouse_id
+      INNER JOIN products p ON p.id = ii.product_id
+      ${whereClause}
+    ),
+    filtered_invoices AS (
+      SELECT
+        invoice_id,
+        MAX(customer_id) AS customer_id,
+        MAX(warehouse_id) AS warehouse_id,
+        MAX(invoice_paid_amount) AS invoice_paid_amount,
+        MAX(invoice_balance_due) AS invoice_balance_due
+      FROM filtered_lines
+      GROUP BY invoice_id
+    )
+    SELECT
+      (SELECT COUNT(*)::int FROM filtered_lines) AS total_lines,
+      (SELECT COUNT(DISTINCT product_id)::int FROM filtered_lines) AS total_products,
+      (SELECT COUNT(DISTINCT customer_id)::int FROM filtered_invoices) AS total_customers,
+      (SELECT COUNT(DISTINCT warehouse_id)::int FROM filtered_invoices) AS total_warehouses,
+      (SELECT COUNT(*)::int FROM filtered_invoices) AS total_invoices,
+      (SELECT COALESCE(SUM(quantity), 0) FROM filtered_lines) AS total_quantity,
+      (SELECT COALESCE(SUM(line_total), 0) FROM filtered_lines) AS total_sales_amount,
+      (SELECT COALESCE(SUM(line_cogs_amount), 0) FROM filtered_lines) AS total_cogs_amount,
+      (SELECT COALESCE(SUM(gross_profit_amount), 0) FROM filtered_lines) AS gross_profit_amount,
+      (SELECT COALESCE(SUM(invoice_paid_amount), 0) FROM filtered_invoices) AS total_paid_amount,
+      (SELECT COALESCE(SUM(invoice_balance_due), 0) FROM filtered_invoices) AS total_balance_due;
+  `;
+
+  const [rowsResult, summaryResult] = await Promise.all([
+    pool.query(rowsQuery, finalValues),
+    pool.query(summaryQuery, values)
+  ]);
+
+  const rows = rowsResult.rows.map((row) => ({
+    ...row,
+    quantity: roundAmount(row.quantity),
+    unit_price: roundAmount(row.unit_price),
+    line_total: roundAmount(row.line_total),
+    unit_cost: roundAmount(row.unit_cost),
+    line_cogs_amount: roundAmount(row.line_cogs_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    gross_margin_percent: Number(row.gross_margin_percent || 0),
+    invoice_total_amount: roundAmount(row.invoice_total_amount),
+    invoice_paid_amount: roundAmount(row.invoice_paid_amount),
+    invoice_balance_due: roundAmount(row.invoice_balance_due)
+  }));
+
+  const summaryRow = summaryResult.rows[0] || {};
+  const totalSalesAmount = Number(summaryRow.total_sales_amount || 0);
+  const grossProfitAmount = Number(summaryRow.gross_profit_amount || 0);
+
+  return {
+    summary: {
+      total_lines: Number(summaryRow.total_lines || 0),
+      total_products: Number(summaryRow.total_products || 0),
+      total_customers: Number(summaryRow.total_customers || 0),
+      total_warehouses: Number(summaryRow.total_warehouses || 0),
+      total_invoices: Number(summaryRow.total_invoices || 0),
+      total_quantity: roundAmount(summaryRow.total_quantity),
+      total_sales_amount: roundAmount(totalSalesAmount),
+      total_cogs_amount: roundAmount(summaryRow.total_cogs_amount),
+      gross_profit_amount: roundAmount(grossProfitAmount),
+      total_paid_amount: roundAmount(summaryRow.total_paid_amount),
+      total_balance_due: roundAmount(summaryRow.total_balance_due),
       gross_margin_percent:
         totalSalesAmount > 0
           ? roundAmount((grossProfitAmount / totalSalesAmount) * 100)

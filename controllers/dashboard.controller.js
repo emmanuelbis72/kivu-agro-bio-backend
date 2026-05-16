@@ -11,6 +11,7 @@ import {
   getTopCustomers,
   getRecentInvoices,
   getRecentPayments,
+  getExecutiveComparisonTimeline,
   getSalesOverview,
   getSalesByWarehouse,
   getProductCategoryStats,
@@ -89,6 +90,7 @@ export async function getDashboardOverviewHandler(req, res, next) {
       recentInvoices,
       recentPayments,
       salesOverview,
+      executiveComparisonTimeline,
       salesByWarehouse,
       productCategoryStats,
       lowRotationProducts
@@ -100,6 +102,7 @@ export async function getDashboardOverviewHandler(req, res, next) {
       getRecentInvoices(recentLimit),
       getRecentPayments(recentLimit),
       getSalesOverview(),
+      getExecutiveComparisonTimeline(12),
       getSalesByWarehouse(),
       getProductCategoryStats(),
       getLowRotationProducts(topLimit)
@@ -115,6 +118,7 @@ export async function getDashboardOverviewHandler(req, res, next) {
         recent_invoices: recentInvoices,
         recent_payments: recentPayments,
         sales_overview: salesOverview,
+        executive_comparison_timeline: executiveComparisonTimeline,
         sales_by_warehouse: salesByWarehouse,
         product_category_stats: productCategoryStats,
         low_rotation_products: lowRotationProducts

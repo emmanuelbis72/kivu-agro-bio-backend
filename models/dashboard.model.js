@@ -260,6 +260,86 @@ export async function getSalesOverview() {
   return result.rows;
 }
 
+export async function getExecutiveComparisonTimeline(months = 12) {
+  const safeMonths = Math.min(Math.max(Number(months || 12), 3), 24);
+  const query = `
+    WITH month_series AS (
+      SELECT generate_series(
+        DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) * INTERVAL '1 month'),
+        DATE_TRUNC('month', CURRENT_DATE),
+        INTERVAL '1 month'
+      )::date AS month_start
+    ),
+    invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    ),
+    invoice_monthly AS (
+      SELECT
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
+        COUNT(*)::int AS total_invoices,
+        COALESCE(SUM(i.total_amount), 0) AS invoiced_amount,
+        COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) AS net_sales_amount,
+        COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS cogs_amount,
+        COALESCE(
+          SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+          0
+        ) AS gross_profit_amount
+      FROM invoices i
+      LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date >= DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) * INTERVAL '1 month')
+      GROUP BY DATE_TRUNC('month', i.invoice_date)
+    ),
+    payment_monthly AS (
+      SELECT
+        DATE_TRUNC('month', p.payment_date)::date AS month_start,
+        COALESCE(SUM(p.amount), 0) AS payments_received
+      FROM payments p
+      WHERE p.payment_date >= DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) * INTERVAL '1 month')
+      GROUP BY DATE_TRUNC('month', p.payment_date)
+    ),
+    expense_monthly AS (
+      SELECT
+        DATE_TRUNC('month', e.expense_date)::date AS month_start,
+        COALESCE(SUM(e.amount), 0) AS expenses_amount
+      FROM expenses e
+      WHERE e.expense_date >= DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) * INTERVAL '1 month')
+      GROUP BY DATE_TRUNC('month', e.expense_date)
+    )
+    SELECT
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      COALESCE(im.total_invoices, 0) AS total_invoices,
+      COALESCE(im.invoiced_amount, 0) AS invoiced_amount,
+      COALESCE(pm.payments_received, 0) AS payments_received,
+      COALESCE(em.expenses_amount, 0) AS expenses_amount,
+      COALESCE(im.gross_profit_amount, 0) AS gross_profit_amount,
+      COALESCE(im.net_sales_amount, 0) AS net_sales_amount,
+      COALESCE(im.cogs_amount, 0) AS cogs_amount
+    FROM month_series ms
+    LEFT JOIN invoice_monthly im ON im.month_start = ms.month_start
+    LEFT JOIN payment_monthly pm ON pm.month_start = ms.month_start
+    LEFT JOIN expense_monthly em ON em.month_start = ms.month_start
+    ORDER BY ms.month_start ASC;
+  `;
+
+  const result = await pool.query(query, [safeMonths]);
+  return result.rows.map((row) => ({
+    ...row,
+    total_invoices: Number(row.total_invoices || 0),
+    invoiced_amount: roundAmount(row.invoiced_amount),
+    payments_received: roundAmount(row.payments_received),
+    expenses_amount: roundAmount(row.expenses_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    net_sales_amount: roundAmount(row.net_sales_amount),
+    cogs_amount: roundAmount(row.cogs_amount)
+  }));
+}
+
 export async function getSalesByWarehouse() {
   const query = `
     WITH warehouse_invoice_cogs AS (
@@ -1024,6 +1104,125 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
     LIMIT $2;
   `;
 
+  const topPayingCustomersQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
+    SELECT
+      c.id AS customer_id,
+      c.business_name,
+      c.city,
+      COUNT(i.id)::int AS total_invoices,
+      MAX(i.invoice_date) AS last_invoice_date,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(i.balance_due), 0) AS total_receivables,
+      COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS total_cogs_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount
+    FROM customers c
+    INNER JOIN invoices i ON i.customer_id = c.id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    GROUP BY c.id, c.business_name, c.city
+    ORDER BY total_collected_amount DESC, total_sales_amount DESC, business_name ASC
+    LIMIT $2;
+  `;
+
+  const mostProfitableProductsQuery = `
+    SELECT
+      p.id AS product_id,
+      p.name AS product_name,
+      p.sku,
+      p.category,
+      COALESCE(SUM(ii.quantity), 0) AS total_quantity_sold,
+      COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
+      COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount,
+      COALESCE(SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))), 0) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(ii.line_total), 0) > 0
+          THEN ROUND(
+            (COALESCE(SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))), 0)
+              / COALESCE(SUM(ii.line_total), 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM invoice_items ii
+    INNER JOIN invoices i ON i.id = ii.invoice_id
+    INNER JOIN products p ON p.id = ii.product_id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    GROUP BY p.id, p.name, p.sku, p.category
+    ORDER BY gross_profit_amount DESC, total_sales_amount DESC, product_name ASC
+    LIMIT $2;
+  `;
+
+  const customerMonthlyTrendQuery = `
+    WITH month_series AS (
+      SELECT generate_series(
+        DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months',
+        DATE_TRUNC('month', CURRENT_DATE),
+        INTERVAL '1 month'
+      )::date AS month_start
+    ),
+    top_customers AS (
+      SELECT
+        i.customer_id,
+        c.business_name
+      FROM invoices i
+      INNER JOIN customers c ON c.id = i.customer_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
+      GROUP BY i.customer_id, c.business_name
+      ORDER BY COALESCE(SUM(i.total_amount), 0) DESC, c.business_name ASC
+      LIMIT $1
+    ),
+    billed_monthly AS (
+      SELECT
+        i.customer_id,
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
+        COALESCE(SUM(i.total_amount), 0) AS billed_amount
+      FROM invoices i
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
+      GROUP BY i.customer_id, DATE_TRUNC('month', i.invoice_date)
+    ),
+    paid_monthly AS (
+      SELECT
+        i.customer_id,
+        DATE_TRUNC('month', p.payment_date)::date AS month_start,
+        COALESCE(SUM(p.amount), 0) AS payments_received
+      FROM payments p
+      INNER JOIN invoices i ON i.id = p.invoice_id
+      WHERE p.payment_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
+      GROUP BY i.customer_id, DATE_TRUNC('month', p.payment_date)
+    )
+    SELECT
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      tc.customer_id,
+      tc.business_name,
+      COALESCE(bm.billed_amount, 0) AS billed_amount,
+      COALESCE(pm.payments_received, 0) AS payments_received
+    FROM top_customers tc
+    CROSS JOIN month_series ms
+    LEFT JOIN billed_monthly bm
+      ON bm.customer_id = tc.customer_id
+     AND bm.month_start = ms.month_start
+    LEFT JOIN paid_monthly pm
+      ON pm.customer_id = tc.customer_id
+     AND pm.month_start = ms.month_start
+    ORDER BY tc.business_name ASC, ms.month_start ASC;
+  `;
+
   const decliningProductsQuery = `
     WITH product_windows AS (
       SELECT
@@ -1167,6 +1366,9 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
     salesByWarehouseResult,
     salesByCustomerResult,
     salesByProductResult,
+    topPayingCustomersResult,
+    mostProfitableProductsResult,
+    customerMonthlyTrendResult,
     decliningProductsResult,
     dormantClientsResult,
     reactivationCandidatesResult
@@ -1177,6 +1379,9 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
     pool.query(salesByWarehouseQuery, [periodDays]),
     pool.query(salesByCustomerQuery, [periodDays, topLimit]),
     pool.query(salesByProductQuery, [periodDays, topLimit]),
+    pool.query(topPayingCustomersQuery, [periodDays, topLimit]),
+    pool.query(mostProfitableProductsQuery, [periodDays, topLimit]),
+    pool.query(customerMonthlyTrendQuery, [Math.min(topLimit, 5)]),
     pool.query(decliningProductsQuery, [topLimit]),
     pool.query(dormantClientsQuery, [45, topLimit]),
     pool.query(reactivationCandidatesQuery, [topLimit])
@@ -1250,6 +1455,28 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
       total_cogs_amount: roundAmount(row.total_cogs_amount),
       gross_profit_amount: roundAmount(row.gross_profit_amount),
       gross_margin_percent: Number(row.gross_margin_percent || 0)
+    })),
+    top_paying_customers: topPayingCustomersResult.rows.map((row) => ({
+      ...row,
+      total_invoices: Number(row.total_invoices || 0),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_collected_amount: roundAmount(row.total_collected_amount),
+      total_receivables: roundAmount(row.total_receivables),
+      total_cogs_amount: roundAmount(row.total_cogs_amount),
+      gross_profit_amount: roundAmount(row.gross_profit_amount)
+    })),
+    most_profitable_products: mostProfitableProductsResult.rows.map((row) => ({
+      ...row,
+      total_quantity_sold: roundAmount(row.total_quantity_sold),
+      total_sales_amount: roundAmount(row.total_sales_amount),
+      total_cogs_amount: roundAmount(row.total_cogs_amount),
+      gross_profit_amount: roundAmount(row.gross_profit_amount),
+      gross_margin_percent: Number(row.gross_margin_percent || 0)
+    })),
+    customer_monthly_trend: customerMonthlyTrendResult.rows.map((row) => ({
+      ...row,
+      billed_amount: roundAmount(row.billed_amount),
+      payments_received: roundAmount(row.payments_received)
     })),
     declining_products: decliningProductsResult.rows.map((row) => ({
       ...row,

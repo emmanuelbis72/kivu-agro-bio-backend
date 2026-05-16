@@ -2,6 +2,7 @@ import { getCashForecast } from "../models/dashboard.model.js";
 import { getMonthlyClosePack } from "../models/monthlyClose.model.js";
 import {
   getCustomerAgingReport,
+  getProductLedgerReport,
   getProductSalesReport,
   getSupplierAgingReport,
   getSalesDetailReport,
@@ -438,6 +439,138 @@ const reportDefinitions = {
       }
     ]
   },
+  "product-ledger": {
+    title: "Compte courant produits",
+    subtitle:
+      "Lignes facturees par produit, client, depot et facture, avec lecture quantite, chiffre d'affaires et profit",
+    tableTitle: "Compte courant produits",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `compte-courant-produits-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "invoice_number", header: "Facture", width: 62, xlsxWidth: 16 },
+      {
+        key: "invoice_date",
+        header: "Date",
+        type: "date",
+        width: 56,
+        xlsxWidth: 14
+      },
+      { key: "product_name", header: "Produit", width: 95, xlsxWidth: 24 },
+      { key: "customer_name", header: "Client", width: 82, xlsxWidth: 20 },
+      { key: "warehouse_name", header: "Depot", width: 64, xlsxWidth: 16 },
+      {
+        key: "quantity",
+        header: "Qte",
+        type: "number",
+        width: 40,
+        xlsxWidth: 10
+      },
+      {
+        key: "unit_price",
+        header: "P.U.",
+        type: "money",
+        width: 58,
+        xlsxWidth: 14
+      },
+      {
+        key: "line_total",
+        header: "CA",
+        type: "money",
+        width: 62,
+        xlsxWidth: 15
+      },
+      {
+        key: "gross_profit_amount",
+        header: "Profit",
+        type: "money",
+        width: 62,
+        xlsxWidth: 15
+      },
+      {
+        key: "invoice_paid_amount",
+        header: "Paye",
+        type: "money",
+        width: 60,
+        xlsxWidth: 15
+      },
+      {
+        key: "invoice_balance_due",
+        header: "Solde",
+        type: "money",
+        width: 60,
+        xlsxWidth: 15
+      },
+      {
+        key: "invoice_status",
+        header: "Statut",
+        width: 46,
+        xlsxWidth: 12
+      }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Lignes",
+        value: Number(summary.total_lines || 0),
+        rawValue: Number(summary.total_lines || 0),
+        type: "integer"
+      },
+      {
+        label: "Factures",
+        value: Number(summary.total_invoices || 0),
+        rawValue: Number(summary.total_invoices || 0),
+        type: "integer"
+      },
+      {
+        label: "Produits",
+        value: Number(summary.total_products || 0),
+        rawValue: Number(summary.total_products || 0),
+        type: "integer"
+      },
+      {
+        label: "Clients",
+        value: Number(summary.total_customers || 0),
+        rawValue: Number(summary.total_customers || 0),
+        type: "integer"
+      },
+      {
+        label: "Depots",
+        value: Number(summary.total_warehouses || 0),
+        rawValue: Number(summary.total_warehouses || 0),
+        type: "integer"
+      },
+      {
+        label: "Quantite vendue",
+        value: Number(summary.total_quantity || 0),
+        rawValue: Number(summary.total_quantity || 0),
+        type: "number"
+      },
+      {
+        label: "Chiffre d'affaires",
+        value: Number(summary.total_sales_amount || 0),
+        rawValue: Number(summary.total_sales_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Profit brut",
+        value: Number(summary.gross_profit_amount || 0),
+        rawValue: Number(summary.gross_profit_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Paye facture",
+        value: Number(summary.total_paid_amount || 0),
+        rawValue: Number(summary.total_paid_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Solde facture",
+        value: Number(summary.total_balance_due || 0),
+        rawValue: Number(summary.total_balance_due || 0),
+        type: "money"
+      }
+    ]
+  },
   "product-sales": {
     title: "Analyse ventes par produit",
     subtitle: "Analyse quantitative et financiere par produit, depot et client",
@@ -767,6 +900,56 @@ async function getProductSalesPayload(query) {
   };
 }
 
+async function getProductLedgerPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const warehouseIds = parsePositiveIntegerList(
+    query.warehouse_ids ?? query.warehouse_id
+  );
+  const customerIds = parsePositiveIntegerList(
+    query.customer_ids ?? query.customer_id
+  );
+  const productIds = parsePositiveIntegerList(
+    query.product_ids ?? query.product_id
+  );
+  const invoiceStatus =
+    query.invoice_status && String(query.invoice_status).trim()
+      ? String(query.invoice_status).trim().toLowerCase()
+      : null;
+  const invoiceNumber =
+    query.invoice_number && String(query.invoice_number).trim()
+      ? String(query.invoice_number).trim()
+      : null;
+
+  const data = await getProductLedgerReport(
+    {
+      startDate,
+      endDate,
+      warehouseIds,
+      customerIds,
+      productIds,
+      invoiceStatus,
+      invoiceNumber
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_ids: warehouseIds,
+      customer_ids: customerIds,
+      product_ids: productIds,
+      invoice_status: invoiceStatus,
+      invoice_number: invoiceNumber,
+      limit
+    },
+    ...data
+  };
+}
+
 async function getStockStatePayload(query) {
   const limit = parsePositiveLimit(query.limit, 500, 5000);
   const warehouseId = parsePositiveInteger(query.warehouse_id);
@@ -827,6 +1010,7 @@ const reportLoaders = {
   "customer-aging": getCustomerAgingPayload,
   "supplier-aging": getSupplierAgingPayload,
   "sales-detail": getSalesDetailPayload,
+  "product-ledger": getProductLedgerPayload,
   "product-sales": getProductSalesPayload,
   "stock-state": getStockStatePayload,
   "cash-forecast": getCashForecastPayload
@@ -872,6 +1056,10 @@ export function getSupplierAgingReportHandler(req, res, next) {
 
 export function getSalesDetailReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "sales-detail");
+}
+
+export function getProductLedgerReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "product-ledger");
 }
 
 export function getProductSalesReportHandler(req, res, next) {
