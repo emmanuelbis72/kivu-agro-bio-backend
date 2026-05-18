@@ -2,6 +2,7 @@ import { getCashForecast } from "../models/dashboard.model.js";
 import { getMonthlyClosePack } from "../models/monthlyClose.model.js";
 import {
   getCustomerAgingReport,
+  getCustomerLedgerReport,
   getProductLedgerReport,
   getProductSalesReport,
   getSupplierAgingReport,
@@ -327,6 +328,106 @@ const reportDefinitions = {
         label: "Non date",
         value: Number(summary.undated_balance || 0),
         rawValue: Number(summary.undated_balance || 0),
+        type: "money"
+      }
+    ]
+  },
+  "customer-ledger": {
+    title: "Compte courant clients",
+    subtitle:
+      "Vision bilan client avec le total facture, le total paye et la balance sur la periode choisie",
+    tableTitle: "Compte courant clients",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `compte-courant-clients-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "business_name", header: "Client", width: 105, xlsxWidth: 28 },
+      { key: "city", header: "Ville", width: 60, xlsxWidth: 16 },
+      {
+        key: "invoiced_amount",
+        header: "Factures",
+        type: "money",
+        width: 80,
+        xlsxWidth: 18
+      },
+      {
+        key: "paid_amount",
+        header: "Paiements",
+        type: "money",
+        width: 80,
+        xlsxWidth: 18
+      },
+      {
+        key: "balance_amount",
+        header: "Balance",
+        type: "money",
+        width: 80,
+        xlsxWidth: 18
+      },
+      {
+        key: "invoices_count",
+        header: "Nb fact.",
+        type: "integer",
+        width: 55,
+        xlsxWidth: 12
+      },
+      {
+        key: "payments_count",
+        header: "Nb paiem.",
+        type: "integer",
+        width: 58,
+        xlsxWidth: 12
+      },
+      {
+        key: "last_invoice_date",
+        header: "Dern. fact.",
+        type: "date",
+        width: 70,
+        xlsxWidth: 16
+      },
+      {
+        key: "last_payment_date",
+        header: "Dern. paiem.",
+        type: "date",
+        width: 70,
+        xlsxWidth: 16
+      }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Clients",
+        value: Number(summary.total_customers || 0),
+        rawValue: Number(summary.total_customers || 0),
+        type: "integer"
+      },
+      {
+        label: "Nb factures",
+        value: Number(summary.invoices_count || 0),
+        rawValue: Number(summary.invoices_count || 0),
+        type: "integer"
+      },
+      {
+        label: "Nb paiements",
+        value: Number(summary.payments_count || 0),
+        rawValue: Number(summary.payments_count || 0),
+        type: "integer"
+      },
+      {
+        label: "Total factures",
+        value: Number(summary.invoiced_amount || 0),
+        rawValue: Number(summary.invoiced_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Total paiements",
+        value: Number(summary.paid_amount || 0),
+        rawValue: Number(summary.paid_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Balance",
+        value: Number(summary.balance_amount || 0),
+        rawValue: Number(summary.balance_amount || 0),
         type: "money"
       }
     ]
@@ -824,6 +925,27 @@ async function getSupplierAgingPayload(query) {
   };
 }
 
+async function getCustomerLedgerPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const customerId = parsePositiveInteger(query.customer_id);
+
+  const data = await getCustomerLedgerReport({
+    startDate,
+    endDate,
+    customerId
+  });
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      customer_id: customerId
+    },
+    ...data
+  };
+}
+
 async function getSalesDetailPayload(query) {
   const startDate = parseDateFilter(query.start_date, null);
   const endDate = parseDateFilter(query.end_date, null);
@@ -1009,6 +1131,7 @@ async function getMonthlyClosePayload(query) {
 const reportLoaders = {
   "customer-aging": getCustomerAgingPayload,
   "supplier-aging": getSupplierAgingPayload,
+  "customer-ledger": getCustomerLedgerPayload,
   "sales-detail": getSalesDetailPayload,
   "product-ledger": getProductLedgerPayload,
   "product-sales": getProductSalesPayload,
@@ -1052,6 +1175,10 @@ export function getCustomerAgingReportHandler(req, res, next) {
 
 export function getSupplierAgingReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "supplier-aging");
+}
+
+export function getCustomerLedgerReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "customer-ledger");
 }
 
 export function getSalesDetailReportHandler(req, res, next) {

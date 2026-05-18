@@ -155,6 +155,38 @@ function buildStockStateFilters(filters = {}) {
   };
 }
 
+function buildCustomerLedgerFilters(filters = {}) {
+  const invoiceConditions = [`i.status IN ('issued', 'partial', 'paid')`];
+  const paymentConditions = [];
+  const values = [];
+
+  if (filters.startDate) {
+    values.push(filters.startDate);
+    invoiceConditions.push(`i.invoice_date >= $${values.length}`);
+    paymentConditions.push(`p.payment_date >= $${values.length}`);
+  }
+
+  if (filters.endDate) {
+    values.push(filters.endDate);
+    invoiceConditions.push(`i.invoice_date <= $${values.length}`);
+    paymentConditions.push(`p.payment_date <= $${values.length}`);
+  }
+
+  if (filters.customerId) {
+    values.push(filters.customerId);
+    invoiceConditions.push(`i.customer_id = $${values.length}`);
+    paymentConditions.push(`i.customer_id = $${values.length}`);
+  }
+
+  return {
+    invoiceWhereClause: `WHERE ${invoiceConditions.join(" AND ")}`,
+    paymentWhereClause: paymentConditions.length
+      ? `WHERE ${paymentConditions.join(" AND ")}`
+      : "",
+    values
+  };
+}
+
 export async function getCustomerAgingReport({
   asOfDate,
   warehouseId = null
@@ -284,6 +316,96 @@ export async function getCustomerAgingReport({
       bucket_61_90: roundAmount(summary.bucket_61_90),
       bucket_90_plus: roundAmount(summary.bucket_90_plus),
       undated_balance: roundAmount(summary.undated_balance)
+    },
+    rows
+  };
+}
+
+export async function getCustomerLedgerReport(filters = {}) {
+  await ensureReportsSchema(pool);
+
+  const { invoiceWhereClause, paymentWhereClause, values } =
+    buildCustomerLedgerFilters(filters);
+
+  const query = `
+    WITH invoice_summary AS (
+      SELECT
+        i.customer_id,
+        COUNT(i.id)::int AS invoices_count,
+        COALESCE(SUM(i.total_amount), 0) AS invoiced_amount,
+        MAX(i.invoice_date) AS last_invoice_date
+      FROM invoices i
+      ${invoiceWhereClause}
+      GROUP BY i.customer_id
+    ),
+    payment_summary AS (
+      SELECT
+        i.customer_id,
+        COUNT(p.id)::int AS payments_count,
+        COALESCE(SUM(p.amount), 0) AS paid_amount,
+        MAX(p.payment_date) AS last_payment_date
+      FROM payments p
+      INNER JOIN invoices i ON i.id = p.invoice_id
+      ${paymentWhereClause}
+      GROUP BY i.customer_id
+    )
+    SELECT
+      c.id AS customer_id,
+      c.business_name,
+      c.city,
+      COALESCE(inv.invoices_count, 0) AS invoices_count,
+      COALESCE(pay.payments_count, 0) AS payments_count,
+      COALESCE(inv.invoiced_amount, 0) AS invoiced_amount,
+      COALESCE(pay.paid_amount, 0) AS paid_amount,
+      COALESCE(inv.invoiced_amount, 0) - COALESCE(pay.paid_amount, 0) AS balance_amount,
+      inv.last_invoice_date,
+      pay.last_payment_date
+    FROM customers c
+    LEFT JOIN invoice_summary inv ON inv.customer_id = c.id
+    LEFT JOIN payment_summary pay ON pay.customer_id = c.id
+    WHERE COALESCE(inv.invoices_count, 0) > 0
+       OR COALESCE(pay.payments_count, 0) > 0
+    ORDER BY LOWER(TRIM(c.business_name)) ASC;
+  `;
+
+  const result = await pool.query(query, values);
+  const rows = result.rows.map((row) => ({
+    ...row,
+    invoices_count: Number(row.invoices_count || 0),
+    payments_count: Number(row.payments_count || 0),
+    invoiced_amount: roundAmount(row.invoiced_amount),
+    paid_amount: roundAmount(row.paid_amount),
+    balance_amount: roundAmount(row.balance_amount)
+  }));
+
+  const summary = rows.reduce(
+    (acc, row) => {
+      acc.total_customers += 1;
+      acc.invoices_count += Number(row.invoices_count || 0);
+      acc.payments_count += Number(row.payments_count || 0);
+      acc.invoiced_amount += Number(row.invoiced_amount || 0);
+      acc.paid_amount += Number(row.paid_amount || 0);
+      acc.balance_amount += Number(row.balance_amount || 0);
+      return acc;
+    },
+    {
+      total_customers: 0,
+      invoices_count: 0,
+      payments_count: 0,
+      invoiced_amount: 0,
+      paid_amount: 0,
+      balance_amount: 0
+    }
+  );
+
+  return {
+    summary: {
+      total_customers: Number(summary.total_customers || 0),
+      invoices_count: Number(summary.invoices_count || 0),
+      payments_count: Number(summary.payments_count || 0),
+      invoiced_amount: roundAmount(summary.invoiced_amount),
+      paid_amount: roundAmount(summary.paid_amount),
+      balance_amount: roundAmount(summary.balance_amount)
     },
     rows
   };
