@@ -995,12 +995,6 @@ function buildStatementSummaryItems(statement, type) {
       value: formatMoney(statement.summary?.balance_due),
       rawValue: statement.summary?.balance_due,
       type: "money"
-    },
-    {
-      label: "Echeances en retard",
-      value: formatMoney(statement.summary?.overdue_balance),
-      rawValue: statement.summary?.overdue_balance,
-      type: "money"
     }
   ];
 }
