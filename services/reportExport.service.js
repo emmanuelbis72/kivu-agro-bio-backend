@@ -1092,11 +1092,303 @@ async function createAccountStatementPdfBuffer(statement, options = {}) {
 }
 
 export function createCustomerAccountStatementPdfBuffer(statement) {
-  return createAccountStatementPdfBuffer(statement, { type: "customer" });
+  return createCustomerBalanceStatementPdfBuffer(statement);
 }
 
 export function createSupplierAccountStatementPdfBuffer(statement) {
   return createAccountStatementPdfBuffer(statement, { type: "supplier" });
+}
+
+function computeBalanceSheetRowHeight(doc, columns, values) {
+  let rowHeight = 24;
+
+  columns.forEach((column, index) => {
+    const value = String(values[index] ?? "-");
+    const textHeight = doc.heightOfString(value, {
+      width: column.width - 10,
+      align: column.align || "left"
+    });
+
+    rowHeight = Math.max(rowHeight, Math.ceil(textHeight + 10));
+  });
+
+  return rowHeight;
+}
+
+function drawBalanceSheetRow(doc, startX, y, columns, values, options = {}) {
+  const rowHeight = options.rowHeight || 24;
+  const backgroundColor = options.backgroundColor || null;
+  const borderColor = options.borderColor || "#D1D5DB";
+  const textColor = options.textColor || "#111827";
+  const fontName = options.fontName || "Helvetica";
+  const fontSize = options.fontSize || 8.5;
+  const totalWidth = columns.reduce((sum, column) => sum + column.width, 0);
+
+  if (backgroundColor) {
+    doc
+      .save()
+      .rect(startX, y, totalWidth, rowHeight)
+      .fill(backgroundColor)
+      .restore();
+  }
+
+  doc
+    .save()
+    .lineWidth(0.8)
+    .strokeColor(borderColor)
+    .rect(startX, y, totalWidth, rowHeight)
+    .stroke();
+
+  let currentX = startX;
+
+  columns.forEach((column, index) => {
+    if (index > 0) {
+      doc
+        .moveTo(currentX, y)
+        .lineTo(currentX, y + rowHeight)
+        .stroke();
+    }
+
+    doc
+      .font(fontName)
+      .fontSize(fontSize)
+      .fillColor(textColor)
+      .text(String(values[index] ?? "-"), currentX + 5, y + 5, {
+        width: column.width - 10,
+        align: column.align || "left"
+      });
+
+    currentX += column.width;
+  });
+
+  doc.restore();
+  return y + rowHeight;
+}
+
+function drawBalanceSheetGroupHeader(doc, startX, y, halfWidth, rowHeight = 24) {
+  doc
+    .save()
+    .lineWidth(0.8)
+    .strokeColor("#BBF7D0")
+    .rect(startX, y, halfWidth, rowHeight)
+    .fillAndStroke("#DCFCE7", "#BBF7D0")
+    .rect(startX + halfWidth, y, halfWidth, rowHeight)
+    .fillAndStroke("#DBEAFE", "#BFDBFE")
+    .restore();
+
+  doc.font("Helvetica-Bold").fontSize(10).fillColor("#166534");
+  doc.text("FACTURES", startX, y + 7, {
+    width: halfWidth,
+    align: "center"
+  });
+
+  doc.fillColor("#1D4ED8");
+  doc.text("PAIEMENTS", startX + halfWidth, y + 7, {
+    width: halfWidth,
+    align: "center"
+  });
+
+  return y + rowHeight;
+}
+
+function drawCustomerBalanceTable(doc, statement, startY) {
+  const startX = 40;
+  const tableWidth = doc.page.width - 80;
+  const halfWidth = tableWidth / 2;
+  const columns = [
+    { width: 72, align: "left" },
+    { width: 214, align: "left" },
+    { width: 95, align: "right" },
+    { width: 72, align: "left" },
+    { width: 214, align: "left" },
+    { width: 95, align: "right" }
+  ];
+  const invoices = Array.isArray(statement?.invoices) ? statement.invoices : [];
+  const payments = Array.isArray(statement?.payments) ? statement.payments : [];
+  const totalRows = Math.max(invoices.length, payments.length, 1);
+
+  let currentY = startY;
+
+  const drawHeaders = () => {
+    doc.font("Helvetica-Bold").fontSize(11).fillColor("#111827");
+    doc.text("Bilan factures / paiements", startX, currentY);
+    currentY += 18;
+
+    currentY = drawBalanceSheetGroupHeader(doc, startX, currentY, halfWidth, 24);
+    currentY = drawBalanceSheetRow(
+      doc,
+      startX,
+      currentY,
+      columns,
+      ["Date", "Facture", "Montant", "Date", "Paiement", "Montant"],
+      {
+        rowHeight: 24,
+        backgroundColor: "#F8FAFC",
+        borderColor: "#CBD5E1",
+        textColor: "#1F2937",
+        fontName: "Helvetica-Bold",
+        fontSize: 9
+      }
+    );
+  };
+
+  drawHeaders();
+
+  for (let index = 0; index < totalRows; index += 1) {
+    const invoice = invoices[index] || null;
+    const payment = payments[index] || null;
+    const values = [
+      invoice ? formatDate(invoice.invoice_date) : "",
+      invoice ? invoice.invoice_number || "-" : "",
+      invoice ? formatMoney(invoice.total_amount) : "",
+      payment ? formatDate(payment.payment_date) : "",
+      payment ? payment.reference || payment.invoice_number || `PAY-${payment.id}` : "",
+      payment ? formatMoney(payment.amount) : ""
+    ];
+
+    const rowHeight = computeBalanceSheetRowHeight(doc, columns, values);
+
+    if (currentY + rowHeight + 88 > doc.page.height - 24) {
+      doc.addPage();
+      currentY = 42;
+      drawHeaders();
+    }
+
+    currentY = drawBalanceSheetRow(doc, startX, currentY, columns, values, {
+      rowHeight,
+      backgroundColor: index % 2 === 0 ? "#FFFFFF" : "#FAFAFA",
+      borderColor: "#E5E7EB",
+      textColor: "#111827",
+      fontName: "Helvetica",
+      fontSize: 8.5
+    });
+  }
+
+  const totalInvoiced = Number(statement?.summary?.total_invoiced || 0);
+  const totalPaid = Number(statement?.summary?.total_paid || 0);
+  const balanceGap = Math.abs(totalInvoiced - totalPaid);
+  const leftIsGreater = totalInvoiced >= totalPaid;
+  const balancingLabel = leftIsGreater ? "Solde du" : "Avance client";
+  const balancedTotal = Math.max(totalInvoiced, totalPaid);
+
+  if (currentY + 78 > doc.page.height - 24) {
+    doc.addPage();
+    currentY = 42;
+    drawHeaders();
+  }
+
+  currentY = drawBalanceSheetRow(
+    doc,
+    startX,
+    currentY,
+    columns,
+    ["", "TOTAL FACTURES", formatMoney(totalInvoiced), "", "TOTAL PAIEMENTS", formatMoney(totalPaid)],
+    {
+      rowHeight: 24,
+      backgroundColor: "#ECFDF5",
+      borderColor: "#A7F3D0",
+      textColor: "#065F46",
+      fontName: "Helvetica-Bold",
+      fontSize: 9
+    }
+  );
+
+  currentY = drawBalanceSheetRow(
+    doc,
+    startX,
+    currentY,
+    columns,
+    leftIsGreater
+      ? ["", "", "", "", balancingLabel, formatMoney(balanceGap)]
+      : ["", balancingLabel, formatMoney(balanceGap), "", "", ""],
+    {
+      rowHeight: 24,
+      backgroundColor: "#FFFBEB",
+      borderColor: "#FCD34D",
+      textColor: "#92400E",
+      fontName: "Helvetica-Bold",
+      fontSize: 9
+    }
+  );
+
+  currentY = drawBalanceSheetRow(
+    doc,
+    startX,
+    currentY,
+    columns,
+    ["", "TOTAL GENERAL", formatMoney(balancedTotal), "", "TOTAL GENERAL", formatMoney(balancedTotal)],
+    {
+      rowHeight: 24,
+      backgroundColor: "#E0F2FE",
+      borderColor: "#7DD3FC",
+      textColor: "#0C4A6E",
+      fontName: "Helvetica-Bold",
+      fontSize: 9
+    }
+  );
+
+  return currentY + 14;
+}
+
+async function createCustomerBalanceStatementPdfBuffer(statement) {
+  const entity = statement?.customer;
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: "A4",
+      layout: "landscape",
+      margin: 40
+    });
+
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    addPdfHeader(
+      doc,
+      "Etat de compte client",
+      `Compte courant de ${entity?.business_name || "client"}`
+    );
+
+    const metaLines = [
+      `Client: ${entity?.business_name || "-"}`,
+      `Ville: ${entity?.city || "-"}`,
+      `Telephone: ${entity?.phone || "-"}`,
+      `Compte client: ${
+        entity?.receivable_account_number
+          ? `${entity.receivable_account_number} - ${entity.receivable_account_name}`
+          : "-"
+      }`
+    ];
+
+    let currentY = drawPdfMetaLines(
+      doc,
+      metaLines,
+      40,
+      104,
+      doc.page.width - 80
+    );
+    currentY += 8;
+
+    currentY = drawPdfSummaryBlock(
+      doc,
+      buildStatementSummaryItems(statement, "customer"),
+      currentY
+    );
+
+    currentY = drawCustomerBalanceTable(doc, statement, currentY);
+
+    if (currentY < doc.page.height - 28) {
+      doc.font("Helvetica").fontSize(8).fillColor("#6B7280");
+      doc.text("Etat de compte client - presentation bilan", 40, doc.page.height - 24, {
+        width: doc.page.width - 80,
+        align: "center"
+      });
+    }
+
+    doc.end();
+  });
 }
 
 function formatChecklistStatus(status) {
