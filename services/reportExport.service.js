@@ -92,6 +92,15 @@ function formatValueForPdf(value, type) {
 
 function addPdfHeader(doc, title, subtitle) {
   const pageWidth = doc.page.width;
+  const cardX = pageWidth - 235;
+  const cardY = 26;
+  const cardWidth = 190;
+  const innerX = cardX + 14;
+  const innerWidth = cardWidth - 28;
+  const generatedLabel = `Genere le ${new Intl.DateTimeFormat("fr-FR", {
+    dateStyle: "short",
+    timeStyle: "short"
+  }).format(new Date())}`;
 
   doc.info.Title = title;
   doc.info.Author = "KIVU AGRO BIO";
@@ -103,29 +112,34 @@ function addPdfHeader(doc, title, subtitle) {
   doc.font("Helvetica").fontSize(10).fillColor("#4B5563");
   doc.text(subtitle || title, 40, 58);
 
+  doc.font("Helvetica-Bold").fontSize(13).fillColor("#166534");
+  const titleHeight = doc.heightOfString(title.toUpperCase(), {
+    width: innerWidth,
+    align: "left"
+  });
+
+  doc.font("Helvetica").fontSize(8.5).fillColor("#111827");
+  const generatedHeight = doc.heightOfString(generatedLabel, {
+    width: innerWidth,
+    align: "left"
+  });
+  const cardHeight = Math.max(66, 18 + titleHeight + 6 + generatedHeight + 10);
+
   doc
-    .roundedRect(pageWidth - 220, 30, 175, 58, 10)
+    .roundedRect(cardX, cardY, cardWidth, cardHeight, 10)
     .fillAndStroke("#F0FDF4", "#BBF7D0");
 
   doc.fillColor("#166534").font("Helvetica-Bold").fontSize(14);
-  doc.text(title.toUpperCase(), pageWidth - 200, 50, {
-    width: 140,
+  doc.text(title.toUpperCase(), innerX, cardY + 10, {
+    width: innerWidth,
     align: "left"
   });
 
   doc.font("Helvetica").fontSize(9).fillColor("#111827");
-  doc.text(
-    `Genere le ${new Intl.DateTimeFormat("fr-FR", {
-      dateStyle: "short",
-      timeStyle: "short"
-    }).format(new Date())}`,
-    pageWidth - 200,
-    68,
-    {
-      width: 140,
-      align: "left"
-    }
-  );
+  doc.text(generatedLabel, innerX, cardY + 14 + titleHeight, {
+    width: innerWidth,
+    align: "left"
+  });
 }
 
 function drawPdfMetaLines(doc, lines, startX, startY, maxWidth) {
