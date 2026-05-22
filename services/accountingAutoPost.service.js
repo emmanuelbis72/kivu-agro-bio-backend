@@ -49,6 +49,15 @@ const expenseCategoryFallbackAccounts = {
   commission: "625200",
   frais_financiers: "627000",
   banque: "627000",
+  remboursement_dette: "462000",
+  dette: "462000",
+  dettes: "462000",
+  dettes_tiers: "462000",
+  crediteurs_divers: "462000",
+  crediteur_divers: "462000",
+  remboursement_associe: "461000",
+  associes: "461000",
+  associe: "461000",
   divers: "658000"
 };
 
