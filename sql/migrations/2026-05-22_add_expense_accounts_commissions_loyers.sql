@@ -51,7 +51,9 @@ WITH category_accounts AS (
       ('loyer', '622100'),
       ('loyers', '622100'),
       ('commission', '625200'),
-      ('commissions', '625200')
+      ('commissions', '625200'),
+      ('matieres_premieres', '601000'),
+      ('matières_premières', '601000')
   ) AS mapping(category, account_number)
 ),
 resolved AS (
