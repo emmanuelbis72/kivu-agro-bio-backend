@@ -19,6 +19,39 @@ function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function normalizeAccountingKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const expenseCategoryFallbackAccounts = {
+  transport: "612000",
+  fret: "613000",
+  marketing: "625100",
+  publicite: "625100",
+  advertising: "625100",
+  salaires: "641000",
+  salaire: "641000",
+  maintenance: "623000",
+  entretien: "623000",
+  emballages: "602000",
+  emballage: "602000",
+  matieres_premieres: "601000",
+  matiere_premiere: "601000",
+  loyer: "622100",
+  loyers: "622100",
+  commissions: "625200",
+  commission: "625200",
+  frais_financiers: "627000",
+  banque: "627000",
+  divers: "658000"
+};
+
 function isIncomeAccount(account) {
   if (!account || !account.is_active || !account.is_postable) {
     return false;
@@ -198,13 +231,16 @@ async function resolveExpenseAccount(category, overrides = {}) {
     return categoryAccount;
   }
 
-  return resolvePostableAccount(
-    process.env.ACCOUNTING_DEFAULT_EXPENSE_ACCOUNT_NUMBER || null
-  );
+  const fallbackAccountNumber =
+    expenseCategoryFallbackAccounts[normalizeAccountingKey(category)] ||
+    process.env.ACCOUNTING_DEFAULT_EXPENSE_ACCOUNT_NUMBER ||
+    "658000";
+
+  return resolvePostableAccount(fallbackAccountNumber);
 }
 
 async function resolvePaymentAccount(paymentMethod, overrides = {}) {
-  const method = String(paymentMethod || "cash").trim();
+  const method = normalizeAccountingKey(paymentMethod || "cash");
 
   const overrideMapping = {
     cash: overrides.cash_account_number || null,
@@ -237,7 +273,14 @@ async function resolvePaymentAccount(paymentMethod, overrides = {}) {
     card: process.env.ACCOUNTING_CARD_ACCOUNT_NUMBER || null
   };
 
-  return resolvePostableAccount(envMapping[method] || null);
+  const defaultMapping = {
+    cash: "531000",
+    mobile_money: "542000",
+    bank_transfer: "512000",
+    card: "512000"
+  };
+
+  return resolvePostableAccount(envMapping[method] || defaultMapping[method]);
 }
 
 async function resolveCogsAccount(overrides = {}) {

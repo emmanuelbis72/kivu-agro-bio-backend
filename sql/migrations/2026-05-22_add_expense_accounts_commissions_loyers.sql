@@ -33,6 +33,114 @@ VALUES
     TRUE,
     TRUE,
     'charges_externes'
+  ),
+  (
+    '601000',
+    'Achats',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'achats'
+  ),
+  (
+    '602000',
+    'Achats emballages',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'achats'
+  ),
+  (
+    '612000',
+    'Transport sur ventes et livraisons',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'charges_externes'
+  ),
+  (
+    '613000',
+    'Transports - fret et expédition',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'charges_externes'
+  ),
+  (
+    '623000',
+    'Entretien, réparations et maintenance',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'charges_externes'
+  ),
+  (
+    '625100',
+    'Publicité et marketing digital',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'charges_externes'
+  ),
+  (
+    '627000',
+    'Services bancaires et frais financiers',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'charges_externes'
+  ),
+  (
+    '641000',
+    'Salaires et appointements',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'charges_personnel'
+  ),
+  (
+    '658000',
+    'Autres charges de gestion courante',
+    '6',
+    'expense',
+    TRUE,
+    TRUE,
+    'charges_diverses'
+  ),
+  (
+    '512000',
+    'Banque',
+    '5',
+    'asset',
+    TRUE,
+    TRUE,
+    'tresorerie'
+  ),
+  (
+    '531000',
+    'Caisse',
+    '5',
+    'asset',
+    TRUE,
+    TRUE,
+    'tresorerie'
+  ),
+  (
+    '542000',
+    'Mobile Money / M-Pesa / Airtel Money',
+    '5',
+    'asset',
+    TRUE,
+    TRUE,
+    'tresorerie'
   )
 ON CONFLICT (account_number)
 DO UPDATE SET
@@ -53,7 +161,18 @@ WITH category_accounts AS (
       ('commission', '625200'),
       ('commissions', '625200'),
       ('matieres_premieres', '601000'),
-      ('matières_premières', '601000')
+      ('matières_premières', '601000'),
+      ('transport', '612000'),
+      ('fret', '613000'),
+      ('marketing', '625100'),
+      ('publicite', '625100'),
+      ('salaires', '641000'),
+      ('maintenance', '623000'),
+      ('entretien', '623000'),
+      ('emballages', '602000'),
+      ('emballage', '602000'),
+      ('frais_financiers', '627000'),
+      ('divers', '658000')
   ) AS mapping(category, account_number)
 ),
 resolved AS (

@@ -29,7 +29,7 @@ export async function getExpenseCategoryAccountByCategory(category) {
       a.is_postable
     FROM expense_category_accounts eca
     INNER JOIN accounts a ON a.id = eca.expense_account_id
-    WHERE eca.category = $1
+    WHERE LOWER(TRIM(eca.category)) = LOWER(TRIM($1))
     LIMIT 1;
   `;
 
@@ -81,7 +81,7 @@ export async function getPaymentMethodAccountByMethod(paymentMethod) {
       a.is_postable
     FROM payment_method_accounts pma
     INNER JOIN accounts a ON a.id = pma.treasury_account_id
-    WHERE pma.payment_method = $1
+    WHERE LOWER(TRIM(pma.payment_method)) = LOWER(TRIM($1))
     LIMIT 1;
   `;
 
