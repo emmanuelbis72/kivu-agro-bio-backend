@@ -105,7 +105,7 @@ export async function getDashboardOverviewHandler(req, res, next) {
       getRecentInvoices(recentLimit),
       getRecentPayments(recentLimit),
       getSalesOverview(),
-      getExecutiveComparisonTimeline(12),
+      getExecutiveComparisonTimeline(6),
       getSalesByWarehouse(),
       getProductCategoryStats(),
       getLowRotationProducts(topLimit)
