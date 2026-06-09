@@ -1,15 +1,25 @@
 import { getCashForecast } from "../models/dashboard.model.js";
 import { getMonthlyClosePack } from "../models/monthlyClose.model.js";
 import {
+  getBudgetVsActualReport,
   getBreakEvenReport,
   getCategorySalesReport,
+  getCommissionDueReport,
   getCommercialSalesReport,
   getCustomerAgingReport,
   getCustomerLedgerReport,
+  getExpenseCategoryReport,
+  getExpensesJournalReport,
+  getIncomeStatementReport,
+  getMarginByCityReport,
+  getMarginByCustomerReport,
+  getMarketingRatioReport,
   getProductLedgerReport,
   getProductSalesReport,
+  getReceiptsJournalReport,
   getSupplierAgingReport,
   getSalesDetailReport,
+  getTreasuryStatementReport,
   getStockStateReport
 } from "../models/report.model.js";
 import {
@@ -1300,6 +1310,255 @@ const reportDefinitions = {
       }
     ]
   },
+  "income-statement": {
+    title: "Compte de resultat",
+    subtitle: "Produits, charges, benefice brut et resultat net",
+    tableTitle: "Lignes du compte de resultat",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `compte-resultat-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "section", header: "Section", width: 70, xlsxWidth: 16 },
+      { key: "account_number", header: "Compte", width: 55, xlsxWidth: 14 },
+      { key: "account_name", header: "Libelle", width: 130, xlsxWidth: 32 },
+      { key: "account_type", header: "Type", width: 60, xlsxWidth: 14 },
+      { key: "total_debit", header: "Debit", type: "money", width: 70, xlsxWidth: 16 },
+      { key: "total_credit", header: "Credit", type: "money", width: 70, xlsxWidth: 16 },
+      { key: "net_amount", header: "Net", type: "money", width: 75, xlsxWidth: 16 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Produits", value: Number(summary.total_revenue || 0), rawValue: Number(summary.total_revenue || 0), type: "money" },
+      { label: "Charges", value: Number(summary.total_expense || 0), rawValue: Number(summary.total_expense || 0), type: "money" },
+      { label: "Resultat net", value: Number(summary.net_result || 0), rawValue: Number(summary.net_result || 0), type: "money" },
+      { label: "Ventes nettes", value: Number(summary.net_sales_amount || 0), rawValue: Number(summary.net_sales_amount || 0), type: "money" },
+      { label: "COGS", value: Number(summary.total_cogs_amount || 0), rawValue: Number(summary.total_cogs_amount || 0), type: "money" },
+      { label: "Benefice brut", value: Number(summary.gross_profit_amount || 0), rawValue: Number(summary.gross_profit_amount || 0), type: "money" },
+      { label: "Marge brute %", value: Number(summary.gross_margin_percent || 0), rawValue: Number(summary.gross_margin_percent || 0), type: "number" }
+    ]
+  },
+  "treasury-statement": {
+    title: "Etat de tresorerie",
+    subtitle: "Encaissements, decaissements et flux nets par periode",
+    tableTitle: "Mouvements de tresorerie",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `etat-tresorerie-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "period_label", header: "Periode", width: 75, xlsxWidth: 18 },
+      { key: "receipts_count", header: "Recettes", type: "integer", width: 50, xlsxWidth: 10 },
+      { key: "customer_receipts", header: "Encaissements", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "supplier_payments_count", header: "Regl. four.", type: "integer", width: 55, xlsxWidth: 12 },
+      { key: "supplier_payments", header: "Paiements four.", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "expenses_count", header: "Depenses", type: "integer", width: 50, xlsxWidth: 10 },
+      { key: "operating_expenses", header: "Depenses op.", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "total_outflows", header: "Sorties", type: "money", width: 70, xlsxWidth: 16 },
+      { key: "net_cash_flow", header: "Flux net", type: "money", width: 70, xlsxWidth: 16 },
+      { key: "cumulative_net_cash_flow", header: "Cumul", type: "money", width: 70, xlsxWidth: 16 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Encaissements", value: Number(summary.total_receipts || 0), rawValue: Number(summary.total_receipts || 0), type: "money" },
+      { label: "Paiements fournisseurs", value: Number(summary.total_supplier_payments || 0), rawValue: Number(summary.total_supplier_payments || 0), type: "money" },
+      { label: "Depenses", value: Number(summary.total_operating_expenses || 0), rawValue: Number(summary.total_operating_expenses || 0), type: "money" },
+      { label: "Flux net", value: Number(summary.net_cash_flow || 0), rawValue: Number(summary.net_cash_flow || 0), type: "money" },
+      { label: "Caisse", value: Number(summary.cash_on_hand_base || 0), rawValue: Number(summary.cash_on_hand_base || 0), type: "money" },
+      { label: "Banque", value: Number(summary.bank_base || 0), rawValue: Number(summary.bank_base || 0), type: "money" },
+      { label: "Mobile money", value: Number(summary.mobile_money_base || 0), rawValue: Number(summary.mobile_money_base || 0), type: "money" },
+      { label: "Tresorerie observee", value: Number(summary.current_cash_base || 0), rawValue: Number(summary.current_cash_base || 0), type: "money" }
+    ]
+  },
+  "receipts-journal": {
+    title: "Journal des recettes",
+    subtitle: "Historique des paiements clients encaisses",
+    tableTitle: "Paiements clients",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `journal-recettes-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "payment_date", header: "Date", type: "date", width: 60, xlsxWidth: 14 },
+      { key: "customer_name", header: "Client", width: 110, xlsxWidth: 26 },
+      { key: "warehouse_name", header: "Depot", width: 80, xlsxWidth: 18 },
+      { key: "invoice_number", header: "Facture", width: 75, xlsxWidth: 16 },
+      { key: "payment_method", header: "Mode", width: 55, xlsxWidth: 12 },
+      { key: "amount", header: "Montant", type: "money", width: 72, xlsxWidth: 16 },
+      { key: "reference", header: "Reference", width: 85, xlsxWidth: 18 },
+      { key: "accounting_status", header: "Compta", width: 55, xlsxWidth: 12 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Paiements", value: Number(summary.total_payments || 0), rawValue: Number(summary.total_payments || 0), type: "integer" },
+      { label: "Clients", value: Number(summary.total_customers || 0), rawValue: Number(summary.total_customers || 0), type: "integer" },
+      { label: "Depots", value: Number(summary.total_warehouses || 0), rawValue: Number(summary.total_warehouses || 0), type: "integer" },
+      { label: "Total encaisse", value: Number(summary.total_amount || 0), rawValue: Number(summary.total_amount || 0), type: "money" }
+    ]
+  },
+  "expenses-journal": {
+    title: "Journal des depenses",
+    subtitle: "Depenses enregistrees avec categories et comptabilisation",
+    tableTitle: "Depenses",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `journal-depenses-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "expense_date", header: "Date", type: "date", width: 60, xlsxWidth: 14 },
+      { key: "category", header: "Categorie", width: 90, xlsxWidth: 18 },
+      { key: "description", header: "Description", width: 115, xlsxWidth: 28 },
+      { key: "supplier_name", header: "Fournisseur", width: 95, xlsxWidth: 22 },
+      { key: "payment_method", header: "Mode", width: 55, xlsxWidth: 12 },
+      { key: "amount", header: "Montant", type: "money", width: 72, xlsxWidth: 16 },
+      { key: "reference", header: "Reference", width: 80, xlsxWidth: 18 },
+      { key: "accounting_status", header: "Compta", width: 55, xlsxWidth: 12 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Depenses", value: Number(summary.total_expenses || 0), rawValue: Number(summary.total_expenses || 0), type: "integer" },
+      { label: "Categories", value: Number(summary.total_categories || 0), rawValue: Number(summary.total_categories || 0), type: "integer" },
+      { label: "Montant total", value: Number(summary.total_amount || 0), rawValue: Number(summary.total_amount || 0), type: "money" },
+      { label: "Depenses poste(es)", value: Number(summary.posted_count || 0), rawValue: Number(summary.posted_count || 0), type: "integer" }
+    ]
+  },
+  "expenses-by-category": {
+    title: "Depenses par categorie",
+    subtitle: "Analyse des charges par poste de depense",
+    tableTitle: "Categories de depenses",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `depenses-par-categorie-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "category_label", header: "Categorie", width: 105, xlsxWidth: 22 },
+      { key: "expenses_count", header: "Lignes", type: "integer", width: 48, xlsxWidth: 10 },
+      { key: "methods_count", header: "Modes", type: "integer", width: 45, xlsxWidth: 10 },
+      { key: "suppliers_count", header: "Fourn.", type: "integer", width: 48, xlsxWidth: 10 },
+      { key: "average_amount", header: "Panier moy.", type: "money", width: 72, xlsxWidth: 16 },
+      { key: "total_amount", header: "Montant", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "first_expense_date", header: "Premiere", type: "date", width: 60, xlsxWidth: 14 },
+      { key: "last_expense_date", header: "Derniere", type: "date", width: 60, xlsxWidth: 14 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Categories", value: Number(summary.total_categories || 0), rawValue: Number(summary.total_categories || 0), type: "integer" },
+      { label: "Depenses", value: Number(summary.total_expenses || 0), rawValue: Number(summary.total_expenses || 0), type: "integer" },
+      { label: "Montant total", value: Number(summary.total_amount || 0), rawValue: Number(summary.total_amount || 0), type: "money" },
+      { label: "Marketing", value: Number(summary.marketing_amount || 0), rawValue: Number(summary.marketing_amount || 0), type: "money" }
+    ]
+  },
+  "margin-by-city": {
+    title: "Marge par ville",
+    subtitle: "Rentabilite commerciale par ville cliente",
+    tableTitle: "Villes clientes",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `marge-par-ville-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "customer_city", header: "Ville", width: 90, xlsxWidth: 20 },
+      { key: "customers_count", header: "Clients", type: "integer", width: 48, xlsxWidth: 10 },
+      { key: "warehouses_count", header: "Depots", type: "integer", width: 48, xlsxWidth: 10 },
+      { key: "invoices_count", header: "Fact.", type: "integer", width: 48, xlsxWidth: 10 },
+      { key: "total_quantity", header: "Qte", type: "number", width: 55, xlsxWidth: 12 },
+      { key: "total_sales_amount", header: "CA", type: "money", width: 72, xlsxWidth: 16 },
+      { key: "gross_profit_amount", header: "Profit brut", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "gross_margin_percent", header: "Marge %", type: "number", width: 55, xlsxWidth: 12 },
+      { key: "total_collected_amount", header: "Encaisse", type: "money", width: 72, xlsxWidth: 16 },
+      { key: "collection_rate_percent", header: "Recouvr. %", type: "number", width: 58, xlsxWidth: 12 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Villes", value: Number(summary.total_cities || 0), rawValue: Number(summary.total_cities || 0), type: "integer" },
+      { label: "CA", value: Number(summary.total_sales_amount || 0), rawValue: Number(summary.total_sales_amount || 0), type: "money" },
+      { label: "Profit brut", value: Number(summary.gross_profit_amount || 0), rawValue: Number(summary.gross_profit_amount || 0), type: "money" },
+      { label: "Marge %", value: Number(summary.gross_margin_percent || 0), rawValue: Number(summary.gross_margin_percent || 0), type: "number" },
+      { label: "Encaisse", value: Number(summary.total_collected_amount || 0), rawValue: Number(summary.total_collected_amount || 0), type: "money" },
+      { label: "Creances", value: Number(summary.total_receivables || 0), rawValue: Number(summary.total_receivables || 0), type: "money" }
+    ]
+  },
+  "margin-by-customer": {
+    title: "Marge par client",
+    subtitle: "Rentabilite et recouvrement par client",
+    tableTitle: "Clients",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `marge-par-client-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "customer_name", header: "Client", width: 110, xlsxWidth: 26 },
+      { key: "customer_city", header: "Ville", width: 70, xlsxWidth: 16 },
+      { key: "warehouses_count", header: "Depots", type: "integer", width: 48, xlsxWidth: 10 },
+      { key: "invoices_count", header: "Fact.", type: "integer", width: 48, xlsxWidth: 10 },
+      { key: "total_quantity", header: "Qte", type: "number", width: 55, xlsxWidth: 12 },
+      { key: "total_sales_amount", header: "CA", type: "money", width: 72, xlsxWidth: 16 },
+      { key: "gross_profit_amount", header: "Profit brut", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "gross_margin_percent", header: "Marge %", type: "number", width: 55, xlsxWidth: 12 },
+      { key: "total_collected_amount", header: "Encaisse", type: "money", width: 72, xlsxWidth: 16 },
+      { key: "collection_rate_percent", header: "Recouvr. %", type: "number", width: 58, xlsxWidth: 12 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Clients", value: Number(summary.total_customers || 0), rawValue: Number(summary.total_customers || 0), type: "integer" },
+      { label: "CA", value: Number(summary.total_sales_amount || 0), rawValue: Number(summary.total_sales_amount || 0), type: "money" },
+      { label: "Profit brut", value: Number(summary.gross_profit_amount || 0), rawValue: Number(summary.gross_profit_amount || 0), type: "money" },
+      { label: "Marge %", value: Number(summary.gross_margin_percent || 0), rawValue: Number(summary.gross_margin_percent || 0), type: "number" },
+      { label: "Encaisse", value: Number(summary.total_collected_amount || 0), rawValue: Number(summary.total_collected_amount || 0), type: "money" },
+      { label: "Creances", value: Number(summary.total_receivables || 0), rawValue: Number(summary.total_receivables || 0), type: "money" }
+    ]
+  },
+  "budget-vs-actual": {
+    title: "Budget vs realise",
+    subtitle: "Comparaison budgetaire par categorie",
+    tableTitle: "Ecarts budgetaires",
+    pdfLayout: "landscape",
+    buildFilename: (filters) => `budget-vs-realise-${filters.budget_id || "auto"}`,
+    columns: [
+      { key: "category_label", header: "Categorie", width: 110, xlsxWidth: 28 },
+      { key: "category_type", header: "Type", width: 60, xlsxWidth: 14 },
+      { key: "planned_total", header: "Budget", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "actual_total", header: "Realise", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "variance_total", header: "Ecart", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "attainment_percent", header: "Atteinte %", type: "number", width: 60, xlsxWidth: 14 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Budget", value: Number(summary.total_planned || 0), rawValue: Number(summary.total_planned || 0), type: "money" },
+      { label: "Realise", value: Number(summary.total_actual || 0), rawValue: Number(summary.total_actual || 0), type: "money" },
+      { label: "Ecart", value: Number(summary.total_variance || 0), rawValue: Number(summary.total_variance || 0), type: "money" },
+      { label: "Atteinte %", value: Number(summary.attainment_percent || 0), rawValue: Number(summary.attainment_percent || 0), type: "number" }
+    ]
+  },
+  "marketing-ratio": {
+    title: "Marketing sur chiffre d'affaires",
+    subtitle: "Poids des depenses marketing dans le chiffre d'affaires",
+    tableTitle: "Marketing vs ventes",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `marketing-sur-ca-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "period_label", header: "Periode", width: 75, xlsxWidth: 18 },
+      { key: "total_sales_amount", header: "CA", type: "money", width: 80, xlsxWidth: 16 },
+      { key: "marketing_expenses_amount", header: "Depenses marketing", type: "money", width: 85, xlsxWidth: 18 },
+      { key: "marketing_ratio_percent", header: "Marketing % CA", type: "number", width: 70, xlsxWidth: 14 }
+    ],
+    summaryItems: (summary) => [
+      { label: "CA", value: Number(summary.total_sales_amount || 0), rawValue: Number(summary.total_sales_amount || 0), type: "money" },
+      { label: "Marketing", value: Number(summary.marketing_expenses_amount || 0), rawValue: Number(summary.marketing_expenses_amount || 0), type: "money" },
+      { label: "Marketing % CA", value: Number(summary.marketing_ratio_percent || 0), rawValue: Number(summary.marketing_ratio_percent || 0), type: "number" }
+    ]
+  },
+  "commission-due": {
+    title: "Commissions dues",
+    subtitle: "Commissions calculees sur les montants reellement encaisses",
+    tableTitle: "Beneficiaires des commissions",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `commissions-dues-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "beneficiary_type", header: "Type", width: 60, xlsxWidth: 14 },
+      { key: "beneficiary_name", header: "Beneficiaire", width: 115, xlsxWidth: 28 },
+      { key: "customers_count", header: "Clients", type: "integer", width: 45, xlsxWidth: 10 },
+      { key: "invoices_count", header: "Fact.", type: "integer", width: 45, xlsxWidth: 10 },
+      { key: "payments_count", header: "Paiem.", type: "integer", width: 48, xlsxWidth: 10 },
+      { key: "collections_amount", header: "Encaisse", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "commission_rate_percent", header: "Taux %", type: "number", width: 50, xlsxWidth: 12 },
+      { key: "commission_due_amount", header: "Commission", type: "money", width: 75, xlsxWidth: 16 },
+      { key: "profile_configured", header: "Profil", type: "boolean", width: 48, xlsxWidth: 10 }
+    ],
+    summaryItems: (summary) => [
+      { label: "Beneficiaires", value: Number(summary.total_beneficiaries || 0), rawValue: Number(summary.total_beneficiaries || 0), type: "integer" },
+      { label: "Encaisse base", value: Number(summary.total_collections_amount || 0), rawValue: Number(summary.total_collections_amount || 0), type: "money" },
+      { label: "Commission due", value: Number(summary.total_commission_due_amount || 0), rawValue: Number(summary.total_commission_due_amount || 0), type: "money" },
+      { label: "Profils configures", value: Number(summary.configured_profiles_count || 0), rawValue: Number(summary.configured_profiles_count || 0), type: "integer" }
+    ]
+  },
   "stock-state": {
     title: "Etat de stock",
     subtitle: "Stock par depot, seuils d'alerte et valorisation",
@@ -1590,6 +1849,239 @@ async function getBreakEvenPayload(query) {
   };
 }
 
+async function getIncomeStatementPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const data = await getIncomeStatementReport({
+    startDate,
+    endDate
+  });
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate
+    },
+    ...data
+  };
+}
+
+async function getTreasuryStatementPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const data = await getTreasuryStatementReport({
+    startDate,
+    endDate
+  });
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate
+    },
+    ...data
+  };
+}
+
+async function getReceiptsJournalPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const data = await getReceiptsJournalReport(
+    {
+      startDate,
+      endDate,
+      warehouseId,
+      customerId
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      limit
+    },
+    ...data
+  };
+}
+
+async function getExpensesJournalPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const category =
+    query.category && String(query.category).trim()
+      ? String(query.category).trim()
+      : null;
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const data = await getExpensesJournalReport(
+    {
+      startDate,
+      endDate,
+      category
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      category,
+      limit
+    },
+    ...data
+  };
+}
+
+async function getExpenseCategoryPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const category =
+    query.category && String(query.category).trim()
+      ? String(query.category).trim()
+      : null;
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const data = await getExpenseCategoryReport(
+    {
+      startDate,
+      endDate,
+      category
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      category,
+      limit
+    },
+    ...data
+  };
+}
+
+async function getMarginByCityPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const data = await getMarginByCityReport(
+    {
+      startDate,
+      endDate,
+      warehouseId,
+      customerId
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      limit
+    },
+    ...data
+  };
+}
+
+async function getMarginByCustomerPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const data = await getMarginByCustomerReport(
+    {
+      startDate,
+      endDate,
+      warehouseId,
+      customerId
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      limit
+    },
+    ...data
+  };
+}
+
+async function getBudgetVsActualPayload(query) {
+  const budgetId = parsePositiveInteger(query.budget_id);
+  const data = await getBudgetVsActualReport({
+    budgetId
+  });
+
+  return {
+    filters: {
+      budget_id: budgetId
+    },
+    ...data
+  };
+}
+
+async function getMarketingRatioPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const data = await getMarketingRatioReport({
+    startDate,
+    endDate
+  });
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate
+    },
+    ...data
+  };
+}
+
+async function getCommissionDuePayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const data = await getCommissionDueReport(
+    {
+      startDate,
+      endDate,
+      warehouseId,
+      customerId
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      limit
+    },
+    ...data
+  };
+}
+
 async function getProductLedgerPayload(query) {
   const startDate = parseDateFilter(query.start_date, null);
   const endDate = parseDateFilter(query.end_date, null);
@@ -1704,6 +2196,16 @@ const reportLoaders = {
   "sales-by-category": getCategorySalesPayload,
   "sales-by-commercial": getCommercialSalesPayload,
   "break-even": getBreakEvenPayload,
+  "income-statement": getIncomeStatementPayload,
+  "treasury-statement": getTreasuryStatementPayload,
+  "receipts-journal": getReceiptsJournalPayload,
+  "expenses-journal": getExpensesJournalPayload,
+  "expenses-by-category": getExpenseCategoryPayload,
+  "margin-by-city": getMarginByCityPayload,
+  "margin-by-customer": getMarginByCustomerPayload,
+  "budget-vs-actual": getBudgetVsActualPayload,
+  "marketing-ratio": getMarketingRatioPayload,
+  "commission-due": getCommissionDuePayload,
   "product-ledger": getProductLedgerPayload,
   "product-sales": getProductSalesPayload,
   "stock-state": getStockStatePayload,
@@ -1774,6 +2276,46 @@ export function getCommercialSalesReportHandler(req, res, next) {
 
 export function getBreakEvenReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "break-even");
+}
+
+export function getIncomeStatementReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "income-statement");
+}
+
+export function getTreasuryStatementReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "treasury-statement");
+}
+
+export function getReceiptsJournalReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "receipts-journal");
+}
+
+export function getExpensesJournalReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "expenses-journal");
+}
+
+export function getExpenseCategoryReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "expenses-by-category");
+}
+
+export function getMarginByCityReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "margin-by-city");
+}
+
+export function getMarginByCustomerReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "margin-by-customer");
+}
+
+export function getBudgetVsActualReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "budget-vs-actual");
+}
+
+export function getMarketingRatioReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "marketing-ratio");
+}
+
+export function getCommissionDueReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "commission-due");
 }
 
 export function getStockStateReportHandler(req, res, next) {

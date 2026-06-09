@@ -11,6 +11,7 @@ import {
   getTopCustomers,
   getCustomerBalanceBoard,
   getExecutiveKpiSnapshot,
+  getExecutiveAnalyticsDashboard,
   getRecentInvoices,
   getRecentPayments,
   getExecutiveComparisonTimeline,
@@ -24,6 +25,7 @@ import {
   getRecentJournalEntries,
   getCashForecast,
   getCommercialDashboard,
+  getCollectionsDashboard,
   getAccountingHealthSnapshot
 } from "../models/dashboard.model.js";
 import { getBreakEvenReport } from "../models/report.model.js";
@@ -132,6 +134,29 @@ export async function getDashboardOverviewHandler(req, res, next) {
         product_category_stats: productCategoryStats,
         low_rotation_products: lowRotationProducts
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getExecutiveAnalyticsDashboardHandler(req, res, next) {
+  try {
+    const topLimit = parsePositiveLimit(req.query.top_limit, 10, 20);
+    const warehouseId = parsePositiveInteger(req.query.warehouse_id);
+    const startDate = parseDateFilter(req.query.start_date);
+    const endDate = parseDateFilter(req.query.end_date);
+
+    const data = await getExecutiveAnalyticsDashboard({
+      topLimit,
+      warehouseId,
+      startDate,
+      endDate
+    });
+
+    return res.status(200).json({
+      success: true,
+      data
     });
   } catch (error) {
     next(error);
@@ -463,6 +488,37 @@ export async function getCommercialDashboardHandler(req, res, next) {
       topLimit,
       heatmapFilters
     );
+
+    return res.status(200).json({
+      success: true,
+      data: dashboard
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getCollectionsDashboardHandler(req, res, next) {
+  try {
+    const now = new Date();
+    const defaultEndDate = now.toISOString().split("T")[0];
+    const defaultStartDate = new Date(now.getTime() - 89 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split("T")[0];
+
+    const dashboard = await getCollectionsDashboard({
+      startDate: parseDateFilter(req.query.start_date) || defaultStartDate,
+      endDate: parseDateFilter(req.query.end_date) || defaultEndDate,
+      warehouseId: parsePositiveInteger(req.query.warehouse_id),
+      customerId: parsePositiveInteger(req.query.customer_id),
+      customerCity: req.query.customer_city
+        ? String(req.query.customer_city).trim()
+        : null,
+      topProducts: parsePositiveLimit(req.query.top_products, 8, 20),
+      topCities: parsePositiveLimit(req.query.top_cities, 8, 20),
+      invoiceLimit: parsePositiveLimit(req.query.invoice_limit, 80, 200),
+      paymentLimit: parsePositiveLimit(req.query.payment_limit, 80, 200)
+    });
 
     return res.status(200).json({
       success: true,

@@ -11,6 +11,16 @@ function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function formatIsoDate(date) {
+  return date.toISOString().split("T")[0];
+}
+
+function addDays(date, days) {
+  const nextDate = new Date(date);
+  nextDate.setDate(nextDate.getDate() + days);
+  return nextDate;
+}
+
 function computeMarginPercent(baseAmount, comparedAmount) {
   const base = Number(baseAmount || 0);
 
@@ -258,6 +268,111 @@ function buildCommercialHeatmapFilterBindings(
   return {
     values,
     clause: conditions.length ? `AND ${conditions.join(" AND ")}` : "",
+    nextParameterIndex: parameterIndex
+  };
+}
+
+function buildCollectionInvoiceFilterBindings(
+  filters = {},
+  aliases = {},
+  startIndex = 1
+) {
+  const invoiceAlias = aliases.invoice || "i";
+  const customerAlias = aliases.customer || "c";
+  const values = [];
+  const conditions = [`${invoiceAlias}.status IN ('issued', 'partial', 'paid')`];
+  let parameterIndex = startIndex;
+
+  if (filters.startDate) {
+    values.push(filters.startDate);
+    conditions.push(`${invoiceAlias}.invoice_date >= $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.endDate) {
+    values.push(filters.endDate);
+    conditions.push(`${invoiceAlias}.invoice_date <= $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.warehouseId) {
+    values.push(filters.warehouseId);
+    conditions.push(`${invoiceAlias}.warehouse_id = $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.customerId) {
+    values.push(filters.customerId);
+    conditions.push(`${invoiceAlias}.customer_id = $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.customerCity) {
+    values.push(filters.customerCity);
+    conditions.push(
+      `LOWER(COALESCE(${customerAlias}.city, '')) = LOWER($${parameterIndex})`
+    );
+    parameterIndex += 1;
+  }
+
+  return {
+    values,
+    whereClause: `WHERE ${conditions.join(" AND ")}`,
+    andClause:
+      conditions.length > 1
+        ? `AND ${conditions.slice(1).join(" AND ")}`
+        : "",
+    nextParameterIndex: parameterIndex
+  };
+}
+
+function buildCollectionPaymentFilterBindings(
+  filters = {},
+  aliases = {},
+  startIndex = 1
+) {
+  const paymentAlias = aliases.payment || "p";
+  const invoiceAlias = aliases.invoice || "i";
+  const customerAlias = aliases.customer || "c";
+  const values = [];
+  const conditions = ["1 = 1"];
+  let parameterIndex = startIndex;
+
+  if (filters.startDate) {
+    values.push(filters.startDate);
+    conditions.push(`${paymentAlias}.payment_date >= $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.endDate) {
+    values.push(filters.endDate);
+    conditions.push(`${paymentAlias}.payment_date <= $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.warehouseId) {
+    values.push(filters.warehouseId);
+    conditions.push(`${invoiceAlias}.warehouse_id = $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.customerId) {
+    values.push(filters.customerId);
+    conditions.push(`${invoiceAlias}.customer_id = $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.customerCity) {
+    values.push(filters.customerCity);
+    conditions.push(
+      `LOWER(COALESCE(${customerAlias}.city, '')) = LOWER($${parameterIndex})`
+    );
+    parameterIndex += 1;
+  }
+
+  return {
+    values,
+    whereClause: `WHERE ${conditions.join(" AND ")}`,
     nextParameterIndex: parameterIndex
   };
 }
@@ -2890,6 +3005,1064 @@ export async function getCommercialDashboard(
     })),
     dormant_clients: dormantClients,
     reactivation_candidates: reactivationCandidates
+  };
+}
+
+export async function getCollectionsDashboard(filters = {}) {
+  await ensureDashboardSchema(pool);
+
+  const now = new Date();
+  const endDate = filters.endDate || formatIsoDate(now);
+  const startDate =
+    filters.startDate ||
+    formatIsoDate(addDays(new Date(`${endDate}T00:00:00`), -89));
+  const warehouseId = normalizeOptionalPositiveWholeNumber(
+    filters.warehouseId,
+    1000000
+  );
+  const customerId = normalizeOptionalPositiveWholeNumber(
+    filters.customerId,
+    1000000
+  );
+  const customerCity = normalizeOptionalTextFilter(filters.customerCity);
+  const topProducts = normalizePositiveWholeNumber(filters.topProducts, 8, 20);
+  const topCities = normalizePositiveWholeNumber(filters.topCities, 8, 20);
+  const invoiceLimit = normalizePositiveWholeNumber(filters.invoiceLimit, 80, 200);
+  const paymentLimit = normalizePositiveWholeNumber(filters.paymentLimit, 80, 200);
+
+  const scopedFilters = {
+    startDate,
+    endDate,
+    warehouseId,
+    customerId,
+    customerCity
+  };
+  const invoiceBindings = buildCollectionInvoiceFilterBindings(scopedFilters, {
+    invoice: "i",
+    customer: "c"
+  });
+  const paymentBindings = buildCollectionPaymentFilterBindings(scopedFilters, {
+    payment: "p",
+    invoice: "i",
+    customer: "c"
+  });
+
+  const unpaidSummaryQuery = `
+    SELECT
+      COUNT(*)::int AS total_unpaid_invoices,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COUNT(DISTINCT LOWER(COALESCE(NULLIF(TRIM(c.city), ''), 'non renseignee')))::int AS total_cities,
+      COALESCE(SUM(i.balance_due), 0) AS total_unpaid_amount,
+      COUNT(*) FILTER (
+        WHERE i.due_date IS NOT NULL
+          AND i.due_date < CURRENT_DATE
+      )::int AS overdue_invoices_count,
+      COALESCE(SUM(
+        CASE
+          WHEN i.due_date IS NOT NULL
+           AND i.due_date < CURRENT_DATE
+            THEN i.balance_due
+          ELSE 0
+        END
+      ), 0) AS overdue_balance_amount
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    ${invoiceBindings.whereClause}
+      AND i.status IN ('issued', 'partial')
+      AND COALESCE(i.balance_due, 0) > 0;
+  `;
+
+  const unpaidRowsQuery = `
+    SELECT
+      i.id AS invoice_id,
+      i.invoice_number,
+      i.invoice_date,
+      i.due_date,
+      i.status,
+      i.customer_id,
+      c.business_name AS customer_name,
+      COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS customer_city,
+      i.warehouse_id,
+      COALESCE(w.name, 'Depot non renseigne') AS warehouse_name,
+      COALESCE(w.city, '') AS warehouse_city,
+      COALESCE(i.total_amount, 0) AS total_amount,
+      COALESCE(i.paid_amount, 0) AS paid_amount,
+      COALESCE(i.balance_due, 0) AS balance_due,
+      CASE
+        WHEN i.due_date IS NULL THEN NULL
+        ELSE GREATEST((CURRENT_DATE - i.due_date), 0)
+      END AS days_overdue
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN warehouses w ON w.id = i.warehouse_id
+    ${invoiceBindings.whereClause}
+      AND i.status IN ('issued', 'partial')
+      AND COALESCE(i.balance_due, 0) > 0
+    ORDER BY
+      CASE WHEN i.due_date IS NULL THEN 1 ELSE 0 END ASC,
+      i.due_date ASC,
+      i.invoice_date DESC,
+      i.id DESC
+    LIMIT $${invoiceBindings.nextParameterIndex};
+  `;
+
+  const paymentsSummaryQuery = `
+    SELECT
+      COUNT(*)::int AS total_payments,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COUNT(DISTINCT LOWER(COALESCE(NULLIF(TRIM(c.city), ''), 'non renseignee')))::int AS total_cities,
+      COALESCE(SUM(p.amount), 0) AS total_payments_amount
+    FROM payments p
+    INNER JOIN invoices i ON i.id = p.invoice_id
+    INNER JOIN customers c ON c.id = i.customer_id
+    ${paymentBindings.whereClause};
+  `;
+
+  const paymentsRowsQuery = `
+    SELECT
+      p.id AS payment_id,
+      p.payment_date,
+      p.amount,
+      p.payment_method,
+      p.reference,
+      p.notes,
+      p.accounting_status,
+      p.accounting_entry_id,
+      p.accounting_message,
+      i.id AS invoice_id,
+      i.invoice_number,
+      i.customer_id,
+      c.business_name AS customer_name,
+      COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS customer_city,
+      i.warehouse_id,
+      COALESCE(w.name, 'Depot non renseigne') AS warehouse_name,
+      COALESCE(w.city, '') AS warehouse_city
+    FROM payments p
+    INNER JOIN invoices i ON i.id = p.invoice_id
+    INNER JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN warehouses w ON w.id = i.warehouse_id
+    ${paymentBindings.whereClause}
+    ORDER BY p.payment_date DESC, p.id DESC
+    LIMIT $${paymentBindings.nextParameterIndex};
+  `;
+
+  const heatmapFilterBindings = buildCollectionInvoiceFilterBindings(
+    scopedFilters,
+    { invoice: "i", customer: "c" },
+    1
+  );
+  const heatmapTopProductsParameter = heatmapFilterBindings.nextParameterIndex;
+  const heatmapTopCitiesParameter = heatmapTopProductsParameter + 1;
+
+  const productCityHeatmapQuery = `
+    WITH product_city_base AS (
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.category,
+        COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS city,
+        COUNT(DISTINCT i.id)::int AS total_invoices,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity_sold,
+        COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
+        COALESCE(
+          SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))),
+          0
+        ) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN products p ON p.id = ii.product_id
+      ${heatmapFilterBindings.whereClause}
+      GROUP BY
+        p.id,
+        p.name,
+        p.category,
+        COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee')
+    ),
+    top_products AS (
+      SELECT
+        product_id,
+        product_name,
+        category
+      FROM product_city_base
+      GROUP BY product_id, product_name, category
+      ORDER BY COALESCE(SUM(total_sales_amount), 0) DESC, product_name ASC
+      LIMIT $${heatmapTopProductsParameter}
+    ),
+    top_cities AS (
+      SELECT city
+      FROM product_city_base
+      GROUP BY city
+      ORDER BY COALESCE(SUM(total_sales_amount), 0) DESC, city ASC
+      LIMIT $${heatmapTopCitiesParameter}
+    ),
+    product_totals AS (
+      SELECT
+        product_id,
+        COALESCE(SUM(total_sales_amount), 0) AS product_sales_amount
+      FROM product_city_base
+      GROUP BY product_id
+    ),
+    city_totals AS (
+      SELECT
+        city,
+        COALESCE(SUM(total_sales_amount), 0) AS city_sales_amount
+      FROM product_city_base
+      GROUP BY city
+    )
+    SELECT
+      tp.product_id,
+      tp.product_name,
+      tp.category,
+      tc.city,
+      COALESCE(pcb.total_invoices, 0) AS total_invoices,
+      COALESCE(pcb.total_quantity_sold, 0) AS total_quantity_sold,
+      COALESCE(pcb.total_sales_amount, 0) AS total_sales_amount,
+      COALESCE(pcb.gross_profit_amount, 0) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(pcb.total_sales_amount, 0) > 0
+          THEN ROUND(
+            (COALESCE(pcb.gross_profit_amount, 0) / COALESCE(pcb.total_sales_amount, 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent,
+      CASE
+        WHEN COALESCE(pt.product_sales_amount, 0) > 0
+          THEN ROUND(
+            (COALESCE(pcb.total_sales_amount, 0) / COALESCE(pt.product_sales_amount, 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS sales_share_in_product_percent,
+      CASE
+        WHEN COALESCE(ct.city_sales_amount, 0) > 0
+          THEN ROUND(
+            (COALESCE(pcb.total_sales_amount, 0) / COALESCE(ct.city_sales_amount, 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS sales_share_in_city_percent
+    FROM top_products tp
+    CROSS JOIN top_cities tc
+    LEFT JOIN product_city_base pcb
+      ON pcb.product_id = tp.product_id
+     AND pcb.city = tc.city
+    LEFT JOIN product_totals pt ON pt.product_id = tp.product_id
+    LEFT JOIN city_totals ct ON ct.city = tc.city
+    ORDER BY tp.product_name ASC, tc.city ASC;
+  `;
+
+  const [
+    unpaidSummaryResult,
+    unpaidRowsResult,
+    paymentsSummaryResult,
+    paymentsRowsResult,
+    heatmapResult
+  ] = await Promise.all([
+    pool.query(unpaidSummaryQuery, invoiceBindings.values),
+    pool.query(unpaidRowsQuery, [...invoiceBindings.values, invoiceLimit]),
+    pool.query(paymentsSummaryQuery, paymentBindings.values),
+    pool.query(paymentsRowsQuery, [...paymentBindings.values, paymentLimit]),
+    pool.query(productCityHeatmapQuery, [
+      ...heatmapFilterBindings.values,
+      topProducts,
+      topCities
+    ])
+  ]);
+
+  const unpaidSummary = unpaidSummaryResult.rows[0] || {};
+  const paymentsSummary = paymentsSummaryResult.rows[0] || {};
+  const heatmapCells = heatmapResult.rows.map((row) => normalizeHeatmapCellRow(row));
+  const heatmapProducts = [
+    ...new Map(
+      heatmapCells.map((row) => [
+        row.product_id,
+        {
+          product_id: row.product_id,
+          product_name: row.product_name,
+          category: row.category,
+          total_sales_amount: roundAmount(
+            heatmapCells
+              .filter((cell) => cell.product_id === row.product_id)
+              .reduce((sum, cell) => sum + Number(cell.total_sales_amount || 0), 0)
+          ),
+          total_quantity_sold: roundAmount(
+            heatmapCells
+              .filter((cell) => cell.product_id === row.product_id)
+              .reduce((sum, cell) => sum + Number(cell.total_quantity_sold || 0), 0)
+          )
+        }
+      ])
+    ).values()
+  ].sort((left, right) => right.total_sales_amount - left.total_sales_amount);
+  const heatmapCities = [
+    ...new Map(
+      heatmapCells.map((row) => [
+        row.city,
+        {
+          city: row.city,
+          total_sales_amount: roundAmount(
+            heatmapCells
+              .filter((cell) => cell.city === row.city)
+              .reduce((sum, cell) => sum + Number(cell.total_sales_amount || 0), 0)
+          ),
+          total_quantity_sold: roundAmount(
+            heatmapCells
+              .filter((cell) => cell.city === row.city)
+              .reduce((sum, cell) => sum + Number(cell.total_quantity_sold || 0), 0)
+          )
+        }
+      ])
+    ).values()
+  ].sort((left, right) => right.total_sales_amount - left.total_sales_amount);
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      customer_city: customerCity,
+      top_products: topProducts,
+      top_cities: topCities,
+      invoice_limit: invoiceLimit,
+      payment_limit: paymentLimit
+    },
+    summary: {
+      total_unpaid_invoices: Number(unpaidSummary.total_unpaid_invoices || 0),
+      total_unpaid_customers: Number(unpaidSummary.total_customers || 0),
+      total_unpaid_cities: Number(unpaidSummary.total_cities || 0),
+      total_unpaid_amount: roundAmount(unpaidSummary.total_unpaid_amount),
+      overdue_invoices_count: Number(unpaidSummary.overdue_invoices_count || 0),
+      overdue_balance_amount: roundAmount(unpaidSummary.overdue_balance_amount),
+      total_payments: Number(paymentsSummary.total_payments || 0),
+      total_payment_customers: Number(paymentsSummary.total_customers || 0),
+      total_payment_cities: Number(paymentsSummary.total_cities || 0),
+      total_payments_amount: roundAmount(paymentsSummary.total_payments_amount)
+    },
+    unpaid_invoices: unpaidRowsResult.rows.map((row) => ({
+      ...row,
+      total_amount: roundAmount(row.total_amount),
+      paid_amount: roundAmount(row.paid_amount),
+      balance_due: roundAmount(row.balance_due),
+      days_overdue:
+        row.days_overdue === null ? null : Number(row.days_overdue || 0)
+    })),
+    payments: paymentsRowsResult.rows.map((row) => ({
+      ...row,
+      amount: roundAmount(row.amount)
+    })),
+    product_city_heatmap: {
+      filters: {
+        start_date: startDate,
+        end_date: endDate,
+        warehouse_id: warehouseId,
+        customer_id: customerId,
+        customer_city: customerCity,
+        top_products: topProducts,
+        top_cities: topCities
+      },
+      products: heatmapProducts,
+      cities: heatmapCities,
+      cells: heatmapCells
+    }
+  };
+}
+
+export async function getExecutiveAnalyticsDashboard(filters = {}) {
+  await ensureDashboardSchema(pool);
+
+  const topLimit = normalizePositiveWholeNumber(filters.topLimit, 10, 20);
+  const warehouseId = normalizeOptionalPositiveWholeNumber(
+    filters.warehouseId,
+    1000000
+  );
+  const endDate = filters.endDate || formatIsoDate(new Date());
+  const startDate =
+    filters.startDate ||
+    formatIsoDate(addDays(new Date(`${endDate}T00:00:00`), -179));
+
+  const baseValues = [startDate, endDate, warehouseId];
+
+  const monthlyTrendQuery = `
+    WITH month_series AS (
+      SELECT generate_series(
+        DATE_TRUNC('month', $1::date),
+        DATE_TRUNC('month', $2::date),
+        INTERVAL '1 month'
+      )::date AS month_start
+    ),
+    invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    ),
+    invoice_monthly AS (
+      SELECT
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
+        COALESCE(SUM(i.total_amount), 0) AS invoiced_amount,
+        COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) AS net_sales_amount,
+        COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS cogs_amount,
+        COALESCE(
+          SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+          0
+        ) AS gross_profit_amount
+      FROM invoices i
+      LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+      GROUP BY DATE_TRUNC('month', i.invoice_date)::date
+    ),
+    payment_monthly AS (
+      SELECT
+        DATE_TRUNC('month', p.payment_date)::date AS month_start,
+        COALESCE(SUM(p.amount), 0) AS payments_received
+      FROM payments p
+      INNER JOIN invoices i ON i.id = p.invoice_id
+      WHERE p.payment_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+      GROUP BY DATE_TRUNC('month', p.payment_date)::date
+    ),
+    expense_monthly AS (
+      SELECT
+        DATE_TRUNC('month', e.expense_date)::date AS month_start,
+        COALESCE(SUM(e.amount), 0) AS expenses_amount
+      FROM expenses e
+      WHERE e.expense_date BETWEEN $1::date AND $2::date
+      GROUP BY DATE_TRUNC('month', e.expense_date)::date
+    )
+    SELECT
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
+      TO_CHAR(ms.month_start, 'YYYY-MM-DD') AS period_start,
+      TO_CHAR((ms.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date, 'YYYY-MM-DD') AS period_end,
+      COALESCE(im.invoiced_amount, 0) AS invoiced_amount,
+      COALESCE(pm.payments_received, 0) AS payments_received,
+      COALESCE(em.expenses_amount, 0) AS expenses_amount,
+      COALESCE(im.net_sales_amount, 0) AS net_sales_amount,
+      COALESCE(im.cogs_amount, 0) AS cogs_amount,
+      COALESCE(im.gross_profit_amount, 0) AS gross_profit_amount
+    FROM month_series ms
+    LEFT JOIN invoice_monthly im ON im.month_start = ms.month_start
+    LEFT JOIN payment_monthly pm ON pm.month_start = ms.month_start
+    LEFT JOIN expense_monthly em ON em.month_start = ms.month_start
+    ORDER BY ms.month_start ASC;
+  `;
+
+  const salesByCityQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
+    SELECT
+      COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS city,
+      COUNT(DISTINCT i.id)::int AS total_invoices,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date BETWEEN $1::date AND $2::date
+      AND ($3::int IS NULL OR i.warehouse_id = $3)
+    GROUP BY COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee')
+    ORDER BY total_sales_amount DESC, city ASC
+    LIMIT $4;
+  `;
+
+  const salesByPointOfSaleQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
+    SELECT
+      c.id AS customer_id,
+      c.business_name,
+      COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS city,
+      COUNT(DISTINCT i.id)::int AS total_invoices,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date BETWEEN $1::date AND $2::date
+      AND ($3::int IS NULL OR i.warehouse_id = $3)
+    GROUP BY c.id, c.business_name, COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee')
+    ORDER BY total_sales_amount DESC, business_name ASC
+    LIMIT $4;
+  `;
+
+  const salesByWarehouseQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    )
+    SELECT
+      w.id AS warehouse_id,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city,
+      COUNT(DISTINCT i.id)::int AS total_invoices,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount
+    FROM warehouses w
+    LEFT JOIN invoices i
+      ON i.warehouse_id = w.id
+      AND i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date BETWEEN $1::date AND $2::date
+      AND ($3::int IS NULL OR i.warehouse_id = $3)
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    GROUP BY w.id, w.name, w.city
+    HAVING COALESCE(SUM(i.total_amount), 0) > 0 OR $3::int IS NULL
+    ORDER BY total_sales_amount DESC, warehouse_name ASC;
+  `;
+
+  const paretoProductsQuery = `
+    WITH product_sales AS (
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.category,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity_sold,
+        COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
+        COALESCE(
+          SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))),
+          0
+        ) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN products p ON p.id = ii.product_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+      GROUP BY p.id, p.name, p.category
+    )
+    SELECT
+      ps.*,
+      CASE
+        WHEN COALESCE(SUM(ps.total_sales_amount) OVER (), 0) > 0
+          THEN ROUND(
+            (
+              SUM(ps.total_sales_amount) OVER (
+                ORDER BY ps.total_sales_amount DESC, ps.product_name ASC
+              ) / SUM(ps.total_sales_amount) OVER ()
+            ) * 100,
+            2
+          )
+        ELSE 0
+      END AS cumulative_sales_share_percent,
+      ROW_NUMBER() OVER (
+        ORDER BY ps.total_sales_amount DESC, ps.product_name ASC
+      )::int AS rank_order
+    FROM product_sales ps
+    ORDER BY ps.total_sales_amount DESC, ps.product_name ASC
+    LIMIT $4;
+  `;
+
+  const marginByProductQuery = `
+    WITH product_sales AS (
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.category,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity_sold,
+        COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount,
+        COALESCE(
+          SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))),
+          0
+        ) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN products p ON p.id = ii.product_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+      GROUP BY p.id, p.name, p.category
+    ),
+    expense_total AS (
+      SELECT COALESCE(SUM(e.amount), 0) AS total_expenses
+      FROM expenses e
+      WHERE e.expense_date BETWEEN $1::date AND $2::date
+    ),
+    sales_total AS (
+      SELECT COALESCE(SUM(total_sales_amount), 0) AS total_sales_amount
+      FROM product_sales
+    )
+    SELECT
+      ps.*,
+      CASE
+        WHEN st.total_sales_amount > 0
+          THEN ROUND((ps.total_sales_amount / st.total_sales_amount) * et.total_expenses, 2)
+        ELSE 0
+      END AS allocated_expenses_amount,
+      ROUND(
+        ps.gross_profit_amount - (
+          CASE
+            WHEN st.total_sales_amount > 0
+              THEN (ps.total_sales_amount / st.total_sales_amount) * et.total_expenses
+            ELSE 0
+          END
+        ),
+        2
+      ) AS net_profit_estimate,
+      CASE
+        WHEN ps.total_sales_amount > 0
+          THEN ROUND(
+            (
+              (
+                ps.gross_profit_amount - (
+                  CASE
+                    WHEN st.total_sales_amount > 0
+                      THEN (ps.total_sales_amount / st.total_sales_amount) * et.total_expenses
+                    ELSE 0
+                  END
+                )
+              ) / ps.total_sales_amount
+            ) * 100,
+            2
+          )
+        ELSE 0
+      END AS net_margin_estimate_percent
+    FROM product_sales ps
+    CROSS JOIN expense_total et
+    CROSS JOIN sales_total st
+    ORDER BY net_profit_estimate DESC, gross_profit_amount DESC, product_name ASC
+    LIMIT $4;
+  `;
+
+  const heatmapQuery = `
+    WITH product_city_base AS (
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.category,
+        COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS city,
+        COUNT(DISTINCT i.id)::int AS total_invoices,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity_sold,
+        COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
+        COALESCE(
+          SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))),
+          0
+        ) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN products p ON p.id = ii.product_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+      GROUP BY p.id, p.name, p.category, COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee')
+    ),
+    top_products AS (
+      SELECT product_id
+      FROM product_city_base
+      GROUP BY product_id
+      ORDER BY COALESCE(SUM(total_sales_amount), 0) DESC, product_id ASC
+      LIMIT $4
+    ),
+    top_cities AS (
+      SELECT city
+      FROM product_city_base
+      GROUP BY city
+      ORDER BY COALESCE(SUM(total_sales_amount), 0) DESC, city ASC
+      LIMIT $5
+    ),
+    product_totals AS (
+      SELECT
+        product_id,
+        COALESCE(SUM(total_sales_amount), 0) AS product_total_sales
+      FROM product_city_base
+      GROUP BY product_id
+    ),
+    city_totals AS (
+      SELECT
+        city,
+        COALESCE(SUM(total_sales_amount), 0) AS city_total_sales
+      FROM product_city_base
+      GROUP BY city
+    )
+    SELECT
+      pcb.product_id,
+      pcb.product_name,
+      pcb.category,
+      pcb.city,
+      pcb.total_invoices,
+      pcb.total_quantity_sold,
+      pcb.total_sales_amount,
+      pcb.gross_profit_amount,
+      CASE
+        WHEN pcb.total_sales_amount > 0
+          THEN ROUND((pcb.gross_profit_amount / pcb.total_sales_amount) * 100, 2)
+        ELSE 0
+      END AS gross_margin_percent,
+      CASE
+        WHEN COALESCE(pt.product_total_sales, 0) > 0
+          THEN ROUND((pcb.total_sales_amount / pt.product_total_sales) * 100, 2)
+        ELSE 0
+      END AS sales_share_in_product_percent,
+      CASE
+        WHEN COALESCE(ct.city_total_sales, 0) > 0
+          THEN ROUND((pcb.total_sales_amount / ct.city_total_sales) * 100, 2)
+        ELSE 0
+      END AS sales_share_in_city_percent
+    FROM product_city_base pcb
+    INNER JOIN top_products tp ON tp.product_id = pcb.product_id
+    INNER JOIN top_cities tc2 ON tc2.city = pcb.city
+    LEFT JOIN product_totals pt ON pt.product_id = pcb.product_id
+    LEFT JOIN city_totals ct ON ct.city = pcb.city
+    ORDER BY pcb.product_name ASC, pcb.city ASC;
+  `;
+
+  const stockCoverageQuery = `
+    WITH stock_base AS (
+      SELECT
+        ws.product_id,
+        COALESCE(SUM(ws.quantity), 0) AS current_stock_quantity
+      FROM warehouse_stock ws
+      WHERE ($3::int IS NULL OR ws.warehouse_id = $3)
+      GROUP BY ws.product_id
+    ),
+    sales_base AS (
+      SELECT
+        ii.product_id,
+        COALESCE(SUM(ii.quantity), 0) AS sold_quantity
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+      GROUP BY ii.product_id
+    )
+    SELECT
+      p.id AS product_id,
+      p.name AS product_name,
+      p.category,
+      COALESCE(sb.current_stock_quantity, 0) AS current_stock_quantity,
+      COALESCE(sl.sold_quantity, 0) AS sold_quantity,
+      GREATEST(($2::date - $1::date + 1), 1)::int AS analysis_days,
+      ROUND(
+        COALESCE(sl.sold_quantity, 0) / GREATEST(($2::date - $1::date + 1), 1),
+        2
+      ) AS avg_daily_sales,
+      CASE
+        WHEN COALESCE(sl.sold_quantity, 0) > 0
+          THEN ROUND(
+            COALESCE(sb.current_stock_quantity, 0)
+            / (COALESCE(sl.sold_quantity, 0) / GREATEST(($2::date - $1::date + 1), 1)),
+            2
+          )
+        ELSE NULL
+      END AS coverage_days,
+      COALESCE(p.alert_threshold, 0) AS alert_threshold
+    FROM products p
+    LEFT JOIN stock_base sb ON sb.product_id = p.id
+    LEFT JOIN sales_base sl ON sl.product_id = p.id
+    WHERE COALESCE(sb.current_stock_quantity, 0) > 0 OR COALESCE(sl.sold_quantity, 0) > 0
+    ORDER BY coverage_days ASC NULLS LAST, sold_quantity DESC, product_name ASC
+    LIMIT $4;
+  `;
+
+  const receivablesBucketsQuery = `
+    WITH open_invoices AS (
+      SELECT
+        i.id,
+        i.customer_id,
+        c.business_name,
+        COALESCE(i.balance_due, 0) AS balance_due,
+        i.due_date,
+        CASE
+          WHEN i.due_date IS NULL THEN NULL
+          ELSE GREATEST(($2::date - i.due_date), 0)
+        END AS days_overdue
+      FROM invoices i
+      INNER JOIN customers c ON c.id = i.customer_id
+      WHERE i.status IN ('issued', 'partial')
+        AND COALESCE(i.balance_due, 0) > 0
+        AND i.invoice_date <= $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+    )
+    SELECT
+      COUNT(*)::int AS open_invoices_count,
+      COALESCE(SUM(balance_due), 0) AS total_balance_due,
+      COALESCE(SUM(CASE WHEN due_date IS NULL OR due_date > $2::date THEN balance_due ELSE 0 END), 0) AS current_balance,
+      COALESCE(SUM(CASE WHEN days_overdue BETWEEN 1 AND 15 THEN balance_due ELSE 0 END), 0) AS bucket_1_15,
+      COALESCE(SUM(CASE WHEN days_overdue BETWEEN 16 AND 30 THEN balance_due ELSE 0 END), 0) AS bucket_16_30,
+      COALESCE(SUM(CASE WHEN days_overdue BETWEEN 31 AND 60 THEN balance_due ELSE 0 END), 0) AS bucket_31_60,
+      COALESCE(SUM(CASE WHEN days_overdue > 60 THEN balance_due ELSE 0 END), 0) AS bucket_60_plus
+    FROM open_invoices;
+  `;
+
+  const overdueCustomersQuery = `
+    WITH open_invoices AS (
+      SELECT
+        i.customer_id,
+        c.business_name,
+        COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS city,
+        COALESCE(i.balance_due, 0) AS balance_due,
+        i.due_date,
+        CASE
+          WHEN i.due_date IS NULL THEN NULL
+          ELSE GREATEST(($2::date - i.due_date), 0)
+        END AS days_overdue
+      FROM invoices i
+      INNER JOIN customers c ON c.id = i.customer_id
+      WHERE i.status IN ('issued', 'partial')
+        AND COALESCE(i.balance_due, 0) > 0
+        AND i.invoice_date <= $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+    )
+    SELECT
+      customer_id,
+      business_name,
+      city,
+      COUNT(*)::int AS open_invoices_count,
+      MAX(days_overdue)::int AS max_days_overdue,
+      COALESCE(SUM(balance_due), 0) AS total_balance_due
+    FROM open_invoices
+    WHERE COALESCE(days_overdue, 0) > 0
+    GROUP BY customer_id, business_name, city
+    ORDER BY total_balance_due DESC, max_days_overdue DESC, business_name ASC
+    LIMIT $4;
+  `;
+
+  const expensesByCategoryQuery = `
+    SELECT
+      COALESCE(NULLIF(TRIM(e.category), ''), 'Non classe') AS category,
+      COUNT(*)::int AS expenses_count,
+      COALESCE(SUM(e.amount), 0) AS total_amount
+    FROM expenses e
+    WHERE e.expense_date BETWEEN $1::date AND $2::date
+    GROUP BY COALESCE(NULLIF(TRIM(e.category), ''), 'Non classe')
+    ORDER BY total_amount DESC, category ASC
+    LIMIT $4;
+  `;
+
+  const [
+    monthlyTrendResult,
+    salesByCityResult,
+    salesByPointOfSaleResult,
+    salesByWarehouseResult,
+    paretoProductsResult,
+    marginByProductResult,
+    heatmapResult,
+    stockCoverageResult,
+    receivablesBucketsResult,
+    overdueCustomersResult,
+    expensesByCategoryResult,
+    latestForecasts
+  ] = await Promise.all([
+    pool.query(monthlyTrendQuery, baseValues),
+    pool.query(salesByCityQuery, [...baseValues, topLimit]),
+    pool.query(salesByPointOfSaleQuery, [...baseValues, topLimit]),
+    pool.query(salesByWarehouseQuery, baseValues),
+    pool.query(paretoProductsQuery, [...baseValues, topLimit]),
+    pool.query(marginByProductQuery, [...baseValues, topLimit]),
+    pool.query(heatmapQuery, [...baseValues, Math.min(topLimit, 10), Math.min(topLimit, 8)]),
+    pool.query(stockCoverageQuery, [...baseValues, topLimit]),
+    pool.query(receivablesBucketsQuery, baseValues),
+    pool.query(overdueCustomersQuery, [...baseValues, topLimit]),
+    pool.query(expensesByCategoryQuery, [...baseValues, topLimit]),
+    getAIForecasts({ scenario_label: "baseline", limit: 20 })
+  ]);
+
+  const latestSalesForecast =
+    latestForecasts.find((row) => row.forecast_domain === "sales") || null;
+  const monthlyForecastAmount = latestSalesForecast
+    ? roundAmount(
+        latestSalesForecast.forecast_payload?.monthly_average_sales ??
+          latestSalesForecast.projected_value
+      )
+    : null;
+
+  const monthlyTrend = monthlyTrendResult.rows.map((row) => ({
+    ...row,
+    invoiced_amount: roundAmount(row.invoiced_amount),
+    payments_received: roundAmount(row.payments_received),
+    expenses_amount: roundAmount(row.expenses_amount),
+    net_sales_amount: roundAmount(row.net_sales_amount),
+    cogs_amount: roundAmount(row.cogs_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    ai_sales_forecast_amount: monthlyForecastAmount
+  }));
+
+  const totalSalesBase = monthlyTrend.reduce(
+    (sum, row) => sum + Number(row.invoiced_amount || 0),
+    0
+  );
+  const heatmapCells = heatmapResult.rows.map((row) => normalizeHeatmapCellRow(row));
+  const heatmapProducts = [
+    ...new Map(
+      heatmapCells.map((row) => [
+        row.product_id,
+        {
+          product_id: row.product_id,
+          product_name: row.product_name,
+          category: row.category,
+          total_sales_amount: roundAmount(
+            heatmapCells
+              .filter((cell) => cell.product_id === row.product_id)
+              .reduce((sum, cell) => sum + Number(cell.total_sales_amount || 0), 0)
+          ),
+          total_quantity_sold: roundAmount(
+            heatmapCells
+              .filter((cell) => cell.product_id === row.product_id)
+              .reduce((sum, cell) => sum + Number(cell.total_quantity_sold || 0), 0)
+          )
+        }
+      ])
+    ).values()
+  ].sort((left, right) => right.total_sales_amount - left.total_sales_amount);
+  const heatmapCities = [
+    ...new Map(
+      heatmapCells.map((row) => [
+        row.city,
+        {
+          city: row.city,
+          total_sales_amount: roundAmount(
+            heatmapCells
+              .filter((cell) => cell.city === row.city)
+              .reduce((sum, cell) => sum + Number(cell.total_sales_amount || 0), 0)
+          ),
+          total_quantity_sold: roundAmount(
+            heatmapCells
+              .filter((cell) => cell.city === row.city)
+              .reduce((sum, cell) => sum + Number(cell.total_quantity_sold || 0), 0)
+          )
+        }
+      ])
+    ).values()
+  ].sort((left, right) => right.total_sales_amount - left.total_sales_amount);
+
+  const salesByCity = salesByCityResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalSalesBase)
+  );
+  const salesByPointOfSale = salesByPointOfSaleResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalSalesBase)
+  );
+  const salesByWarehouse = salesByWarehouseResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalSalesBase)
+  );
+  const paretoProducts = paretoProductsResult.rows.map((row) => ({
+    ...row,
+    total_quantity_sold: roundAmount(row.total_quantity_sold),
+    total_sales_amount: roundAmount(row.total_sales_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    cumulative_sales_share_percent: Number(row.cumulative_sales_share_percent || 0),
+    rank_order: Number(row.rank_order || 0)
+  }));
+  const marginByProduct = marginByProductResult.rows.map((row) => ({
+    ...row,
+    total_quantity_sold: roundAmount(row.total_quantity_sold),
+    total_sales_amount: roundAmount(row.total_sales_amount),
+    total_cogs_amount: roundAmount(row.total_cogs_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    allocated_expenses_amount: roundAmount(row.allocated_expenses_amount),
+    net_profit_estimate: roundAmount(row.net_profit_estimate),
+    net_margin_estimate_percent: Number(row.net_margin_estimate_percent || 0)
+  }));
+  const stockCoverage = stockCoverageResult.rows.map((row) => ({
+    ...row,
+    current_stock_quantity: roundAmount(row.current_stock_quantity),
+    sold_quantity: roundAmount(row.sold_quantity),
+    analysis_days: Number(row.analysis_days || 0),
+    avg_daily_sales: roundAmount(row.avg_daily_sales),
+    coverage_days:
+      row.coverage_days === null ? null : roundAmount(row.coverage_days),
+    alert_threshold: roundAmount(row.alert_threshold)
+  }));
+  const receivablesBucketsRow = receivablesBucketsResult.rows[0] || {};
+  const receivablesBuckets = [
+    { label: "Non echeu", key: "current_balance", amount: roundAmount(receivablesBucketsRow.current_balance) },
+    { label: "1-15 jours", key: "bucket_1_15", amount: roundAmount(receivablesBucketsRow.bucket_1_15) },
+    { label: "16-30 jours", key: "bucket_16_30", amount: roundAmount(receivablesBucketsRow.bucket_16_30) },
+    { label: "31-60 jours", key: "bucket_31_60", amount: roundAmount(receivablesBucketsRow.bucket_31_60) },
+    { label: "60+ jours", key: "bucket_60_plus", amount: roundAmount(receivablesBucketsRow.bucket_60_plus) }
+  ];
+  const overdueCustomers = overdueCustomersResult.rows.map((row) => ({
+    ...row,
+    open_invoices_count: Number(row.open_invoices_count || 0),
+    max_days_overdue: Number(row.max_days_overdue || 0),
+    total_balance_due: roundAmount(row.total_balance_due)
+  }));
+  const expensesByCategory = expensesByCategoryResult.rows.map((row) => ({
+    ...row,
+    expenses_count: Number(row.expenses_count || 0),
+    total_amount: roundAmount(row.total_amount)
+  }));
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      top_limit: topLimit,
+      expenses_scope_note:
+        warehouseId === null
+          ? "Les depenses sont lues au global sur la periode."
+          : "Le filtre depot s applique pleinement aux ventes, paiements et stocks. Les depenses restent globales tant qu elles ne sont pas encore affectees a un depot."
+    },
+    monthly_revenue_trend: monthlyTrend,
+    collections_vs_invoices_trend: monthlyTrend,
+    ai_forecast_vs_actual: {
+      forecast_label: latestSalesForecast?.forecast_type || null,
+      confidence_score: latestSalesForecast?.confidence_score
+        ? Number(latestSalesForecast.confidence_score)
+        : null,
+      rows: monthlyTrend
+    },
+    sales_by_city: salesByCity,
+    sales_by_point_of_sale: salesByPointOfSale,
+    sales_by_warehouse: salesByWarehouse,
+    product_pareto: paretoProducts,
+    net_margin_by_product: marginByProduct,
+    point_of_sale_map: salesByCity,
+    product_city_heatmap: {
+      products: heatmapProducts,
+      cities: heatmapCities,
+      cells: heatmapCells
+    },
+    stock_coverage: stockCoverage,
+    receivables_aging: {
+      summary: {
+        open_invoices_count: Number(receivablesBucketsRow.open_invoices_count || 0),
+        total_balance_due: roundAmount(receivablesBucketsRow.total_balance_due)
+      },
+      buckets: receivablesBuckets,
+      overdue_customers: overdueCustomers
+    },
+    expenses_by_category: expensesByCategory
   };
 }
 

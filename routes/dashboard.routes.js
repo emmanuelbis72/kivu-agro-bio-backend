@@ -2,9 +2,11 @@ import express from "express";
 import {
   getDashboardOverviewHandler,
   getAccountingDashboardOverviewHandler,
+  getExecutiveAnalyticsDashboardHandler,
   getGlobalStatsHandler,
   getStockVariationReportHandler,
   getCommercialDashboardHandler,
+  getCollectionsDashboardHandler,
   getAccountingGlobalStatsHandler,
   getAccountingMonthlyOverviewHandler,
   getAccountClassBalancesHandler,
@@ -23,7 +25,9 @@ import {
 const router = express.Router();
 
 router.get("/overview", getDashboardOverviewHandler);
+router.get("/executive-analytics", getExecutiveAnalyticsDashboardHandler);
 router.get("/commercial-overview", getCommercialDashboardHandler);
+router.get("/collections-overview", getCollectionsDashboardHandler);
 router.get("/accounting-overview", getAccountingDashboardOverviewHandler);
 router.get("/stock-variations-report", getStockVariationReportHandler);
 
