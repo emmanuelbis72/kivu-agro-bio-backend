@@ -958,7 +958,13 @@ function buildEnterpriseHighlights({
     cashSummary
       ? `Tresorerie: base cash ${round2(
           cashSummary.summary.current_cash_base
-        )} USD, projection J+30 ${round2(
+        )} USD (caisse ${round2(
+          cashSummary.summary.cash_on_hand_base
+        )}, banque ${round2(
+          cashSummary.summary.bank_base
+        )}, mobile money ${round2(
+          cashSummary.summary.mobile_money_base
+        )}), projection J+30 ${round2(
           predictiveSignals.projected_cash_balance_j30
         )} USD, dettes fournisseurs ouvertes ${round2(
           cashSummary.summary.open_payables
@@ -1009,6 +1015,9 @@ function buildFallbackReasoningMetrics(contextData = {}) {
     total_receivables: round2(executive.total_receivables),
     gross_margin_percent: round2(executive.gross_margin_percent),
     current_cash_base: round2(treasury.current_cash_base),
+    cash_on_hand_base: round2(treasury.cash_on_hand_base),
+    bank_base: round2(treasury.bank_base),
+    mobile_money_base: round2(treasury.mobile_money_base),
     overdue_receivables: round2(treasury.overdue_receivables),
     open_payables: round2(treasury.open_payables),
     projected_cash_balance_j30: round2(predictive.projected_cash_balance_j30),
@@ -1373,6 +1382,13 @@ async function buildReasoningContextData(
   const executiveSnapshot = {
     ...summarizedGlobalStats,
     current_cash_base: round2(summarizedCashForecast?.summary?.current_cash_base),
+    cash_on_hand_base: round2(
+      summarizedCashForecast?.summary?.cash_on_hand_base
+    ),
+    bank_base: round2(summarizedCashForecast?.summary?.bank_base),
+    mobile_money_base: round2(
+      summarizedCashForecast?.summary?.mobile_money_base
+    ),
     open_payables: round2(summarizedCashForecast?.summary?.open_payables),
     projected_cash_balance_j30: round2(
       predictiveSignals.projected_cash_balance_j30

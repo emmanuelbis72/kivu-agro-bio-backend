@@ -136,7 +136,7 @@ async function resolvePostableAccount(accountNumber) {
   return account;
 }
 
-async function resolveCustomerReceivableAccount(customerId, overrides = {}) {
+async function resolveDefaultCustomerReceivableAccount(overrides = {}) {
   const overrideAccount = await resolvePostableAccount(
     overrides.customer_account_number || null
   );
@@ -145,6 +145,28 @@ async function resolveCustomerReceivableAccount(customerId, overrides = {}) {
     return overrideAccount;
   }
 
+  const envAccount = await resolvePostableAccount(
+    process.env.ACCOUNTING_CUSTOMER_ACCOUNT_NUMBER || null
+  );
+
+  if (envAccount) {
+    return envAccount;
+  }
+
+  const preferredAccounts = ["411100", "411000", "411200"];
+
+  for (const accountNumber of preferredAccounts) {
+    const account = await resolvePostableAccount(accountNumber);
+
+    if (account) {
+      return account;
+    }
+  }
+
+  return null;
+}
+
+async function resolveCustomerReceivableAccount(customerId, overrides = {}) {
   const customer = await getCustomerById(customerId);
   const customerAccount = await resolvePostableAccountById(
     customer?.receivable_account_id || null
@@ -154,9 +176,7 @@ async function resolveCustomerReceivableAccount(customerId, overrides = {}) {
     return customerAccount;
   }
 
-  return resolvePostableAccount(
-    process.env.ACCOUNTING_CUSTOMER_ACCOUNT_NUMBER || null
-  );
+  return resolveDefaultCustomerReceivableAccount(overrides);
 }
 
 async function resolveSupplierPayableAccount(supplierId, overrides = {}) {

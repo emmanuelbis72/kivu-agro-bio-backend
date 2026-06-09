@@ -10,6 +10,7 @@ import {
   getTopProducts,
   getTopCustomers,
   getCustomerBalanceBoard,
+  getExecutiveKpiSnapshot,
   getRecentInvoices,
   getRecentPayments,
   getExecutiveComparisonTimeline,
@@ -88,6 +89,7 @@ export async function getDashboardOverviewHandler(req, res, next) {
       stockAlerts,
       topProducts,
       topCustomers,
+      executiveKpiSnapshot,
       customerBalanceBoard,
       recentInvoices,
       recentPayments,
@@ -101,6 +103,7 @@ export async function getDashboardOverviewHandler(req, res, next) {
       getStockAlerts(),
       getTopProducts(topLimit),
       getTopCustomers(topLimit),
+      getExecutiveKpiSnapshot(),
       getCustomerBalanceBoard(),
       getRecentInvoices(recentLimit),
       getRecentPayments(recentLimit),
@@ -118,6 +121,7 @@ export async function getDashboardOverviewHandler(req, res, next) {
         stock_alerts: stockAlerts,
         top_products: topProducts,
         top_customers: topCustomers,
+        executive_kpi_snapshot: executiveKpiSnapshot,
         customer_balance_board: customerBalanceBoard,
         recent_invoices: recentInvoices,
         recent_payments: recentPayments,
@@ -426,7 +430,27 @@ export async function getCommercialDashboardHandler(req, res, next) {
   try {
     const periodDays = parsePositiveDaysWindow(req.query.days, 365, 3650);
     const topLimit = parsePositiveLimit(req.query.top_limit, 10, 50);
-    const dashboard = await getCommercialDashboard(periodDays, topLimit);
+    const heatmapFilters = {
+      days: parsePositiveDaysWindow(
+        req.query.heatmap_days,
+        periodDays,
+        3650
+      ),
+      warehouseId: parsePositiveInteger(req.query.heatmap_warehouse_id),
+      chainName: req.query.heatmap_chain_name
+        ? String(req.query.heatmap_chain_name).trim()
+        : null,
+      salesChannel: req.query.heatmap_sales_channel
+        ? String(req.query.heatmap_sales_channel).trim()
+        : null,
+      topProducts: parsePositiveLimit(req.query.heatmap_top_products, topLimit, 20),
+      topCities: parsePositiveLimit(req.query.heatmap_top_cities, topLimit, 20)
+    };
+    const dashboard = await getCommercialDashboard(
+      periodDays,
+      topLimit,
+      heatmapFilters
+    );
 
     return res.status(200).json({
       success: true,

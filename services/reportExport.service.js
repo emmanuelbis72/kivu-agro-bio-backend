@@ -15,6 +15,73 @@ function formatMoney(value) {
   return `${sign}${groupedInteger},${decimalPart} $US`;
 }
 
+function buildTreasurySummaryItems(summary = {}) {
+  const items = [
+    {
+      label: "Base cash observee",
+      value: formatMoney(summary.current_cash_base),
+      rawValue: summary.current_cash_base,
+      type: "money"
+    },
+    {
+      label: "Caisse",
+      value: formatMoney(summary.cash_on_hand_base),
+      rawValue: summary.cash_on_hand_base,
+      type: "money"
+    },
+    {
+      label: "Banque",
+      value: formatMoney(summary.bank_base),
+      rawValue: summary.bank_base,
+      type: "money"
+    },
+    {
+      label: "Mobile money",
+      value: formatMoney(summary.mobile_money_base),
+      rawValue: summary.mobile_money_base,
+      type: "money"
+    }
+  ];
+
+  if (Math.abs(Number(summary.other_treasury_base || 0)) > 0.004) {
+    items.push({
+      label: "Autres canaux",
+      value: formatMoney(summary.other_treasury_base),
+      rawValue: summary.other_treasury_base,
+      type: "money"
+    });
+  }
+
+  items.push(
+    {
+      label: "Creances ouvertes",
+      value: formatMoney(summary.open_receivables),
+      rawValue: summary.open_receivables,
+      type: "money"
+    },
+    {
+      label: "Dettes fournisseurs",
+      value: formatMoney(summary.open_payables),
+      rawValue: summary.open_payables,
+      type: "money"
+    },
+    {
+      label: "Creances echues",
+      value: formatMoney(summary.overdue_receivables),
+      rawValue: summary.overdue_receivables,
+      type: "money"
+    },
+    {
+      label: "Dettes echues",
+      value: formatMoney(summary.overdue_payables),
+      rawValue: summary.overdue_payables,
+      type: "money"
+    }
+  );
+
+  return items;
+}
+
 function formatDate(value) {
   if (!value) {
     return "-";
@@ -676,38 +743,7 @@ export async function createCashForecastPdfBuffer(forecast, options = {}) {
     const summary = forecast.summary || {};
     currentY = drawPdfSummaryBlock(
       doc,
-      [
-        {
-          label: "Base cash observee",
-          value: formatMoney(summary.current_cash_base),
-          rawValue: summary.current_cash_base,
-          type: "money"
-        },
-        {
-          label: "Creances ouvertes",
-          value: formatMoney(summary.open_receivables),
-          rawValue: summary.open_receivables,
-          type: "money"
-        },
-        {
-          label: "Dettes fournisseurs",
-          value: formatMoney(summary.open_payables),
-          rawValue: summary.open_payables,
-          type: "money"
-        },
-        {
-          label: "Creances echues",
-          value: formatMoney(summary.overdue_receivables),
-          rawValue: summary.overdue_receivables,
-          type: "money"
-        },
-        {
-          label: "Dettes echues",
-          value: formatMoney(summary.overdue_payables),
-          rawValue: summary.overdue_payables,
-          type: "money"
-        }
-      ],
+      buildTreasurySummaryItems(summary),
       currentY
     );
 
@@ -798,38 +834,7 @@ export async function createCashForecastXlsxBuffer(forecast, options = {}) {
 
   let currentRow = addSummaryWorksheetSection(
     summarySheet,
-    [
-      {
-        label: "Base cash observee",
-        value: formatMoney(forecast.summary?.current_cash_base),
-        rawValue: forecast.summary?.current_cash_base,
-        type: "money"
-      },
-      {
-        label: "Creances ouvertes",
-        value: formatMoney(forecast.summary?.open_receivables),
-        rawValue: forecast.summary?.open_receivables,
-        type: "money"
-      },
-      {
-        label: "Dettes ouvertes",
-        value: formatMoney(forecast.summary?.open_payables),
-        rawValue: forecast.summary?.open_payables,
-        type: "money"
-      },
-      {
-        label: "Creances echues",
-        value: formatMoney(forecast.summary?.overdue_receivables),
-        rawValue: forecast.summary?.overdue_receivables,
-        type: "money"
-      },
-      {
-        label: "Dettes echues",
-        value: formatMoney(forecast.summary?.overdue_payables),
-        rawValue: forecast.summary?.overdue_payables,
-        type: "money"
-      }
-    ],
+    buildTreasurySummaryItems(forecast.summary || {}),
     5
   );
 

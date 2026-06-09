@@ -1,15 +1,312 @@
 import { pool } from "../config/db.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 import { ensurePurchaseInvoicesSchema } from "./purchaseInvoice.model.js";
+import {
+  getBusinessRulesMap,
+  getMonthlyRevenueTargets
+} from "../services/ai/businessRules.service.js";
+import { getAIForecasts } from "./ai/forecast.model.js";
 
 function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function computeMarginPercent(baseAmount, comparedAmount) {
+  const base = Number(baseAmount || 0);
+
+  if (base <= 0) {
+    return 0;
+  }
+
+  return roundAmount((Number(comparedAmount || 0) / base) * 100);
+}
+
+function normalizeExecutivePeriodRow(row = {}) {
+  const invoicedAmount = roundAmount(row.invoiced_amount);
+  const netSalesAmount = roundAmount(row.net_sales_amount);
+  const cogsAmount = roundAmount(row.cogs_amount);
+  const grossProfitAmount = roundAmount(row.gross_profit_amount);
+  const paymentsReceived = roundAmount(row.payments_received);
+  const expensesAmount = roundAmount(row.expenses_amount);
+  const netProfitEstimate = roundAmount(grossProfitAmount - expensesAmount);
+
+  return {
+    period_key: row.period_key,
+    start_date: row.start_date,
+    end_date: row.end_date,
+    span_days: Number(row.span_days || 0),
+    total_invoices: Number(row.total_invoices || 0),
+    payments_count: Number(row.payments_count || 0),
+    expenses_count: Number(row.expenses_count || 0),
+    invoiced_amount: invoicedAmount,
+    net_sales_amount: netSalesAmount,
+    cogs_amount: cogsAmount,
+    gross_profit_amount: grossProfitAmount,
+    gross_margin_percent: computeMarginPercent(netSalesAmount, grossProfitAmount),
+    payments_received: paymentsReceived,
+    expenses_amount: expensesAmount,
+    net_profit_estimate: netProfitEstimate,
+    net_margin_percent: computeMarginPercent(netSalesAmount, netProfitEstimate)
+  };
+}
+
+function buildExecutivePeriodComparison(currentPeriod = {}, referencePeriod = {}) {
+  const currentInvoiced = Number(currentPeriod.invoiced_amount || 0);
+  const referenceInvoiced = Number(referencePeriod.invoiced_amount || 0);
+  const currentPayments = Number(currentPeriod.payments_received || 0);
+  const referencePayments = Number(referencePeriod.payments_received || 0);
+  const currentGrossProfit = Number(currentPeriod.gross_profit_amount || 0);
+  const referenceGrossProfit = Number(referencePeriod.gross_profit_amount || 0);
+  const currentNetProfit = Number(currentPeriod.net_profit_estimate || 0);
+  const referenceNetProfit = Number(referencePeriod.net_profit_estimate || 0);
+
+  return {
+    current_period: currentPeriod,
+    reference_period: referencePeriod,
+    invoiced_delta: roundAmount(currentInvoiced - referenceInvoiced),
+    invoiced_delta_percent: computeMarginPercent(
+      referenceInvoiced,
+      currentInvoiced - referenceInvoiced
+    ),
+    payments_delta: roundAmount(currentPayments - referencePayments),
+    payments_delta_percent: computeMarginPercent(
+      referencePayments,
+      currentPayments - referencePayments
+    ),
+    gross_profit_delta: roundAmount(currentGrossProfit - referenceGrossProfit),
+    gross_profit_delta_percent: computeMarginPercent(
+      referenceGrossProfit,
+      currentGrossProfit - referenceGrossProfit
+    ),
+    net_profit_delta: roundAmount(currentNetProfit - referenceNetProfit),
+    net_profit_delta_percent: computeMarginPercent(
+      referenceNetProfit,
+      currentNetProfit - referenceNetProfit
+    )
+  };
+}
+
+function resolveMonthlyRevenueTargetForDate(targets = {}, referenceDate = new Date()) {
+  const currentMinimum = Number(
+    targets.current_minimum_monthly_received_payments_usd || 0
+  );
+  const fromJuly = Number(
+    targets.target_from_july_2026_monthly_received_payments_usd ||
+      currentMinimum
+  );
+  const byDecember = Number(
+    targets.target_by_december_2026_monthly_received_payments_usd || fromJuly
+  );
+
+  const year = referenceDate.getUTCFullYear();
+  const month = referenceDate.getUTCMonth() + 1;
+
+  if (year > 2026 || (year === 2026 && month >= 12)) {
+    return {
+      label: "Objectif mensuel cible",
+      value: byDecember
+    };
+  }
+
+  if (year === 2026 && month >= 7) {
+    return {
+      label: "Objectif mensuel a partir de juillet 2026",
+      value: fromJuly
+    };
+  }
+
+  return {
+    label: "Objectif mensuel minimum",
+    value: currentMinimum
+  };
+}
+
+function buildCustomerChainExpression(alias = "c") {
+  return `
+    COALESCE(
+      NULLIF(TRIM(${alias}.chain_name), ''),
+      CASE
+        WHEN UPPER(COALESCE(${alias}.business_name, '')) LIKE '%GG MART%'
+          OR UPPER(COALESCE(${alias}.business_name, '')) LIKE '%GGMART%'
+          THEN 'GG MART'
+        WHEN UPPER(COALESCE(${alias}.business_name, '')) LIKE '%CARREFOUR%'
+          THEN 'CARREFOUR'
+        WHEN UPPER(COALESCE(${alias}.business_name, '')) LIKE '%SWISSMART%'
+          THEN 'SWISSMART'
+        WHEN UPPER(COALESCE(${alias}.business_name, '')) LIKE '%CITY MARKET%'
+          THEN 'CITY MARKET'
+        WHEN UPPER(COALESCE(${alias}.business_name, '')) LIKE '%REGAL%'
+          THEN 'REGAL'
+        WHEN UPPER(COALESCE(${alias}.business_name, '')) LIKE '%SK %'
+          OR UPPER(COALESCE(${alias}.business_name, '')) LIKE 'SK %'
+          OR UPPER(COALESCE(${alias}.business_name, '')) LIKE '% SK'
+          THEN 'SK'
+        ELSE COALESCE(NULLIF(TRIM(${alias}.business_name), ''), 'Sans chaine')
+      END
+    )
+  `;
+}
+
+function buildCustomerChannelExpression(alias = "c") {
+  return `
+    COALESCE(
+      NULLIF(TRIM(${alias}.sales_channel), ''),
+      CASE
+        WHEN LOWER(COALESCE(${alias}.customer_type, '')) = 'supermarket'
+          THEN 'Supermarches'
+        WHEN LOWER(COALESCE(${alias}.customer_type, '')) = 'pharmacy'
+          THEN 'Pharmacies'
+        WHEN LOWER(COALESCE(${alias}.customer_type, '')) IN ('distributor', 'wholesale')
+          THEN 'Distribution B2B'
+        WHEN LOWER(COALESCE(${alias}.customer_type, '')) = 'retail'
+          THEN 'Vente directe'
+        ELSE 'Autres'
+      END
+    )
+  `;
+}
+
+function normalizeCommercialAggregateRow(row = {}, totalSalesBase = 0) {
+  const totalSalesAmount = roundAmount(row.total_sales_amount);
+  const totalCollectedAmount = roundAmount(row.total_collected_amount);
+  const totalReceivables = roundAmount(row.total_receivables);
+  const totalCogsAmount = roundAmount(row.total_cogs_amount);
+  const grossProfitAmount = roundAmount(row.gross_profit_amount);
+
+  return {
+    ...row,
+    total_invoices:
+      row.total_invoices === undefined ? undefined : Number(row.total_invoices || 0),
+    total_customers:
+      row.total_customers === undefined ? undefined : Number(row.total_customers || 0),
+    total_sales_amount: totalSalesAmount,
+    total_collected_amount:
+      row.total_collected_amount === undefined ? undefined : totalCollectedAmount,
+    total_receivables:
+      row.total_receivables === undefined ? undefined : totalReceivables,
+    total_cogs_amount:
+      row.total_cogs_amount === undefined ? undefined : totalCogsAmount,
+    gross_profit_amount:
+      row.gross_profit_amount === undefined ? undefined : grossProfitAmount,
+    collection_rate_percent:
+      row.total_collected_amount === undefined
+        ? undefined
+        : row.collection_rate_percent === undefined || row.collection_rate_percent === null
+        ? computeMarginPercent(totalSalesAmount, totalCollectedAmount)
+        : Number(row.collection_rate_percent || 0),
+    gross_margin_percent:
+      row.gross_profit_amount === undefined
+        ? undefined
+        : row.gross_margin_percent === undefined || row.gross_margin_percent === null
+        ? computeMarginPercent(totalSalesAmount, grossProfitAmount)
+        : Number(row.gross_margin_percent || 0),
+    sales_share_percent:
+      row.total_sales_amount === undefined
+        ? undefined
+        : computeMarginPercent(totalSalesBase, totalSalesAmount)
+  };
+}
+
+function normalizeHeatmapCellRow(row = {}) {
+  const totalSalesAmount = roundAmount(row.total_sales_amount);
+  const grossProfitAmount = roundAmount(row.gross_profit_amount);
+
+  return {
+    ...row,
+    total_invoices: Number(row.total_invoices || 0),
+    total_quantity_sold: roundAmount(row.total_quantity_sold),
+    total_sales_amount: totalSalesAmount,
+    gross_profit_amount: grossProfitAmount,
+    gross_margin_percent: Number(row.gross_margin_percent || 0),
+    sales_share_in_product_percent: Number(
+      row.sales_share_in_product_percent || 0
+    ),
+    sales_share_in_city_percent: Number(row.sales_share_in_city_percent || 0)
+  };
+}
+
+function buildCommercialHeatmapFilterBindings(
+  filters = {},
+  invoiceAlias = "i",
+  customerAlias = "ce",
+  startIndex = 2
+) {
+  const values = [];
+  const conditions = [];
+  let parameterIndex = startIndex;
+
+  if (filters.warehouseId) {
+    values.push(filters.warehouseId);
+    conditions.push(`${invoiceAlias}.warehouse_id = $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.chainName) {
+    values.push(filters.chainName);
+    conditions.push(`${customerAlias}.chain_name_resolved = $${parameterIndex}`);
+    parameterIndex += 1;
+  }
+
+  if (filters.salesChannel) {
+    values.push(filters.salesChannel);
+    conditions.push(
+      `${customerAlias}.sales_channel_resolved = $${parameterIndex}`
+    );
+    parameterIndex += 1;
+  }
+
+  return {
+    values,
+    clause: conditions.length ? `AND ${conditions.join(" AND ")}` : "",
+    nextParameterIndex: parameterIndex
+  };
+}
+
+function normalizePositiveWholeNumber(value, defaultValue, maxValue) {
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return defaultValue;
+  }
+
+  return Math.min(parsed, maxValue);
+}
+
+function normalizeOptionalPositiveWholeNumber(value, maxValue) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return Math.min(parsed, maxValue);
+}
+
+function normalizeOptionalTextFilter(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const normalized = String(value).trim();
+  return normalized || null;
 }
 
 async function ensureDashboardSchema(executor = pool) {
   await executor.query(`
     ALTER TABLE products
     ADD COLUMN IF NOT EXISTS product_role VARCHAR(30) NOT NULL DEFAULT 'finished_product';
+  `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS chain_name VARCHAR(150);
+  `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS sales_channel VARCHAR(80);
   `);
   await executor.query(`
     ALTER TABLE stock_movements
@@ -401,6 +698,242 @@ export async function getSalesOverview() {
 
   const result = await pool.query(query);
   return result.rows;
+}
+
+export async function getExecutiveKpiSnapshot() {
+  const query = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    ),
+    periods AS (
+      SELECT *
+      FROM (
+        VALUES
+          ('day', CURRENT_DATE, CURRENT_DATE),
+          ('week', DATE_TRUNC('week', CURRENT_DATE)::date, CURRENT_DATE),
+          ('month', DATE_TRUNC('month', CURRENT_DATE)::date, CURRENT_DATE),
+          (
+            'previous_month_to_date',
+            (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month')::date,
+            (
+              (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month')::date
+              + (CURRENT_DATE - DATE_TRUNC('month', CURRENT_DATE)::date) * INTERVAL '1 day'
+            )::date
+          ),
+          (
+            'same_month_last_year_to_date',
+            (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 year')::date,
+            (
+              (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 year')::date
+              + (CURRENT_DATE - DATE_TRUNC('month', CURRENT_DATE)::date) * INTERVAL '1 day'
+            )::date
+          ),
+          (
+            'current_month_full',
+            DATE_TRUNC('month', CURRENT_DATE)::date,
+            (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day')::date
+          )
+      ) AS period_values(period_key, start_date, end_date)
+    )
+    SELECT
+      p.period_key,
+      p.start_date,
+      p.end_date,
+      (p.end_date - p.start_date + 1)::int AS span_days,
+      COALESCE((
+        SELECT COUNT(*)::int
+        FROM invoices i
+        WHERE i.status IN ('issued', 'partial', 'paid')
+          AND i.invoice_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS total_invoices,
+      COALESCE((
+        SELECT SUM(i.total_amount)
+        FROM invoices i
+        WHERE i.status IN ('issued', 'partial', 'paid')
+          AND i.invoice_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS invoiced_amount,
+      COALESCE((
+        SELECT SUM(i.total_amount - COALESCE(i.tax_amount, 0))
+        FROM invoices i
+        WHERE i.status IN ('issued', 'partial', 'paid')
+          AND i.invoice_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS net_sales_amount,
+      COALESCE((
+        SELECT SUM(COALESCE(ic.total_cogs_amount, 0))
+        FROM invoices i
+        LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+        WHERE i.status IN ('issued', 'partial', 'paid')
+          AND i.invoice_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS cogs_amount,
+      COALESCE((
+        SELECT SUM(
+          (i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)
+        )
+        FROM invoices i
+        LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+        WHERE i.status IN ('issued', 'partial', 'paid')
+          AND i.invoice_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS gross_profit_amount,
+      COALESCE((
+        SELECT COUNT(*)::int
+        FROM payments py
+        WHERE py.payment_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS payments_count,
+      COALESCE((
+        SELECT SUM(py.amount)
+        FROM payments py
+        WHERE py.payment_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS payments_received,
+      COALESCE((
+        SELECT COUNT(*)::int
+        FROM expenses e
+        WHERE e.expense_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS expenses_count,
+      COALESCE((
+        SELECT SUM(e.amount)
+        FROM expenses e
+        WHERE e.expense_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS expenses_amount
+    FROM periods p
+    ORDER BY
+      CASE p.period_key
+        WHEN 'day' THEN 1
+        WHEN 'week' THEN 2
+        WHEN 'month' THEN 3
+        WHEN 'previous_month_to_date' THEN 4
+        WHEN 'same_month_last_year_to_date' THEN 5
+        WHEN 'current_month_full' THEN 6
+        ELSE 99
+      END;
+  `;
+
+  const [periodResult, globalStats, cashForecast, businessRules, forecasts] =
+    await Promise.all([
+      pool.query(query),
+      getGlobalStats(),
+      getCashForecast(6),
+      getBusinessRulesMap(),
+      getAIForecasts({ scenario_label: "baseline", limit: 20 })
+    ]);
+
+  const normalizedRows = periodResult.rows.map((row) =>
+    normalizeExecutivePeriodRow(row)
+  );
+  const periods = Object.fromEntries(
+    normalizedRows.map((row) => [row.period_key, row])
+  );
+
+  const currentMonth = periods.month || normalizeExecutivePeriodRow();
+  const previousMonthToDate =
+    periods.previous_month_to_date || normalizeExecutivePeriodRow();
+  const sameMonthLastYear =
+    periods.same_month_last_year_to_date || normalizeExecutivePeriodRow();
+  const fullMonth = periods.current_month_full || normalizeExecutivePeriodRow();
+
+  const referenceDate = new Date();
+  const revenueTargets = getMonthlyRevenueTargets(businessRules);
+  const monthlyTarget = resolveMonthlyRevenueTargetForDate(
+    revenueTargets,
+    referenceDate
+  );
+  const monthProgressRatio =
+    Number(fullMonth.span_days || 0) > 0
+      ? Number(currentMonth.span_days || 0) / Number(fullMonth.span_days || 1)
+      : 0;
+
+  const latestSalesForecast =
+    forecasts.find((row) => row.forecast_domain === "sales") || null;
+  const latestCashForecast =
+    forecasts.find((row) => row.forecast_domain === "cash") || null;
+
+  const monthlyRevenueTarget = roundAmount(monthlyTarget.value || 0);
+  const expectedCollectedToDate = roundAmount(
+    monthlyRevenueTarget * monthProgressRatio
+  );
+  const salesForecastFull = latestSalesForecast
+    ? roundAmount(latestSalesForecast.projected_value)
+    : null;
+  const cashForecastFull = latestCashForecast
+    ? roundAmount(latestCashForecast.projected_value)
+    : null;
+  const salesForecastToDate =
+    salesForecastFull === null
+      ? null
+      : roundAmount(salesForecastFull * monthProgressRatio);
+  const cashForecastToDate =
+    cashForecastFull === null
+      ? null
+      : roundAmount(cashForecastFull * monthProgressRatio);
+
+  return {
+    as_of_date: new Date().toISOString(),
+    current_cash_base: roundAmount(cashForecast?.summary?.current_cash_base || 0),
+    cash_on_hand_base: roundAmount(cashForecast?.summary?.cash_on_hand_base || 0),
+    bank_base: roundAmount(cashForecast?.summary?.bank_base || 0),
+    mobile_money_base: roundAmount(
+      cashForecast?.summary?.mobile_money_base || 0
+    ),
+    other_treasury_base: roundAmount(
+      cashForecast?.summary?.other_treasury_base || 0
+    ),
+    open_receivables: roundAmount(globalStats?.total_receivables || 0),
+    open_payables: roundAmount(cashForecast?.summary?.open_payables || 0),
+    periods: {
+      day: periods.day || null,
+      week: periods.week || null,
+      month: currentMonth
+    },
+    comparisons: {
+      month_vs_previous_month_to_date: buildExecutivePeriodComparison(
+        currentMonth,
+        previousMonthToDate
+      ),
+      month_vs_same_period_last_year: buildExecutivePeriodComparison(
+        currentMonth,
+        sameMonthLastYear
+      )
+    },
+    targets: {
+      monthly_revenue_target: monthlyRevenueTarget,
+      target_label: monthlyTarget.label,
+      month_progress_ratio: roundAmount(monthProgressRatio),
+      month_progress_percent: roundAmount(monthProgressRatio * 100),
+      expected_collected_to_date: expectedCollectedToDate,
+      actual_collected_to_date: roundAmount(currentMonth.payments_received),
+      collected_gap_to_target: roundAmount(
+        Number(currentMonth.payments_received || 0) - expectedCollectedToDate
+      ),
+      collected_achievement_percent: computeMarginPercent(
+        expectedCollectedToDate,
+        currentMonth.payments_received
+      )
+    },
+    forecasts: {
+      sales_30d_forecast: salesForecastFull,
+      sales_30d_forecast_to_date: salesForecastToDate,
+      actual_sales_to_date: roundAmount(currentMonth.invoiced_amount),
+      sales_gap_to_forecast:
+        salesForecastToDate === null
+          ? null
+          : roundAmount(
+              Number(currentMonth.invoiced_amount || 0) - salesForecastToDate
+            ),
+      cash_30d_forecast: cashForecastFull,
+      cash_30d_forecast_to_date: cashForecastToDate,
+      actual_cash_to_date: roundAmount(currentMonth.payments_received),
+      cash_gap_to_forecast:
+        cashForecastToDate === null
+          ? null
+          : roundAmount(
+              Number(currentMonth.payments_received || 0) - cashForecastToDate
+            )
+    }
+  };
 }
 
 export async function getExecutiveComparisonTimeline(months = 6) {
@@ -807,6 +1340,78 @@ export async function getAccountingHealthSnapshot() {
 export async function getCashForecast(detailLimit = 10) {
   await ensurePurchaseInvoicesSchema(pool);
 
+  const actualCashCte = `
+    actual_cash_flows AS (
+      SELECT
+        method_group,
+        COALESCE(SUM(customer_receipts), 0) AS customer_receipts,
+        COALESCE(SUM(supplier_payments), 0) AS supplier_payments,
+        COALESCE(SUM(expenses), 0) AS expenses
+      FROM (
+        SELECT
+          CASE
+            WHEN LOWER(TRIM(COALESCE(p.payment_method, 'unknown'))) IN ('cash', 'mobile_money', 'bank_transfer')
+              THEN LOWER(TRIM(COALESCE(p.payment_method, 'unknown')))
+            ELSE 'other'
+          END AS method_group,
+          SUM(COALESCE(p.amount, 0)) AS customer_receipts,
+          0::numeric AS supplier_payments,
+          0::numeric AS expenses
+        FROM payments p
+        GROUP BY 1
+
+        UNION ALL
+
+        SELECT
+          CASE
+            WHEN LOWER(TRIM(COALESCE(sp.payment_method, 'unknown'))) IN ('cash', 'mobile_money', 'bank_transfer')
+              THEN LOWER(TRIM(COALESCE(sp.payment_method, 'unknown')))
+            ELSE 'other'
+          END AS method_group,
+          0::numeric AS customer_receipts,
+          SUM(COALESCE(sp.amount, 0)) AS supplier_payments,
+          0::numeric AS expenses
+        FROM supplier_payments sp
+        GROUP BY 1
+
+        UNION ALL
+
+        SELECT
+          CASE
+            WHEN LOWER(TRIM(COALESCE(e.payment_method, 'unknown'))) IN ('cash', 'mobile_money', 'bank_transfer')
+              THEN LOWER(TRIM(COALESCE(e.payment_method, 'unknown')))
+            ELSE 'other'
+          END AS method_group,
+          0::numeric AS customer_receipts,
+          0::numeric AS supplier_payments,
+          SUM(COALESCE(e.amount, 0)) AS expenses
+        FROM expenses e
+        GROUP BY 1
+      ) cash_flows
+      GROUP BY method_group
+    ),
+    actual_cash AS (
+      SELECT
+        COALESCE(SUM(customer_receipts), 0) AS total_customer_receipts,
+        COALESCE(SUM(supplier_payments), 0) AS total_supplier_payments,
+        COALESCE(SUM(expenses), 0) AS total_expenses,
+        COALESCE(SUM(customer_receipts - supplier_payments - expenses) FILTER (
+          WHERE method_group = 'cash'
+        ), 0) AS cash_on_hand_base,
+        COALESCE(SUM(customer_receipts - supplier_payments - expenses) FILTER (
+          WHERE method_group = 'bank_transfer'
+        ), 0) AS bank_base,
+        COALESCE(SUM(customer_receipts - supplier_payments - expenses) FILTER (
+          WHERE method_group = 'mobile_money'
+        ), 0) AS mobile_money_base,
+        COALESCE(SUM(customer_receipts - supplier_payments - expenses) FILTER (
+          WHERE method_group = 'other'
+        ), 0) AS other_treasury_base,
+        COALESCE(SUM(customer_receipts - supplier_payments - expenses), 0) AS current_cash_base
+      FROM actual_cash_flows
+    )
+  `;
+
   const summaryQuery = `
     WITH receivables AS (
       SELECT
@@ -876,12 +1481,7 @@ export async function getCashForecast(detailLimit = 10) {
         ), 0) AS undated_payables
       FROM purchase_invoices pi
     ),
-    actual_cash AS (
-      SELECT
-        COALESCE((SELECT SUM(amount) FROM payments), 0) AS total_customer_receipts,
-        COALESCE((SELECT SUM(amount) FROM supplier_payments), 0) AS total_supplier_payments,
-        COALESCE((SELECT SUM(amount) FROM expenses), 0) AS total_expenses
-    )
+    ${actualCashCte}
     SELECT
       r.open_receivable_invoices,
       r.open_receivables,
@@ -898,23 +1498,19 @@ export async function getCashForecast(detailLimit = 10) {
       a.total_customer_receipts,
       a.total_supplier_payments,
       a.total_expenses,
-      (
-        a.total_customer_receipts
-        - a.total_supplier_payments
-        - a.total_expenses
-      ) AS current_cash_base
+      a.cash_on_hand_base,
+      a.bank_base,
+      a.mobile_money_base,
+      a.other_treasury_base,
+      a.current_cash_base
     FROM receivables r
     CROSS JOIN payables p
     CROSS JOIN actual_cash a;
   `;
 
   const horizonsQuery = `
-    WITH actual_cash AS (
-      SELECT
-        COALESCE((SELECT SUM(amount) FROM payments), 0) AS total_customer_receipts,
-        COALESCE((SELECT SUM(amount) FROM supplier_payments), 0) AS total_supplier_payments,
-        COALESCE((SELECT SUM(amount) FROM expenses), 0) AS total_expenses
-    ),
+    WITH
+    ${actualCashCte},
     horizons(days) AS (
       VALUES (7), (30), (60)
     )
@@ -1055,6 +1651,10 @@ export async function getCashForecast(detailLimit = 10) {
       total_customer_receipts: roundAmount(summary.total_customer_receipts),
       total_supplier_payments: roundAmount(summary.total_supplier_payments),
       total_expenses: roundAmount(summary.total_expenses),
+      cash_on_hand_base: roundAmount(summary.cash_on_hand_base),
+      bank_base: roundAmount(summary.bank_base),
+      mobile_money_base: roundAmount(summary.mobile_money_base),
+      other_treasury_base: roundAmount(summary.other_treasury_base),
       current_cash_base: roundAmount(summary.current_cash_base)
     },
     horizons: horizonsResult.rows.map((row) => ({
@@ -1082,18 +1682,86 @@ export async function getCashForecast(detailLimit = 10) {
   };
 }
 
-export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
+export async function getCommercialDashboard(
+  periodDays = 365,
+  topLimit = 10,
+  heatmapFilters = {}
+) {
   await ensureDashboardSchema(pool);
+  const resolvedPeriodDays = normalizePositiveWholeNumber(periodDays, 365, 3650);
+  const resolvedTopLimit = normalizePositiveWholeNumber(topLimit, 10, 50);
+  const defaultHeatmapDimensionLimit = Math.min(
+    Math.max(Number(resolvedTopLimit || 10), 6),
+    12
+  );
+  const normalizedHeatmapFilters = {
+    days: normalizePositiveWholeNumber(
+      heatmapFilters.days,
+      resolvedPeriodDays,
+      3650
+    ),
+    warehouseId: normalizeOptionalPositiveWholeNumber(
+      heatmapFilters.warehouseId,
+      1000000
+    ),
+    chainName: normalizeOptionalTextFilter(heatmapFilters.chainName),
+    salesChannel: normalizeOptionalTextFilter(heatmapFilters.salesChannel),
+    topProducts: normalizePositiveWholeNumber(
+      heatmapFilters.topProducts,
+      defaultHeatmapDimensionLimit,
+      20
+    ),
+    topCities: normalizePositiveWholeNumber(
+      heatmapFilters.topCities,
+      defaultHeatmapDimensionLimit,
+      20
+    )
+  };
+  const heatmapBestPairLimit = Math.min(
+    Math.max(
+      Math.max(
+        Number(normalizedHeatmapFilters.topProducts || 0),
+        Number(normalizedHeatmapFilters.topCities || 0)
+      ),
+      6
+    ),
+    15
+  );
+  const heatmapFilterBindings = buildCommercialHeatmapFilterBindings(
+    normalizedHeatmapFilters,
+    "i",
+    "ce",
+    2
+  );
+  const heatmapTopProductsParameter = heatmapFilterBindings.nextParameterIndex;
+  const heatmapTopCitiesParameter = heatmapTopProductsParameter + 1;
+  const heatmapBestPairsLimitParameter = heatmapFilterBindings.nextParameterIndex;
 
-  const summaryQuery = `
-    WITH invoice_cogs AS (
+  const invoiceCogsCte = `
+    invoice_cogs AS (
       SELECT
         ii.invoice_id,
         COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
       FROM invoice_items ii
       INNER JOIN products p ON p.id = ii.product_id
       GROUP BY ii.invoice_id
-    ),
+    )
+  `;
+
+  const customersEnrichedCte = `
+    customers_enriched AS (
+      SELECT
+        c.*,
+        ${buildCustomerChainExpression("c")} AS chain_name_resolved,
+        ${buildCustomerChannelExpression("c")} AS sales_channel_resolved
+      FROM customers c
+    )
+  `;
+
+  const summaryQuery = `
+    WITH
+      ${invoiceCogsCte},
+      ${customersEnrichedCte},
     filtered_invoices AS (
       SELECT
         i.id,
@@ -1104,10 +1772,12 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
         COALESCE(i.tax_amount, 0) AS tax_amount,
         COALESCE(i.paid_amount, 0) AS paid_amount,
         COALESCE(i.balance_due, 0) AS balance_due,
-        c.city AS customer_city,
+        ce.city AS customer_city,
+        ce.chain_name_resolved AS chain_name,
+        ce.sales_channel_resolved AS sales_channel,
         COALESCE(ic.total_cogs_amount, 0) AS total_cogs_amount
       FROM invoices i
-      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN customers_enriched ce ON ce.id = i.customer_id
       LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
       WHERE i.status IN ('issued', 'partial', 'paid')
         AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
@@ -1117,6 +1787,8 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
       COUNT(DISTINCT customer_id)::int AS active_customers,
       COUNT(DISTINCT warehouse_id)::int AS active_warehouses,
       COUNT(DISTINCT COALESCE(NULLIF(TRIM(customer_city), ''), 'Non renseignee'))::int AS active_cities,
+      COUNT(DISTINCT COALESCE(NULLIF(TRIM(chain_name), ''), 'Sans chaine'))::int AS active_chains,
+      COUNT(DISTINCT COALESCE(NULLIF(TRIM(sales_channel), ''), 'Autres'))::int AS active_channels,
       COALESCE(SUM(total_amount), 0) AS total_sales_amount,
       COALESCE(SUM(total_amount - tax_amount), 0) AS total_net_sales_amount,
       COALESCE(SUM(paid_amount), 0) AS total_collected_amount,
@@ -1210,14 +1882,7 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
   `;
 
   const salesByCityQuery = `
-    WITH invoice_cogs AS (
-      SELECT
-        ii.invoice_id,
-        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
-      FROM invoice_items ii
-      INNER JOIN products p ON p.id = ii.product_id
-      GROUP BY ii.invoice_id
-    )
+    WITH ${invoiceCogsCte}
     SELECT
       COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS city,
       COUNT(i.id)::int AS total_invoices,
@@ -1229,7 +1894,25 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
       COALESCE(
         SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
         0
-      ) AS gross_profit_amount
+      ) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount), 0) > 0
+          THEN ROUND((COALESCE(SUM(i.paid_amount), 0) / COALESCE(SUM(i.total_amount), 0)) * 100, 2)
+        ELSE 0
+      END AS collection_rate_percent,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) > 0
+          THEN ROUND(
+            (
+              COALESCE(
+                SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+                0
+              ) / COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0)
+            ) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
@@ -1241,14 +1924,7 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
   `;
 
   const salesByWarehouseQuery = `
-    WITH invoice_cogs AS (
-      SELECT
-        ii.invoice_id,
-        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
-      FROM invoice_items ii
-      INNER JOIN products p ON p.id = ii.product_id
-      GROUP BY ii.invoice_id
-    )
+    WITH ${invoiceCogsCte}
     SELECT
       w.id AS warehouse_id,
       w.name AS warehouse_name,
@@ -1262,7 +1938,25 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
       COALESCE(
         SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
         0
-      ) AS gross_profit_amount
+      ) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount), 0) > 0
+          THEN ROUND((COALESCE(SUM(i.paid_amount), 0) / COALESCE(SUM(i.total_amount), 0)) * 100, 2)
+        ELSE 0
+      END AS collection_rate_percent,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) > 0
+          THEN ROUND(
+            (
+              COALESCE(
+                SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+                0
+              ) / COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0)
+            ) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
     FROM warehouses w
     LEFT JOIN invoices i
       ON i.warehouse_id = w.id
@@ -1273,19 +1967,105 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
     ORDER BY total_sales_amount DESC, warehouse_name ASC;
   `;
 
-  const salesByCustomerQuery = `
-    WITH invoice_cogs AS (
-      SELECT
-        ii.invoice_id,
-        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
-      FROM invoice_items ii
-      INNER JOIN products p ON p.id = ii.product_id
-      GROUP BY ii.invoice_id
-    )
+  const salesByChainQuery = `
+    WITH
+      ${invoiceCogsCte},
+      ${customersEnrichedCte}
     SELECT
-      c.id AS customer_id,
-      c.business_name,
-      c.city,
+      ce.chain_name_resolved AS chain_name,
+      COUNT(i.id)::int AS total_invoices,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(i.balance_due), 0) AS total_receivables,
+      COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS total_cogs_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount), 0) > 0
+          THEN ROUND((COALESCE(SUM(i.paid_amount), 0) / COALESCE(SUM(i.total_amount), 0)) * 100, 2)
+        ELSE 0
+      END AS collection_rate_percent,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) > 0
+          THEN ROUND(
+            (
+              COALESCE(
+                SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+                0
+              ) / COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0)
+            ) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM customers_enriched ce
+    INNER JOIN invoices i ON i.customer_id = ce.id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    GROUP BY ce.chain_name_resolved
+    ORDER BY total_sales_amount DESC, chain_name ASC
+    LIMIT $2;
+  `;
+
+  const salesByChannelQuery = `
+    WITH
+      ${invoiceCogsCte},
+      ${customersEnrichedCte}
+    SELECT
+      ce.sales_channel_resolved AS sales_channel,
+      COUNT(i.id)::int AS total_invoices,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(i.balance_due), 0) AS total_receivables,
+      COALESCE(SUM(COALESCE(ic.total_cogs_amount, 0)), 0) AS total_cogs_amount,
+      COALESCE(
+        SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+        0
+      ) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount), 0) > 0
+          THEN ROUND((COALESCE(SUM(i.paid_amount), 0) / COALESCE(SUM(i.total_amount), 0)) * 100, 2)
+        ELSE 0
+      END AS collection_rate_percent,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) > 0
+          THEN ROUND(
+            (
+              COALESCE(
+                SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+                0
+              ) / COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0)
+            ) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM customers_enriched ce
+    INNER JOIN invoices i ON i.customer_id = ce.id
+    LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.status IN ('issued', 'partial', 'paid')
+      AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+    GROUP BY ce.sales_channel_resolved
+    ORDER BY total_sales_amount DESC, sales_channel ASC
+    LIMIT $2;
+  `;
+
+  const salesByCustomerQuery = `
+    WITH
+      ${invoiceCogsCte},
+      ${customersEnrichedCte}
+    SELECT
+      ce.id AS customer_id,
+      ce.business_name,
+      ce.city,
+      ce.customer_type,
+      ce.chain_name_resolved AS chain_name,
+      ce.sales_channel_resolved AS sales_channel,
       COUNT(i.id)::int AS total_invoices,
       MAX(i.invoice_date) AS last_invoice_date,
       COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
@@ -1295,13 +2075,37 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
       COALESCE(
         SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
         0
-      ) AS gross_profit_amount
-    FROM customers c
-    INNER JOIN invoices i ON i.customer_id = c.id
+      ) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount), 0) > 0
+          THEN ROUND((COALESCE(SUM(i.paid_amount), 0) / COALESCE(SUM(i.total_amount), 0)) * 100, 2)
+        ELSE 0
+      END AS collection_rate_percent,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) > 0
+          THEN ROUND(
+            (
+              COALESCE(
+                SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+                0
+              ) / COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0)
+            ) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM customers_enriched ce
+    INNER JOIN invoices i ON i.customer_id = ce.id
     LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
     WHERE i.status IN ('issued', 'partial', 'paid')
       AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
-    GROUP BY c.id, c.business_name, c.city
+    GROUP BY
+      ce.id,
+      ce.business_name,
+      ce.city,
+      ce.customer_type,
+      ce.chain_name_resolved,
+      ce.sales_channel_resolved
     ORDER BY total_sales_amount DESC, total_collected_amount DESC
     LIMIT $2;
   `;
@@ -1335,19 +2139,190 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
     LIMIT $2;
   `;
 
-  const topPayingCustomersQuery = `
-    WITH invoice_cogs AS (
+  const productCityHeatmapQuery = `
+    WITH
+      ${customersEnrichedCte},
+    product_city_base AS (
       SELECT
-        ii.invoice_id,
-        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+        p.id AS product_id,
+        p.name AS product_name,
+        p.category,
+        COALESCE(NULLIF(TRIM(ce.city), ''), 'Non renseignee') AS city,
+        COUNT(DISTINCT i.id)::int AS total_invoices,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity_sold,
+        COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
+        COALESCE(
+          SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))),
+          0
+        ) AS gross_profit_amount
       FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
       INNER JOIN products p ON p.id = ii.product_id
-      GROUP BY ii.invoice_id
+      INNER JOIN customers_enriched ce ON ce.id = i.customer_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+        ${heatmapFilterBindings.clause}
+      GROUP BY
+        p.id,
+        p.name,
+        p.category,
+        COALESCE(NULLIF(TRIM(ce.city), ''), 'Non renseignee')
+    ),
+    top_products AS (
+      SELECT
+        product_id,
+        product_name,
+        category,
+        COALESCE(SUM(total_sales_amount), 0) AS total_sales_amount,
+        COALESCE(SUM(total_quantity_sold), 0) AS total_quantity_sold,
+        COALESCE(SUM(gross_profit_amount), 0) AS gross_profit_amount
+      FROM product_city_base
+      GROUP BY product_id, product_name, category
+      ORDER BY total_sales_amount DESC, product_name ASC
+      LIMIT $${heatmapTopProductsParameter}
+    ),
+    top_cities AS (
+      SELECT
+        city,
+        COALESCE(SUM(total_sales_amount), 0) AS total_sales_amount,
+        COALESCE(SUM(total_quantity_sold), 0) AS total_quantity_sold,
+        COALESCE(SUM(gross_profit_amount), 0) AS gross_profit_amount
+      FROM product_city_base
+      GROUP BY city
+      ORDER BY total_sales_amount DESC, city ASC
+      LIMIT $${heatmapTopCitiesParameter}
+    ),
+    product_totals AS (
+      SELECT
+        product_id,
+        COALESCE(SUM(total_sales_amount), 0) AS product_sales_amount
+      FROM product_city_base
+      GROUP BY product_id
+    ),
+    city_totals AS (
+      SELECT
+        city,
+        COALESCE(SUM(total_sales_amount), 0) AS city_sales_amount
+      FROM product_city_base
+      GROUP BY city
+    ),
+    heatmap_cells AS (
+      SELECT
+        tp.product_id,
+        tp.product_name,
+        tp.category,
+        tc.city,
+        COALESCE(pcb.total_invoices, 0) AS total_invoices,
+        COALESCE(pcb.total_quantity_sold, 0) AS total_quantity_sold,
+        COALESCE(pcb.total_sales_amount, 0) AS total_sales_amount,
+        COALESCE(pcb.gross_profit_amount, 0) AS gross_profit_amount,
+        CASE
+          WHEN COALESCE(pcb.total_sales_amount, 0) > 0
+            THEN ROUND(
+              (COALESCE(pcb.gross_profit_amount, 0) / COALESCE(pcb.total_sales_amount, 0)) * 100,
+              2
+            )
+          ELSE 0
+        END AS gross_margin_percent,
+        CASE
+          WHEN COALESCE(pt.product_sales_amount, 0) > 0
+            THEN ROUND(
+              (COALESCE(pcb.total_sales_amount, 0) / COALESCE(pt.product_sales_amount, 0)) * 100,
+              2
+            )
+          ELSE 0
+        END AS sales_share_in_product_percent,
+        CASE
+          WHEN COALESCE(ct.city_sales_amount, 0) > 0
+            THEN ROUND(
+              (COALESCE(pcb.total_sales_amount, 0) / COALESCE(ct.city_sales_amount, 0)) * 100,
+              2
+            )
+          ELSE 0
+        END AS sales_share_in_city_percent
+      FROM top_products tp
+      CROSS JOIN top_cities tc
+      LEFT JOIN product_city_base pcb
+        ON pcb.product_id = tp.product_id
+       AND pcb.city = tc.city
+      LEFT JOIN product_totals pt ON pt.product_id = tp.product_id
+      LEFT JOIN city_totals ct ON ct.city = tc.city
     )
     SELECT
-      c.id AS customer_id,
-      c.business_name,
-      c.city,
+      product_id,
+      product_name,
+      category,
+      city,
+      total_invoices,
+      total_quantity_sold,
+      total_sales_amount,
+      gross_profit_amount,
+      gross_margin_percent,
+      sales_share_in_product_percent,
+      sales_share_in_city_percent
+    FROM heatmap_cells
+    ORDER BY product_name ASC, city ASC;
+  `;
+
+  const productCityBestPairsQuery = `
+    WITH
+      ${customersEnrichedCte},
+    product_city_base AS (
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.category,
+        COALESCE(NULLIF(TRIM(ce.city), ''), 'Non renseignee') AS city,
+        COUNT(DISTINCT i.id)::int AS total_invoices,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity_sold,
+        COALESCE(SUM(ii.line_total), 0) AS total_sales_amount,
+        COALESCE(
+          SUM(ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))),
+          0
+        ) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN products p ON p.id = ii.product_id
+      INNER JOIN customers_enriched ce ON ce.id = i.customer_id
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
+        ${heatmapFilterBindings.clause}
+      GROUP BY
+        p.id,
+        p.name,
+        p.category,
+        COALESCE(NULLIF(TRIM(ce.city), ''), 'Non renseignee')
+    )
+    SELECT
+      product_id,
+      product_name,
+      category,
+      city,
+      total_invoices,
+      total_quantity_sold,
+      total_sales_amount,
+      gross_profit_amount,
+      CASE
+        WHEN COALESCE(total_sales_amount, 0) > 0
+          THEN ROUND((COALESCE(gross_profit_amount, 0) / COALESCE(total_sales_amount, 0)) * 100, 2)
+        ELSE 0
+      END AS gross_margin_percent
+    FROM product_city_base
+    ORDER BY total_sales_amount DESC, total_quantity_sold DESC, product_name ASC, city ASC
+    LIMIT $${heatmapBestPairsLimitParameter};
+  `;
+
+  const topPayingCustomersQuery = `
+    WITH
+      ${invoiceCogsCte},
+      ${customersEnrichedCte}
+    SELECT
+      ce.id AS customer_id,
+      ce.business_name,
+      ce.city,
+      ce.customer_type,
+      ce.chain_name_resolved AS chain_name,
+      ce.sales_channel_resolved AS sales_channel,
       COUNT(i.id)::int AS total_invoices,
       MAX(i.invoice_date) AS last_invoice_date,
       COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
@@ -1357,13 +2332,37 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
       COALESCE(
         SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
         0
-      ) AS gross_profit_amount
-    FROM customers c
-    INNER JOIN invoices i ON i.customer_id = c.id
+      ) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount), 0) > 0
+          THEN ROUND((COALESCE(SUM(i.paid_amount), 0) / COALESCE(SUM(i.total_amount), 0)) * 100, 2)
+        ELSE 0
+      END AS collection_rate_percent,
+      CASE
+        WHEN COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) > 0
+          THEN ROUND(
+            (
+              COALESCE(
+                SUM((i.total_amount - COALESCE(i.tax_amount, 0)) - COALESCE(ic.total_cogs_amount, 0)),
+                0
+              ) / COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0)
+            ) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM customers_enriched ce
+    INNER JOIN invoices i ON i.customer_id = ce.id
     LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
     WHERE i.status IN ('issued', 'partial', 'paid')
       AND i.invoice_date >= CURRENT_DATE - ($1::int * INTERVAL '1 day')
-    GROUP BY c.id, c.business_name, c.city
+    GROUP BY
+      ce.id,
+      ce.business_name,
+      ce.city,
+      ce.customer_type,
+      ce.chain_name_resolved,
+      ce.sales_channel_resolved
     ORDER BY total_collected_amount DESC, total_sales_amount DESC, business_name ASC
     LIMIT $2;
   `;
@@ -1562,25 +2561,36 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
   `;
 
   const dormantClientsQuery = `
-    WITH customer_stats AS (
+    WITH
+      ${customersEnrichedCte},
+    customer_stats AS (
       SELECT
-        c.id AS customer_id,
-        c.business_name,
-        c.city,
+        ce.id AS customer_id,
+        ce.business_name,
+        ce.city,
+        ce.chain_name_resolved AS chain_name,
+        ce.sales_channel_resolved AS sales_channel,
         MAX(i.invoice_date) AS last_invoice_date,
         COUNT(i.id)::int AS total_invoices,
         COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
         COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
         COALESCE(SUM(i.balance_due), 0) AS total_receivables
-      FROM customers c
-      INNER JOIN invoices i ON i.customer_id = c.id
+      FROM customers_enriched ce
+      INNER JOIN invoices i ON i.customer_id = ce.id
       WHERE i.status IN ('issued', 'partial', 'paid')
-      GROUP BY c.id, c.business_name, c.city
+      GROUP BY
+        ce.id,
+        ce.business_name,
+        ce.city,
+        ce.chain_name_resolved,
+        ce.sales_channel_resolved
     )
     SELECT
       customer_id,
       business_name,
       city,
+      chain_name,
+      sales_channel,
       last_invoice_date,
       total_invoices,
       total_sales_amount,
@@ -1594,25 +2604,36 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
   `;
 
   const reactivationCandidatesQuery = `
-    WITH customer_stats AS (
+    WITH
+      ${customersEnrichedCte},
+    customer_stats AS (
       SELECT
-        c.id AS customer_id,
-        c.business_name,
-        c.city,
+        ce.id AS customer_id,
+        ce.business_name,
+        ce.city,
+        ce.chain_name_resolved AS chain_name,
+        ce.sales_channel_resolved AS sales_channel,
         MAX(i.invoice_date) AS last_invoice_date,
         COUNT(i.id)::int AS total_invoices,
         COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
         COALESCE(SUM(i.paid_amount), 0) AS total_collected_amount,
         COALESCE(SUM(i.balance_due), 0) AS total_receivables
-      FROM customers c
-      INNER JOIN invoices i ON i.customer_id = c.id
+      FROM customers_enriched ce
+      INNER JOIN invoices i ON i.customer_id = ce.id
       WHERE i.status IN ('issued', 'partial', 'paid')
-      GROUP BY c.id, c.business_name, c.city
+      GROUP BY
+        ce.id,
+        ce.business_name,
+        ce.city,
+        ce.chain_name_resolved,
+        ce.sales_channel_resolved
     )
     SELECT
       customer_id,
       business_name,
       city,
+      chain_name,
+      sales_channel,
       last_invoice_date,
       total_invoices,
       total_sales_amount,
@@ -1631,8 +2652,12 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
     monthlyTrendResult,
     salesByCityResult,
     salesByWarehouseResult,
+    salesByChainResult,
+    salesByChannelResult,
     salesByCustomerResult,
     salesByProductResult,
+    productCityHeatmapResult,
+    productCityBestPairsResult,
     topPayingCustomersResult,
     mostProfitableProductsResult,
     customerMonthlyTrendResult,
@@ -1640,26 +2665,147 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
     dormantClientsResult,
     reactivationCandidatesResult
   ] = await Promise.all([
-    pool.query(summaryQuery, [periodDays]),
+    pool.query(summaryQuery, [resolvedPeriodDays]),
     pool.query(monthlyTrendQuery),
-    pool.query(salesByCityQuery, [periodDays, topLimit]),
-    pool.query(salesByWarehouseQuery, [periodDays]),
-    pool.query(salesByCustomerQuery, [periodDays, topLimit]),
-    pool.query(salesByProductQuery, [periodDays, topLimit]),
-    pool.query(topPayingCustomersQuery, [periodDays, topLimit]),
-    pool.query(mostProfitableProductsQuery, [periodDays, topLimit]),
-    pool.query(customerMonthlyTrendQuery, [Math.min(topLimit, 5)]),
-    pool.query(decliningProductsQuery, [topLimit]),
-    pool.query(dormantClientsQuery, [45, topLimit]),
-    pool.query(reactivationCandidatesQuery, [topLimit])
+    pool.query(salesByCityQuery, [resolvedPeriodDays, resolvedTopLimit]),
+    pool.query(salesByWarehouseQuery, [resolvedPeriodDays]),
+    pool.query(salesByChainQuery, [resolvedPeriodDays, resolvedTopLimit]),
+    pool.query(salesByChannelQuery, [resolvedPeriodDays, resolvedTopLimit]),
+    pool.query(salesByCustomerQuery, [resolvedPeriodDays, resolvedTopLimit]),
+    pool.query(salesByProductQuery, [resolvedPeriodDays, resolvedTopLimit]),
+    pool.query(productCityHeatmapQuery, [
+      normalizedHeatmapFilters.days,
+      ...heatmapFilterBindings.values,
+      normalizedHeatmapFilters.topProducts,
+      normalizedHeatmapFilters.topCities
+    ]),
+    pool.query(productCityBestPairsQuery, [
+      normalizedHeatmapFilters.days,
+      ...heatmapFilterBindings.values,
+      heatmapBestPairLimit
+    ]),
+    pool.query(topPayingCustomersQuery, [resolvedPeriodDays, resolvedTopLimit]),
+    pool.query(mostProfitableProductsQuery, [resolvedPeriodDays, resolvedTopLimit]),
+    pool.query(customerMonthlyTrendQuery, [Math.min(resolvedTopLimit, 5)]),
+    pool.query(decliningProductsQuery, [resolvedTopLimit]),
+    pool.query(dormantClientsQuery, [45, resolvedTopLimit]),
+    pool.query(reactivationCandidatesQuery, [resolvedTopLimit])
   ]);
 
   const summary = summaryResult.rows[0] || {};
+  const totalCommercialSales = roundAmount(summary.total_sales_amount);
+  const salesByCity = salesByCityResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalCommercialSales)
+  );
+  const salesByWarehouse = salesByWarehouseResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalCommercialSales)
+  );
+  const salesByChain = salesByChainResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalCommercialSales)
+  );
+  const salesByChannel = salesByChannelResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalCommercialSales)
+  );
+  const salesByCustomer = salesByCustomerResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalCommercialSales)
+  );
+  const topPayingCustomers = topPayingCustomersResult.rows.map((row) =>
+    normalizeCommercialAggregateRow(row, totalCommercialSales)
+  );
+  const dormantClients = dormantClientsResult.rows.map((row) => ({
+    ...normalizeCommercialAggregateRow(row, totalCommercialSales),
+    days_since_last_invoice: Number(row.days_since_last_invoice || 0)
+  }));
+  const reactivationCandidates = reactivationCandidatesResult.rows.map((row) => ({
+    ...normalizeCommercialAggregateRow(row, totalCommercialSales),
+    days_since_last_invoice: Number(row.days_since_last_invoice || 0)
+  }));
+  const salesByProduct = salesByProductResult.rows.map((row) => ({
+    ...row,
+    total_quantity_sold: roundAmount(row.total_quantity_sold),
+    total_sales_amount: roundAmount(row.total_sales_amount),
+    total_cogs_amount: roundAmount(row.total_cogs_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    gross_margin_percent: Number(row.gross_margin_percent || 0),
+    sales_share_percent: computeMarginPercent(
+      totalCommercialSales,
+      row.total_sales_amount
+    )
+  }));
+  const productCityHeatmapCells = productCityHeatmapResult.rows.map((row) =>
+    normalizeHeatmapCellRow(row)
+  );
+  const productCityHeatmapProducts = [
+    ...new Map(
+      productCityHeatmapCells.map((row) => [
+        row.product_id,
+        {
+          product_id: row.product_id,
+          product_name: row.product_name,
+          category: row.category,
+          total_sales_amount: roundAmount(
+            productCityHeatmapCells
+              .filter((cell) => cell.product_id === row.product_id)
+              .reduce((sum, cell) => sum + Number(cell.total_sales_amount || 0), 0)
+          ),
+          total_quantity_sold: roundAmount(
+            productCityHeatmapCells
+              .filter((cell) => cell.product_id === row.product_id)
+              .reduce((sum, cell) => sum + Number(cell.total_quantity_sold || 0), 0)
+          )
+        }
+      ])
+    ).values()
+  ].sort((left, right) => right.total_sales_amount - left.total_sales_amount);
+  const productCityHeatmapCities = [
+    ...new Map(
+      productCityHeatmapCells.map((row) => [
+        row.city,
+        {
+          city: row.city,
+          total_sales_amount: roundAmount(
+            productCityHeatmapCells
+              .filter((cell) => cell.city === row.city)
+              .reduce((sum, cell) => sum + Number(cell.total_sales_amount || 0), 0)
+          ),
+          total_quantity_sold: roundAmount(
+            productCityHeatmapCells
+              .filter((cell) => cell.city === row.city)
+              .reduce((sum, cell) => sum + Number(cell.total_quantity_sold || 0), 0)
+          )
+        }
+      ])
+    ).values()
+  ].sort((left, right) => right.total_sales_amount - left.total_sales_amount);
+  const heatmapMaxSalesAmount = productCityHeatmapCells.reduce(
+    (maxValue, row) => Math.max(maxValue, Number(row.total_sales_amount || 0)),
+    0
+  );
+  const productCityBestPairs = productCityBestPairsResult.rows.map((row) => ({
+    ...row,
+    total_invoices: Number(row.total_invoices || 0),
+    total_quantity_sold: roundAmount(row.total_quantity_sold),
+    total_sales_amount: roundAmount(row.total_sales_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    gross_margin_percent: Number(row.gross_margin_percent || 0)
+  }));
+  const mostProfitableProducts = mostProfitableProductsResult.rows.map((row) => ({
+    ...row,
+    total_quantity_sold: roundAmount(row.total_quantity_sold),
+    total_sales_amount: roundAmount(row.total_sales_amount),
+    total_cogs_amount: roundAmount(row.total_cogs_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    gross_margin_percent: Number(row.gross_margin_percent || 0),
+    sales_share_percent: computeMarginPercent(
+      totalCommercialSales,
+      row.total_sales_amount
+    )
+  }));
 
   return {
     filters: {
-      period_days: Number(periodDays || 0),
-      top_limit: Number(topLimit || 0),
+      period_days: Number(resolvedPeriodDays || 0),
+      top_limit: Number(resolvedTopLimit || 0),
       dormant_days: 45,
       reactivation_days: 30
     },
@@ -1668,6 +2814,8 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
       active_customers: Number(summary.active_customers || 0),
       active_warehouses: Number(summary.active_warehouses || 0),
       active_cities: Number(summary.active_cities || 0),
+      active_chains: Number(summary.active_chains || 0),
+      active_channels: Number(summary.active_channels || 0),
       total_sales_amount: roundAmount(summary.total_sales_amount),
       total_net_sales_amount: roundAmount(summary.total_net_sales_amount),
       total_collected_amount: roundAmount(summary.total_collected_amount),
@@ -1686,60 +2834,38 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
       total_cogs_amount: roundAmount(row.total_cogs_amount),
       gross_profit_amount: roundAmount(row.gross_profit_amount)
     })),
-    sales_by_city: salesByCityResult.rows.map((row) => ({
-      ...row,
-      total_invoices: Number(row.total_invoices || 0),
-      total_customers: Number(row.total_customers || 0),
-      total_sales_amount: roundAmount(row.total_sales_amount),
-      total_collected_amount: roundAmount(row.total_collected_amount),
-      total_receivables: roundAmount(row.total_receivables),
-      total_cogs_amount: roundAmount(row.total_cogs_amount),
-      gross_profit_amount: roundAmount(row.gross_profit_amount)
-    })),
-    sales_by_warehouse: salesByWarehouseResult.rows.map((row) => ({
-      ...row,
-      total_invoices: Number(row.total_invoices || 0),
-      total_customers: Number(row.total_customers || 0),
-      total_sales_amount: roundAmount(row.total_sales_amount),
-      total_collected_amount: roundAmount(row.total_collected_amount),
-      total_receivables: roundAmount(row.total_receivables),
-      total_cogs_amount: roundAmount(row.total_cogs_amount),
-      gross_profit_amount: roundAmount(row.gross_profit_amount)
-    })),
-    sales_by_customer: salesByCustomerResult.rows.map((row) => ({
-      ...row,
-      total_invoices: Number(row.total_invoices || 0),
-      total_sales_amount: roundAmount(row.total_sales_amount),
-      total_collected_amount: roundAmount(row.total_collected_amount),
-      total_receivables: roundAmount(row.total_receivables),
-      total_cogs_amount: roundAmount(row.total_cogs_amount),
-      gross_profit_amount: roundAmount(row.gross_profit_amount)
-    })),
-    sales_by_product: salesByProductResult.rows.map((row) => ({
-      ...row,
-      total_quantity_sold: roundAmount(row.total_quantity_sold),
-      total_sales_amount: roundAmount(row.total_sales_amount),
-      total_cogs_amount: roundAmount(row.total_cogs_amount),
-      gross_profit_amount: roundAmount(row.gross_profit_amount),
-      gross_margin_percent: Number(row.gross_margin_percent || 0)
-    })),
-    top_paying_customers: topPayingCustomersResult.rows.map((row) => ({
-      ...row,
-      total_invoices: Number(row.total_invoices || 0),
-      total_sales_amount: roundAmount(row.total_sales_amount),
-      total_collected_amount: roundAmount(row.total_collected_amount),
-      total_receivables: roundAmount(row.total_receivables),
-      total_cogs_amount: roundAmount(row.total_cogs_amount),
-      gross_profit_amount: roundAmount(row.gross_profit_amount)
-    })),
-    most_profitable_products: mostProfitableProductsResult.rows.map((row) => ({
-      ...row,
-      total_quantity_sold: roundAmount(row.total_quantity_sold),
-      total_sales_amount: roundAmount(row.total_sales_amount),
-      total_cogs_amount: roundAmount(row.total_cogs_amount),
-      gross_profit_amount: roundAmount(row.gross_profit_amount),
-      gross_margin_percent: Number(row.gross_margin_percent || 0)
-    })),
+    performance_highlights: {
+      top_city: salesByCity[0] || null,
+      top_chain: salesByChain[0] || null,
+      top_channel: salesByChannel[0] || null,
+      top_customer: salesByCustomer[0] || null,
+      top_product_by_sales: salesByProduct[0] || null,
+      top_product_by_profit: mostProfitableProducts[0] || null,
+      top_warehouse: salesByWarehouse[0] || null
+    },
+    product_city_heatmap: {
+      filters: {
+        period_days: Number(normalizedHeatmapFilters.days || 0),
+        warehouse_id: normalizedHeatmapFilters.warehouseId,
+        chain_name: normalizedHeatmapFilters.chainName,
+        sales_channel: normalizedHeatmapFilters.salesChannel,
+        top_products: Number(normalizedHeatmapFilters.topProducts || 0),
+        top_cities: Number(normalizedHeatmapFilters.topCities || 0)
+      },
+      products: productCityHeatmapProducts,
+      cities: productCityHeatmapCities,
+      cells: productCityHeatmapCells,
+      max_sales_amount: roundAmount(heatmapMaxSalesAmount),
+      best_pairs: productCityBestPairs
+    },
+    sales_by_city: salesByCity,
+    sales_by_warehouse: salesByWarehouse,
+    sales_by_chain: salesByChain,
+    sales_by_channel: salesByChannel,
+    sales_by_customer: salesByCustomer,
+    sales_by_product: salesByProduct,
+    top_paying_customers: topPayingCustomers,
+    most_profitable_products: mostProfitableProducts,
     customer_monthly_trend: customerMonthlyTrendResult.rows.map((row) => ({
       ...row,
       billed_amount: roundAmount(row.billed_amount),
@@ -1762,22 +2888,8 @@ export async function getCommercialDashboard(periodDays = 365, topLimit = 10) {
           ? null
           : Number(row.sales_change_percent)
     })),
-    dormant_clients: dormantClientsResult.rows.map((row) => ({
-      ...row,
-      total_invoices: Number(row.total_invoices || 0),
-      total_sales_amount: roundAmount(row.total_sales_amount),
-      total_collected_amount: roundAmount(row.total_collected_amount),
-      total_receivables: roundAmount(row.total_receivables),
-      days_since_last_invoice: Number(row.days_since_last_invoice || 0)
-    })),
-    reactivation_candidates: reactivationCandidatesResult.rows.map((row) => ({
-      ...row,
-      total_invoices: Number(row.total_invoices || 0),
-      total_sales_amount: roundAmount(row.total_sales_amount),
-      total_collected_amount: roundAmount(row.total_collected_amount),
-      total_receivables: roundAmount(row.total_receivables),
-      days_since_last_invoice: Number(row.days_since_last_invoice || 0)
-    }))
+    dormant_clients: dormantClients,
+    reactivation_candidates: reactivationCandidates
   };
 }
 

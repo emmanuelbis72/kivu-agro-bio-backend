@@ -14,6 +14,14 @@ async function ensureCustomersSchema(executor = pool) {
     ALTER TABLE customers
     ADD COLUMN IF NOT EXISTS receivable_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL;
   `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS chain_name VARCHAR(150);
+  `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS sales_channel VARCHAR(80);
+  `);
 }
 
 export async function createCustomer(data) {
@@ -26,6 +34,8 @@ export async function createCustomer(data) {
       phone,
       email,
       city,
+      chain_name,
+      sales_channel,
       address,
       payment_terms_days,
       credit_limit,
@@ -34,7 +44,7 @@ export async function createCustomer(data) {
       receivable_account_id,
       warehouse_id
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
     RETURNING *;
   `;
 
@@ -45,6 +55,8 @@ export async function createCustomer(data) {
     data.phone || null,
     data.email || null,
     data.city || null,
+    data.chain_name || null,
+    data.sales_channel || null,
     data.address || null,
     data.payment_terms_days ?? 0,
     data.credit_limit ?? 0,
@@ -339,15 +351,17 @@ export async function updateCustomer(id, data) {
       phone = $4,
       email = $5,
       city = $6,
-      address = $7,
-      payment_terms_days = $8,
-      credit_limit = $9,
-      notes = $10,
-      is_active = $11,
-      receivable_account_id = $12,
-      warehouse_id = $13,
+      chain_name = $7,
+      sales_channel = $8,
+      address = $9,
+      payment_terms_days = $10,
+      credit_limit = $11,
+      notes = $12,
+      is_active = $13,
+      receivable_account_id = $14,
+      warehouse_id = $15,
       updated_at = NOW()
-    WHERE id = $14
+    WHERE id = $16
     RETURNING *;
   `;
 
@@ -358,6 +372,8 @@ export async function updateCustomer(id, data) {
     data.phone || null,
     data.email || null,
     data.city || null,
+    data.chain_name || null,
+    data.sales_channel || null,
     data.address || null,
     data.payment_terms_days ?? 0,
     data.credit_limit ?? 0,
