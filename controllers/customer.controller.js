@@ -1,4 +1,5 @@
 import {
+  bulkAssignCustomerCommercial,
   createCustomer,
   getAllCustomers,
   getCustomerById,
@@ -59,6 +60,17 @@ function validateCustomerPayload(body) {
   return errors;
 }
 
+function parsePositiveIntegerList(values) {
+  const rawValues = Array.isArray(values) ? values : [values];
+
+  return [...new Set(
+    rawValues
+      .flatMap((item) => String(item ?? "").split(","))
+      .map((item) => Number(String(item).trim()))
+      .filter((item) => Number.isInteger(item) && item > 0)
+  )];
+}
+
 export async function createCustomerHandler(req, res, next) {
   try {
     const errors = validateCustomerPayload(req.body);
@@ -80,6 +92,7 @@ export async function createCustomerHandler(req, res, next) {
       city: req.body.city?.trim(),
       chain_name: req.body.chain_name?.trim(),
       sales_channel: req.body.sales_channel?.trim(),
+      commercial_name: req.body.commercial_name?.trim(),
       address: req.body.address?.trim(),
       payment_terms_days: Number(req.body.payment_terms_days ?? 0),
       credit_limit: Number(req.body.credit_limit ?? 0),
@@ -182,6 +195,36 @@ export async function getCustomerAccountStatementHandler(req, res, next) {
   }
 }
 
+export async function bulkAssignCustomerCommercialHandler(req, res, next) {
+  try {
+    const customerIds = parsePositiveIntegerList(req.body.customer_ids);
+
+    if (customerIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Au moins un client doit etre selectionne."
+      });
+    }
+
+    const updatedCustomers = await bulkAssignCustomerCommercial(
+      customerIds,
+      req.body.commercial_name
+    );
+
+    return res.status(200).json({
+      success: true,
+      message:
+        String(req.body.commercial_name || "").trim()
+          ? "Commercial responsable mis a jour en lot."
+          : "Affectation commerciale effacee en lot.",
+      count: updatedCustomers.length,
+      data: updatedCustomers
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function exportCustomerAccountStatementPdfHandler(req, res, next) {
   try {
     const id = Number(req.params.id);
@@ -258,6 +301,7 @@ export async function updateCustomerHandler(req, res, next) {
       city: mergedPayload.city?.trim(),
       chain_name: mergedPayload.chain_name?.trim(),
       sales_channel: mergedPayload.sales_channel?.trim(),
+      commercial_name: mergedPayload.commercial_name?.trim(),
       address: mergedPayload.address?.trim(),
       payment_terms_days: Number(mergedPayload.payment_terms_days ?? 0),
       credit_limit: Number(mergedPayload.credit_limit ?? 0),

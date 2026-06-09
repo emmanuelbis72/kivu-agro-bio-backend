@@ -7,6 +7,18 @@ function roundAmount(value) {
 
 async function ensureReportsSchema(executor = pool) {
   await ensurePurchaseInvoicesSchema(executor);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS chain_name VARCHAR(150);
+  `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS sales_channel VARCHAR(80);
+  `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS commercial_name VARCHAR(150);
+  `);
 }
 
 function buildSalesDetailFilters(filters = {}) {
@@ -123,6 +135,36 @@ function buildProductLedgerFilters(filters = {}) {
   if (filters.invoiceNumber) {
     values.push(`%${String(filters.invoiceNumber).trim()}%`);
     conditions.push(`LOWER(i.invoice_number) LIKE LOWER($${values.length})`);
+  }
+
+  return {
+    whereClause: `WHERE ${conditions.join(" AND ")}`,
+    values
+  };
+}
+
+function buildCommercialAggregateFilters(filters = {}) {
+  const conditions = [`i.status IN ('issued', 'partial', 'paid')`];
+  const values = [];
+
+  if (filters.startDate) {
+    values.push(filters.startDate);
+    conditions.push(`i.invoice_date >= $${values.length}`);
+  }
+
+  if (filters.endDate) {
+    values.push(filters.endDate);
+    conditions.push(`i.invoice_date <= $${values.length}`);
+  }
+
+  if (filters.warehouseId) {
+    values.push(filters.warehouseId);
+    conditions.push(`i.warehouse_id = $${values.length}`);
+  }
+
+  if (filters.customerId) {
+    values.push(filters.customerId);
+    conditions.push(`i.customer_id = $${values.length}`);
   }
 
   return {
@@ -924,6 +966,568 @@ export async function getProductLedgerReport(filters = {}, limit = 500) {
         totalSalesAmount > 0
           ? roundAmount((grossProfitAmount / totalSalesAmount) * 100)
           : 0
+    },
+    rows
+  };
+}
+
+export async function getCategorySalesReport(filters = {}, limit = 500) {
+  await ensureReportsSchema(pool);
+
+  const { whereClause, values } = buildCommercialAggregateFilters(filters);
+  const finalValues = [...values, limit];
+
+  const groupedQuery = `
+    WITH base_sales AS (
+      SELECT
+        i.id AS invoice_id,
+        i.invoice_date,
+        i.customer_id,
+        i.warehouse_id,
+        p.id AS product_id,
+        COALESCE(NULLIF(TRIM(p.category), ''), 'Non classe') AS category_label,
+        ii.quantity,
+        ii.line_total,
+        (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
+        (ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN warehouses w ON w.id = i.warehouse_id
+      INNER JOIN products p ON p.id = ii.product_id
+      ${whereClause}
+    )
+    SELECT
+      bs.category_label,
+      COUNT(DISTINCT bs.product_id)::int AS products_count,
+      COUNT(DISTINCT bs.invoice_id)::int AS invoices_count,
+      COUNT(DISTINCT bs.customer_id)::int AS customers_count,
+      COUNT(DISTINCT bs.warehouse_id)::int AS warehouses_count,
+      MIN(bs.invoice_date) AS first_invoice_date,
+      MAX(bs.invoice_date) AS last_invoice_date,
+      COALESCE(SUM(bs.quantity), 0) AS total_quantity,
+      COALESCE(SUM(bs.line_total), 0) AS total_sales_amount,
+      COALESCE(SUM(bs.line_cogs_amount), 0) AS total_cogs_amount,
+      COALESCE(SUM(bs.gross_profit_amount), 0) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(bs.line_total), 0) > 0
+          THEN ROUND(
+            (COALESCE(SUM(bs.gross_profit_amount), 0) / COALESCE(SUM(bs.line_total), 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM base_sales bs
+    GROUP BY bs.category_label
+    ORDER BY total_sales_amount DESC, category_label ASC
+    LIMIT $${finalValues.length};
+  `;
+
+  const summaryQuery = `
+    WITH base_sales AS (
+      SELECT
+        i.id AS invoice_id,
+        i.customer_id,
+        i.warehouse_id,
+        p.id AS product_id,
+        COALESCE(NULLIF(TRIM(p.category), ''), 'Non classe') AS category_label,
+        ii.quantity,
+        ii.line_total,
+        (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
+        (ii.line_total - (ii.quantity * COALESCE(p.cost_price, 0))) AS gross_profit_amount
+      FROM invoice_items ii
+      INNER JOIN invoices i ON i.id = ii.invoice_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN warehouses w ON w.id = i.warehouse_id
+      INNER JOIN products p ON p.id = ii.product_id
+      ${whereClause}
+    )
+    SELECT
+      COUNT(DISTINCT category_label)::int AS total_categories,
+      COUNT(DISTINCT product_id)::int AS total_products,
+      COUNT(DISTINCT warehouse_id)::int AS total_warehouses,
+      COUNT(DISTINCT customer_id)::int AS total_customers,
+      COUNT(DISTINCT invoice_id)::int AS total_invoices,
+      COALESCE(SUM(quantity), 0) AS total_quantity,
+      COALESCE(SUM(line_total), 0) AS total_sales_amount,
+      COALESCE(SUM(line_cogs_amount), 0) AS total_cogs_amount,
+      COALESCE(SUM(gross_profit_amount), 0) AS gross_profit_amount
+    FROM base_sales;
+  `;
+
+  const [groupedResult, summaryResult] = await Promise.all([
+    pool.query(groupedQuery, finalValues),
+    pool.query(summaryQuery, values)
+  ]);
+
+  const rows = groupedResult.rows.map((row) => ({
+    ...row,
+    products_count: Number(row.products_count || 0),
+    invoices_count: Number(row.invoices_count || 0),
+    customers_count: Number(row.customers_count || 0),
+    warehouses_count: Number(row.warehouses_count || 0),
+    total_quantity: roundAmount(row.total_quantity),
+    total_sales_amount: roundAmount(row.total_sales_amount),
+    total_cogs_amount: roundAmount(row.total_cogs_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    gross_margin_percent: Number(row.gross_margin_percent || 0)
+  }));
+
+  const summaryRow = summaryResult.rows[0] || {};
+  const totalSalesAmount = Number(summaryRow.total_sales_amount || 0);
+  const grossProfitAmount = Number(summaryRow.gross_profit_amount || 0);
+
+  return {
+    summary: {
+      total_rows: rows.length,
+      total_categories: Number(summaryRow.total_categories || 0),
+      total_products: Number(summaryRow.total_products || 0),
+      total_warehouses: Number(summaryRow.total_warehouses || 0),
+      total_customers: Number(summaryRow.total_customers || 0),
+      total_invoices: Number(summaryRow.total_invoices || 0),
+      total_quantity: roundAmount(summaryRow.total_quantity),
+      total_sales_amount: roundAmount(totalSalesAmount),
+      total_cogs_amount: roundAmount(summaryRow.total_cogs_amount),
+      gross_profit_amount: roundAmount(grossProfitAmount),
+      gross_margin_percent:
+        totalSalesAmount > 0
+          ? roundAmount((grossProfitAmount / totalSalesAmount) * 100)
+          : 0
+    },
+    rows
+  };
+}
+
+export async function getCommercialSalesReport(filters = {}, limit = 500) {
+  await ensureReportsSchema(pool);
+
+  const { whereClause, values } = buildCommercialAggregateFilters(filters);
+  const finalValues = [...values, limit];
+
+  const groupedQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    ),
+    invoice_base AS (
+      SELECT
+        i.id AS invoice_id,
+        i.invoice_date,
+        i.customer_id,
+        i.warehouse_id,
+        c.business_name AS customer_name,
+        c.city AS customer_city,
+        COALESCE(NULLIF(TRIM(c.chain_name), ''), 'Sans chaine') AS chain_name,
+        COALESCE(NULLIF(TRIM(c.sales_channel), ''), 'Canal non precise') AS sales_channel,
+        COALESCE(
+          NULLIF(TRIM(c.commercial_name), ''),
+          NULLIF(TRIM(w.manager_name), ''),
+          'Non attribue'
+        ) AS commercial_name,
+        CASE
+          WHEN NULLIF(TRIM(c.commercial_name), '') IS NOT NULL THEN 'client'
+          WHEN NULLIF(TRIM(w.manager_name), '') IS NOT NULL THEN 'depot_manager'
+          ELSE 'non_attribue'
+        END AS commercial_source,
+        COALESCE(ic.total_quantity, 0) AS total_quantity,
+        COALESCE(i.total_amount, 0) AS total_sales_amount,
+        COALESCE(i.paid_amount, 0) AS total_collected_amount,
+        COALESCE(i.balance_due, 0) AS total_receivables,
+        COALESCE(ic.total_cogs_amount, 0) AS total_cogs_amount,
+        COALESCE(i.total_amount - COALESCE(i.tax_amount, 0), 0) AS net_sales_amount,
+        (
+          COALESCE(i.total_amount - COALESCE(i.tax_amount, 0), 0)
+          - COALESCE(ic.total_cogs_amount, 0)
+        ) AS gross_profit_amount
+      FROM invoices i
+      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN warehouses w ON w.id = i.warehouse_id
+      LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+      ${whereClause}
+    )
+    SELECT
+      ib.commercial_name,
+      ib.commercial_source,
+      COUNT(DISTINCT ib.customer_id)::int AS customers_count,
+      COUNT(DISTINCT ib.warehouse_id)::int AS warehouses_count,
+      COUNT(DISTINCT NULLIF(TRIM(ib.customer_city), ''))::int AS cities_count,
+      COUNT(DISTINCT NULLIF(TRIM(ib.chain_name), ''))::int AS chains_count,
+      COUNT(*)::int AS invoices_count,
+      MIN(ib.invoice_date) AS first_invoice_date,
+      MAX(ib.invoice_date) AS last_invoice_date,
+      COALESCE(SUM(ib.total_quantity), 0) AS total_quantity,
+      COALESCE(SUM(ib.total_sales_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(ib.total_collected_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(ib.total_receivables), 0) AS total_receivables,
+      COALESCE(SUM(ib.total_cogs_amount), 0) AS total_cogs_amount,
+      COALESCE(SUM(ib.gross_profit_amount), 0) AS gross_profit_amount,
+      CASE
+        WHEN COALESCE(SUM(ib.total_sales_amount), 0) > 0
+          THEN ROUND(
+            (COALESCE(SUM(ib.total_collected_amount), 0) / COALESCE(SUM(ib.total_sales_amount), 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS collection_rate_percent,
+      CASE
+        WHEN COALESCE(SUM(ib.net_sales_amount), 0) > 0
+          THEN ROUND(
+            (COALESCE(SUM(ib.gross_profit_amount), 0) / COALESCE(SUM(ib.net_sales_amount), 0)) * 100,
+            2
+          )
+        ELSE 0
+      END AS gross_margin_percent
+    FROM invoice_base ib
+    GROUP BY ib.commercial_name, ib.commercial_source
+    ORDER BY total_sales_amount DESC, commercial_name ASC
+    LIMIT $${finalValues.length};
+  `;
+
+  const summaryQuery = `
+    WITH invoice_cogs AS (
+      SELECT
+        ii.invoice_id,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS total_cogs_amount
+      FROM invoice_items ii
+      INNER JOIN products p ON p.id = ii.product_id
+      GROUP BY ii.invoice_id
+    ),
+    invoice_base AS (
+      SELECT
+        i.id AS invoice_id,
+        i.customer_id,
+        i.warehouse_id,
+        c.city AS customer_city,
+        COALESCE(
+          NULLIF(TRIM(c.commercial_name), ''),
+          NULLIF(TRIM(w.manager_name), ''),
+          'Non attribue'
+        ) AS commercial_name,
+        COALESCE(ic.total_quantity, 0) AS total_quantity,
+        COALESCE(i.total_amount, 0) AS total_sales_amount,
+        COALESCE(i.paid_amount, 0) AS total_collected_amount,
+        COALESCE(i.balance_due, 0) AS total_receivables,
+        COALESCE(ic.total_cogs_amount, 0) AS total_cogs_amount,
+        COALESCE(i.total_amount - COALESCE(i.tax_amount, 0), 0) AS net_sales_amount,
+        (
+          COALESCE(i.total_amount - COALESCE(i.tax_amount, 0), 0)
+          - COALESCE(ic.total_cogs_amount, 0)
+        ) AS gross_profit_amount
+      FROM invoices i
+      INNER JOIN customers c ON c.id = i.customer_id
+      INNER JOIN warehouses w ON w.id = i.warehouse_id
+      LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+      ${whereClause}
+    )
+    SELECT
+      COUNT(DISTINCT commercial_name)::int AS total_commercials,
+      COUNT(DISTINCT customer_id)::int AS total_customers,
+      COUNT(DISTINCT warehouse_id)::int AS total_warehouses,
+      COUNT(DISTINCT NULLIF(TRIM(customer_city), ''))::int AS total_cities,
+      COUNT(*)::int AS total_invoices,
+      COALESCE(SUM(total_quantity), 0) AS total_quantity,
+      COALESCE(SUM(total_sales_amount), 0) AS total_sales_amount,
+      COALESCE(SUM(total_collected_amount), 0) AS total_collected_amount,
+      COALESCE(SUM(total_receivables), 0) AS total_receivables,
+      COALESCE(SUM(total_cogs_amount), 0) AS total_cogs_amount,
+      COALESCE(SUM(gross_profit_amount), 0) AS gross_profit_amount,
+      COALESCE(SUM(net_sales_amount), 0) AS net_sales_amount
+    FROM invoice_base;
+  `;
+
+  const [groupedResult, summaryResult] = await Promise.all([
+    pool.query(groupedQuery, finalValues),
+    pool.query(summaryQuery, values)
+  ]);
+
+  const rows = groupedResult.rows.map((row) => ({
+    ...row,
+    customers_count: Number(row.customers_count || 0),
+    warehouses_count: Number(row.warehouses_count || 0),
+    cities_count: Number(row.cities_count || 0),
+    chains_count: Number(row.chains_count || 0),
+    invoices_count: Number(row.invoices_count || 0),
+    total_quantity: roundAmount(row.total_quantity),
+    total_sales_amount: roundAmount(row.total_sales_amount),
+    total_collected_amount: roundAmount(row.total_collected_amount),
+    total_receivables: roundAmount(row.total_receivables),
+    total_cogs_amount: roundAmount(row.total_cogs_amount),
+    gross_profit_amount: roundAmount(row.gross_profit_amount),
+    collection_rate_percent: Number(row.collection_rate_percent || 0),
+    gross_margin_percent: Number(row.gross_margin_percent || 0)
+  }));
+
+  const summaryRow = summaryResult.rows[0] || {};
+  const totalSalesAmount = Number(summaryRow.total_sales_amount || 0);
+  const totalCollectedAmount = Number(summaryRow.total_collected_amount || 0);
+  const netSalesAmount = Number(summaryRow.net_sales_amount || 0);
+  const grossProfitAmount = Number(summaryRow.gross_profit_amount || 0);
+
+  return {
+    summary: {
+      total_rows: rows.length,
+      total_commercials: Number(summaryRow.total_commercials || 0),
+      total_customers: Number(summaryRow.total_customers || 0),
+      total_warehouses: Number(summaryRow.total_warehouses || 0),
+      total_cities: Number(summaryRow.total_cities || 0),
+      total_invoices: Number(summaryRow.total_invoices || 0),
+      total_quantity: roundAmount(summaryRow.total_quantity),
+      total_sales_amount: roundAmount(totalSalesAmount),
+      total_collected_amount: roundAmount(totalCollectedAmount),
+      total_receivables: roundAmount(summaryRow.total_receivables),
+      total_cogs_amount: roundAmount(summaryRow.total_cogs_amount),
+      gross_profit_amount: roundAmount(grossProfitAmount),
+      collection_rate_percent:
+        totalSalesAmount > 0
+          ? roundAmount((totalCollectedAmount / totalSalesAmount) * 100)
+          : 0,
+      gross_margin_percent:
+        netSalesAmount > 0
+          ? roundAmount((grossProfitAmount / netSalesAmount) * 100)
+          : 0
+    },
+    rows
+  };
+}
+
+export async function getBreakEvenReport(filters = {}) {
+  await ensureReportsSchema(pool);
+
+  const startDate = filters.startDate || null;
+  const endDate = filters.endDate || null;
+  const values = [];
+
+  const invoiceConditions = [`i.status IN ('issued', 'partial', 'paid')`];
+  const expenseConditions = [`1 = 1`];
+
+  if (startDate) {
+    values.push(startDate);
+    invoiceConditions.push(`i.invoice_date >= $${values.length}`);
+    expenseConditions.push(`e.expense_date >= $${values.length}`);
+  }
+
+  if (endDate) {
+    values.push(endDate);
+    invoiceConditions.push(`i.invoice_date <= $${values.length}`);
+    expenseConditions.push(`e.expense_date <= $${values.length}`);
+  }
+
+  const invoiceWhereClause = `WHERE ${invoiceConditions.join(" AND ")}`;
+  const expenseWhereClause = `WHERE ${expenseConditions.join(" AND ")}`;
+
+  const summaryQuery = `
+    WITH sales_base AS (
+      SELECT
+        i.id AS invoice_id,
+        i.invoice_date,
+        COALESCE(ii.line_total, 0) AS net_sales_amount,
+        COALESCE(ii.quantity, 0) AS quantity,
+        COALESCE(ii.quantity * COALESCE(p.cost_price, 0), 0) AS variable_cost_amount
+      FROM invoices i
+      INNER JOIN invoice_items ii ON ii.invoice_id = i.id
+      INNER JOIN products p ON p.id = ii.product_id
+      ${invoiceWhereClause}
+    ),
+    sales_summary AS (
+      SELECT
+        COUNT(DISTINCT invoice_id)::int AS total_invoices,
+        COALESCE(SUM(quantity), 0) AS total_quantity,
+        COALESCE(SUM(net_sales_amount), 0) AS net_sales_amount,
+        COALESCE(SUM(variable_cost_amount), 0) AS variable_cost_amount
+      FROM sales_base
+    ),
+    expense_summary AS (
+      SELECT
+        COUNT(*)::int AS total_expenses,
+        COALESCE(SUM(e.amount), 0) AS operating_expenses_amount
+      FROM expenses e
+      ${expenseWhereClause}
+    )
+    SELECT
+      ss.total_invoices,
+      ss.total_quantity,
+      ss.net_sales_amount,
+      ss.variable_cost_amount,
+      (ss.net_sales_amount - ss.variable_cost_amount) AS contribution_margin_amount,
+      es.total_expenses,
+      es.operating_expenses_amount
+    FROM sales_summary ss
+    CROSS JOIN expense_summary es;
+  `;
+
+  const monthlyQuery = `
+    WITH month_series AS (
+      SELECT generate_series(
+        DATE_TRUNC('month', COALESCE($${values.length + 1}::date, CURRENT_DATE - INTERVAL '5 months')),
+        DATE_TRUNC('month', COALESCE($${values.length + 2}::date, CURRENT_DATE)),
+        INTERVAL '1 month'
+      )::date AS month_start
+    ),
+    sales_monthly AS (
+      SELECT
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
+        COUNT(DISTINCT i.id)::int AS invoices_count,
+        COALESCE(SUM(ii.quantity), 0) AS total_quantity,
+        COALESCE(SUM(ii.line_total), 0) AS net_sales_amount,
+        COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS variable_cost_amount
+      FROM invoices i
+      INNER JOIN invoice_items ii ON ii.invoice_id = i.id
+      INNER JOIN products p ON p.id = ii.product_id
+      ${invoiceWhereClause}
+      GROUP BY DATE_TRUNC('month', i.invoice_date)::date
+    ),
+    expense_monthly AS (
+      SELECT
+        DATE_TRUNC('month', e.expense_date)::date AS month_start,
+        COUNT(*)::int AS expenses_count,
+        COALESCE(SUM(e.amount), 0) AS operating_expenses_amount
+      FROM expenses e
+      ${expenseWhereClause}
+      GROUP BY DATE_TRUNC('month', e.expense_date)::date
+    )
+    SELECT
+      ms.month_start,
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period_key,
+      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
+      COALESCE(sm.invoices_count, 0) AS invoices_count,
+      COALESCE(sm.total_quantity, 0) AS total_quantity,
+      COALESCE(sm.net_sales_amount, 0) AS net_sales_amount,
+      COALESCE(sm.variable_cost_amount, 0) AS variable_cost_amount,
+      COALESCE(em.expenses_count, 0) AS expenses_count,
+      COALESCE(em.operating_expenses_amount, 0) AS operating_expenses_amount
+    FROM month_series ms
+    LEFT JOIN sales_monthly sm ON sm.month_start = ms.month_start
+    LEFT JOIN expense_monthly em ON em.month_start = ms.month_start
+    ORDER BY ms.month_start ASC;
+  `;
+
+  const monthlyQueryValues = [...values, startDate, endDate];
+
+  const [summaryResult, monthlyResult] = await Promise.all([
+    pool.query(summaryQuery, values),
+    pool.query(monthlyQuery, monthlyQueryValues)
+  ]);
+
+  const summaryRow = summaryResult.rows[0] || {};
+  const netSalesAmount = Number(summaryRow.net_sales_amount || 0);
+  const variableCostAmount = Number(summaryRow.variable_cost_amount || 0);
+  const contributionMarginAmount = netSalesAmount - variableCostAmount;
+  const operatingExpensesAmount = Number(summaryRow.operating_expenses_amount || 0);
+  const totalQuantity = Number(summaryRow.total_quantity || 0);
+  const contributionMarginRatio =
+    netSalesAmount > 0 ? contributionMarginAmount / netSalesAmount : 0;
+  const breakEvenSalesAmount =
+    contributionMarginRatio > 0
+      ? operatingExpensesAmount / contributionMarginRatio
+      : null;
+  const averageSellingPricePerUnit =
+    totalQuantity > 0 ? netSalesAmount / totalQuantity : 0;
+  const averageContributionPerUnit =
+    totalQuantity > 0 ? contributionMarginAmount / totalQuantity : 0;
+  const breakEvenUnits =
+    averageContributionPerUnit > 0
+      ? operatingExpensesAmount / averageContributionPerUnit
+      : null;
+  const safetyMarginAmount =
+    breakEvenSalesAmount === null ? null : netSalesAmount - breakEvenSalesAmount;
+  const safetyMarginPercent =
+    breakEvenSalesAmount !== null && netSalesAmount > 0
+      ? (safetyMarginAmount / netSalesAmount) * 100
+      : null;
+
+  const rows = monthlyResult.rows.map((row) => {
+    const rowNetSalesAmount = Number(row.net_sales_amount || 0);
+    const rowVariableCostAmount = Number(row.variable_cost_amount || 0);
+    const rowContributionMarginAmount =
+      rowNetSalesAmount - rowVariableCostAmount;
+    const rowOperatingExpensesAmount = Number(row.operating_expenses_amount || 0);
+    const rowQuantity = Number(row.total_quantity || 0);
+    const rowContributionMarginRatio =
+      rowNetSalesAmount > 0
+        ? rowContributionMarginAmount / rowNetSalesAmount
+        : 0;
+    const rowBreakEvenSalesAmount =
+      rowContributionMarginRatio > 0
+        ? rowOperatingExpensesAmount / rowContributionMarginRatio
+        : null;
+    const rowAverageContributionPerUnit =
+      rowQuantity > 0 ? rowContributionMarginAmount / rowQuantity : 0;
+    const rowBreakEvenUnits =
+      rowAverageContributionPerUnit > 0
+        ? rowOperatingExpensesAmount / rowAverageContributionPerUnit
+        : null;
+    const rowSafetyMarginAmount =
+      rowBreakEvenSalesAmount === null
+        ? null
+        : rowNetSalesAmount - rowBreakEvenSalesAmount;
+    const rowSafetyMarginPercent =
+      rowBreakEvenSalesAmount !== null && rowNetSalesAmount > 0
+        ? (rowSafetyMarginAmount / rowNetSalesAmount) * 100
+        : null;
+
+    return {
+      ...row,
+      invoices_count: Number(row.invoices_count || 0),
+      expenses_count: Number(row.expenses_count || 0),
+      total_quantity: roundAmount(rowQuantity),
+      net_sales_amount: roundAmount(rowNetSalesAmount),
+      variable_cost_amount: roundAmount(rowVariableCostAmount),
+      contribution_margin_amount: roundAmount(rowContributionMarginAmount),
+      contribution_margin_ratio: roundAmount(rowContributionMarginRatio * 100),
+      operating_expenses_amount: roundAmount(rowOperatingExpensesAmount),
+      break_even_sales_amount:
+        rowBreakEvenSalesAmount === null
+          ? null
+          : roundAmount(rowBreakEvenSalesAmount),
+      break_even_units:
+        rowBreakEvenUnits === null ? null : roundAmount(rowBreakEvenUnits),
+      safety_margin_amount:
+        rowSafetyMarginAmount === null ? null : roundAmount(rowSafetyMarginAmount),
+      safety_margin_percent:
+        rowSafetyMarginPercent === null
+          ? null
+          : roundAmount(rowSafetyMarginPercent),
+      status:
+        rowBreakEvenSalesAmount === null
+          ? "indetermine"
+          : rowNetSalesAmount >= rowBreakEvenSalesAmount
+          ? "au-dessus"
+          : "en-dessous"
+    };
+  });
+
+  return {
+    summary: {
+      total_invoices: Number(summaryRow.total_invoices || 0),
+      total_expenses: Number(summaryRow.total_expenses || 0),
+      total_quantity: roundAmount(totalQuantity),
+      net_sales_amount: roundAmount(netSalesAmount),
+      variable_cost_amount: roundAmount(variableCostAmount),
+      contribution_margin_amount: roundAmount(contributionMarginAmount),
+      contribution_margin_ratio: roundAmount(contributionMarginRatio * 100),
+      operating_expenses_amount: roundAmount(operatingExpensesAmount),
+      break_even_sales_amount:
+        breakEvenSalesAmount === null ? null : roundAmount(breakEvenSalesAmount),
+      average_selling_price_per_unit: roundAmount(averageSellingPricePerUnit),
+      average_contribution_per_unit: roundAmount(averageContributionPerUnit),
+      break_even_units:
+        breakEvenUnits === null ? null : roundAmount(breakEvenUnits),
+      safety_margin_amount:
+        safetyMarginAmount === null ? null : roundAmount(safetyMarginAmount),
+      safety_margin_percent:
+        safetyMarginPercent === null ? null : roundAmount(safetyMarginPercent),
+      status:
+        breakEvenSalesAmount === null
+          ? "indetermine"
+          : netSalesAmount >= breakEvenSalesAmount
+          ? "au-dessus"
+          : "en-dessous"
     },
     rows
   };

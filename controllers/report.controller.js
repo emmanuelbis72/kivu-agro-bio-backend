@@ -1,6 +1,9 @@
 import { getCashForecast } from "../models/dashboard.model.js";
 import { getMonthlyClosePack } from "../models/monthlyClose.model.js";
 import {
+  getBreakEvenReport,
+  getCategorySalesReport,
+  getCommercialSalesReport,
   getCustomerAgingReport,
   getCustomerLedgerReport,
   getProductLedgerReport,
@@ -808,6 +811,495 @@ const reportDefinitions = {
       }
     ]
   },
+  "sales-by-category": {
+    title: "Ventes par categorie",
+    subtitle:
+      "Etat commercial synthetique par categorie avec volume, chiffre d'affaires, cout, profit et marge",
+    tableTitle: "Synthese ventes par categorie",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `ventes-par-categorie-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "category_label", header: "Categorie", width: 120, xlsxWidth: 28 },
+      {
+        key: "products_count",
+        header: "Prod.",
+        type: "integer",
+        width: 50,
+        xlsxWidth: 10
+      },
+      {
+        key: "customers_count",
+        header: "Clients",
+        type: "integer",
+        width: 55,
+        xlsxWidth: 10
+      },
+      {
+        key: "warehouses_count",
+        header: "Depots",
+        type: "integer",
+        width: 52,
+        xlsxWidth: 10
+      },
+      {
+        key: "invoices_count",
+        header: "Fact.",
+        type: "integer",
+        width: 50,
+        xlsxWidth: 10
+      },
+      {
+        key: "total_quantity",
+        header: "Qte",
+        type: "number",
+        width: 58,
+        xlsxWidth: 12
+      },
+      {
+        key: "total_sales_amount",
+        header: "CA",
+        type: "money",
+        width: 75,
+        xlsxWidth: 16
+      },
+      {
+        key: "total_cogs_amount",
+        header: "Cout",
+        type: "money",
+        width: 75,
+        xlsxWidth: 16
+      },
+      {
+        key: "gross_profit_amount",
+        header: "Profit",
+        type: "money",
+        width: 75,
+        xlsxWidth: 16
+      },
+      {
+        key: "gross_margin_percent",
+        header: "Marge %",
+        type: "number",
+        width: 58,
+        xlsxWidth: 12,
+        value: (row) => Number(row.gross_margin_percent || 0)
+      },
+      {
+        key: "first_invoice_date",
+        header: "Prem. vente",
+        type: "date",
+        width: 68,
+        xlsxWidth: 14
+      },
+      {
+        key: "last_invoice_date",
+        header: "Dern. vente",
+        type: "date",
+        width: 68,
+        xlsxWidth: 14
+      }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Categories",
+        value: Number(summary.total_categories || 0),
+        rawValue: Number(summary.total_categories || 0),
+        type: "integer"
+      },
+      {
+        label: "Produits",
+        value: Number(summary.total_products || 0),
+        rawValue: Number(summary.total_products || 0),
+        type: "integer"
+      },
+      {
+        label: "Clients",
+        value: Number(summary.total_customers || 0),
+        rawValue: Number(summary.total_customers || 0),
+        type: "integer"
+      },
+      {
+        label: "Depots",
+        value: Number(summary.total_warehouses || 0),
+        rawValue: Number(summary.total_warehouses || 0),
+        type: "integer"
+      },
+      {
+        label: "Factures",
+        value: Number(summary.total_invoices || 0),
+        rawValue: Number(summary.total_invoices || 0),
+        type: "integer"
+      },
+      {
+        label: "Quantite",
+        value: Number(summary.total_quantity || 0),
+        rawValue: Number(summary.total_quantity || 0),
+        type: "number"
+      },
+      {
+        label: "Chiffre d'affaires",
+        value: Number(summary.total_sales_amount || 0),
+        rawValue: Number(summary.total_sales_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Profit brut",
+        value: Number(summary.gross_profit_amount || 0),
+        rawValue: Number(summary.gross_profit_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Marge %",
+        value: Number(summary.gross_margin_percent || 0),
+        rawValue: Number(summary.gross_margin_percent || 0),
+        type: "number"
+      }
+    ]
+  },
+  "sales-by-commercial": {
+    title: "Ventes par commercial",
+    subtitle:
+      "Etat commercial par responsable avec chiffre d'affaires, recouvrement, encours et profit",
+    tableTitle: "Synthese ventes par commercial",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `ventes-par-commercial-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "commercial_name", header: "Commercial", width: 95, xlsxWidth: 24 },
+      {
+        key: "commercial_source",
+        header: "Source",
+        width: 70,
+        xlsxWidth: 14,
+        value: (row) =>
+          row.commercial_source === "client"
+            ? "Client"
+            : row.commercial_source === "depot_manager"
+            ? "Depot"
+            : "A completer"
+      },
+      {
+        key: "customers_count",
+        header: "Clients",
+        type: "integer",
+        width: 50,
+        xlsxWidth: 10
+      },
+      {
+        key: "cities_count",
+        header: "Villes",
+        type: "integer",
+        width: 46,
+        xlsxWidth: 10
+      },
+      {
+        key: "chains_count",
+        header: "Chaines",
+        type: "integer",
+        width: 50,
+        xlsxWidth: 10
+      },
+      {
+        key: "warehouses_count",
+        header: "Depots",
+        type: "integer",
+        width: 48,
+        xlsxWidth: 10
+      },
+      {
+        key: "invoices_count",
+        header: "Fact.",
+        type: "integer",
+        width: 46,
+        xlsxWidth: 10
+      },
+      {
+        key: "total_quantity",
+        header: "Qte",
+        type: "number",
+        width: 52,
+        xlsxWidth: 12
+      },
+      {
+        key: "total_sales_amount",
+        header: "CA",
+        type: "money",
+        width: 72,
+        xlsxWidth: 16
+      },
+      {
+        key: "total_collected_amount",
+        header: "Encaisse",
+        type: "money",
+        width: 72,
+        xlsxWidth: 16
+      },
+      {
+        key: "total_receivables",
+        header: "Encours",
+        type: "money",
+        width: 72,
+        xlsxWidth: 16
+      },
+      {
+        key: "gross_profit_amount",
+        header: "Profit",
+        type: "money",
+        width: 72,
+        xlsxWidth: 16
+      },
+      {
+        key: "collection_rate_percent",
+        header: "Recouv. %",
+        type: "number",
+        width: 58,
+        xlsxWidth: 12,
+        value: (row) => Number(row.collection_rate_percent || 0)
+      },
+      {
+        key: "gross_margin_percent",
+        header: "Marge %",
+        type: "number",
+        width: 58,
+        xlsxWidth: 12,
+        value: (row) => Number(row.gross_margin_percent || 0)
+      }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Commerciaux",
+        value: Number(summary.total_commercials || 0),
+        rawValue: Number(summary.total_commercials || 0),
+        type: "integer"
+      },
+      {
+        label: "Clients",
+        value: Number(summary.total_customers || 0),
+        rawValue: Number(summary.total_customers || 0),
+        type: "integer"
+      },
+      {
+        label: "Villes",
+        value: Number(summary.total_cities || 0),
+        rawValue: Number(summary.total_cities || 0),
+        type: "integer"
+      },
+      {
+        label: "Depots",
+        value: Number(summary.total_warehouses || 0),
+        rawValue: Number(summary.total_warehouses || 0),
+        type: "integer"
+      },
+      {
+        label: "Factures",
+        value: Number(summary.total_invoices || 0),
+        rawValue: Number(summary.total_invoices || 0),
+        type: "integer"
+      },
+      {
+        label: "Chiffre d'affaires",
+        value: Number(summary.total_sales_amount || 0),
+        rawValue: Number(summary.total_sales_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Encaissements",
+        value: Number(summary.total_collected_amount || 0),
+        rawValue: Number(summary.total_collected_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Encours",
+        value: Number(summary.total_receivables || 0),
+        rawValue: Number(summary.total_receivables || 0),
+        type: "money"
+      },
+      {
+        label: "Profit brut",
+        value: Number(summary.gross_profit_amount || 0),
+        rawValue: Number(summary.gross_profit_amount || 0),
+        type: "money"
+      }
+    ]
+  },
+  "break-even": {
+    title: "Seuil de rentabilite",
+    subtitle:
+      "Lecture du point mort a partir des ventes observees, des couts variables directs et des charges d'exploitation",
+    tableTitle: "Evolution mensuelle du seuil de rentabilite",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `seuil-rentabilite-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "period_label", header: "Periode", width: 78, xlsxWidth: 16 },
+      {
+        key: "invoices_count",
+        header: "Fact.",
+        type: "integer",
+        width: 45,
+        xlsxWidth: 10
+      },
+      {
+        key: "expenses_count",
+        header: "Dep.",
+        type: "integer",
+        width: 42,
+        xlsxWidth: 10
+      },
+      {
+        key: "total_quantity",
+        header: "Qte",
+        type: "number",
+        width: 52,
+        xlsxWidth: 12
+      },
+      {
+        key: "net_sales_amount",
+        header: "CA net",
+        type: "money",
+        width: 72,
+        xlsxWidth: 16
+      },
+      {
+        key: "variable_cost_amount",
+        header: "Cout var.",
+        type: "money",
+        width: 72,
+        xlsxWidth: 16
+      },
+      {
+        key: "contribution_margin_amount",
+        header: "Marge contrib.",
+        type: "money",
+        width: 78,
+        xlsxWidth: 18
+      },
+      {
+        key: "contribution_margin_ratio",
+        header: "Tx contrib. %",
+        type: "number",
+        width: 62,
+        xlsxWidth: 12,
+        value: (row) => Number(row.contribution_margin_ratio || 0)
+      },
+      {
+        key: "operating_expenses_amount",
+        header: "Charges",
+        type: "money",
+        width: 72,
+        xlsxWidth: 16
+      },
+      {
+        key: "break_even_sales_amount",
+        header: "Point mort CA",
+        type: "money",
+        width: 78,
+        xlsxWidth: 18
+      },
+      {
+        key: "safety_margin_amount",
+        header: "Marge secu.",
+        type: "money",
+        width: 78,
+        xlsxWidth: 18
+      },
+      {
+        key: "safety_margin_percent",
+        header: "Secu. %",
+        type: "number",
+        width: 55,
+        xlsxWidth: 12,
+        value: (row) => Number(row.safety_margin_percent || 0)
+      },
+      {
+        key: "status",
+        header: "Statut",
+        width: 62,
+        xlsxWidth: 12,
+        value: (row) =>
+          row.status === "au-dessus"
+            ? "Au-dessus"
+            : row.status === "en-dessous"
+            ? "En-dessous"
+            : "Indetermine"
+      }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Factures",
+        value: Number(summary.total_invoices || 0),
+        rawValue: Number(summary.total_invoices || 0),
+        type: "integer"
+      },
+      {
+        label: "Depenses",
+        value: Number(summary.total_expenses || 0),
+        rawValue: Number(summary.total_expenses || 0),
+        type: "integer"
+      },
+      {
+        label: "Quantite vendue",
+        value: Number(summary.total_quantity || 0),
+        rawValue: Number(summary.total_quantity || 0),
+        type: "number"
+      },
+      {
+        label: "CA net",
+        value: Number(summary.net_sales_amount || 0),
+        rawValue: Number(summary.net_sales_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Cout variable",
+        value: Number(summary.variable_cost_amount || 0),
+        rawValue: Number(summary.variable_cost_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Marge sur cout variable",
+        value: Number(summary.contribution_margin_amount || 0),
+        rawValue: Number(summary.contribution_margin_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Taux de contribution",
+        value: Number(summary.contribution_margin_ratio || 0),
+        rawValue: Number(summary.contribution_margin_ratio || 0),
+        type: "number"
+      },
+      {
+        label: "Charges d'exploitation",
+        value: Number(summary.operating_expenses_amount || 0),
+        rawValue: Number(summary.operating_expenses_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Point mort CA",
+        value: summary.break_even_sales_amount,
+        rawValue: summary.break_even_sales_amount,
+        type: "money"
+      },
+      {
+        label: "Point mort unites",
+        value: summary.break_even_units,
+        rawValue: summary.break_even_units,
+        type: "number"
+      },
+      {
+        label: "Marge de securite",
+        value: summary.safety_margin_amount,
+        rawValue: summary.safety_margin_amount,
+        type: "money"
+      },
+      {
+        label: "Securite %",
+        value: summary.safety_margin_percent,
+        rawValue: summary.safety_margin_percent,
+        type: "number"
+      }
+    ]
+  },
   "stock-state": {
     title: "Etat de stock",
     subtitle: "Stock par depot, seuils d'alerte et valorisation",
@@ -1022,6 +1514,82 @@ async function getProductSalesPayload(query) {
   };
 }
 
+async function getCategorySalesPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+
+  const data = await getCategorySalesReport(
+    {
+      startDate,
+      endDate,
+      warehouseId,
+      customerId
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      limit
+    },
+    ...data
+  };
+}
+
+async function getCommercialSalesPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+
+  const data = await getCommercialSalesReport(
+    {
+      startDate,
+      endDate,
+      warehouseId,
+      customerId
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      limit
+    },
+    ...data
+  };
+}
+
+async function getBreakEvenPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+
+  const data = await getBreakEvenReport({
+    startDate,
+    endDate
+  });
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate
+    },
+    ...data
+  };
+}
+
 async function getProductLedgerPayload(query) {
   const startDate = parseDateFilter(query.start_date, null);
   const endDate = parseDateFilter(query.end_date, null);
@@ -1133,6 +1701,9 @@ const reportLoaders = {
   "supplier-aging": getSupplierAgingPayload,
   "customer-ledger": getCustomerLedgerPayload,
   "sales-detail": getSalesDetailPayload,
+  "sales-by-category": getCategorySalesPayload,
+  "sales-by-commercial": getCommercialSalesPayload,
+  "break-even": getBreakEvenPayload,
   "product-ledger": getProductLedgerPayload,
   "product-sales": getProductSalesPayload,
   "stock-state": getStockStatePayload,
@@ -1191,6 +1762,18 @@ export function getProductLedgerReportHandler(req, res, next) {
 
 export function getProductSalesReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "product-sales");
+}
+
+export function getCategorySalesReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "sales-by-category");
+}
+
+export function getCommercialSalesReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "sales-by-commercial");
+}
+
+export function getBreakEvenReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "break-even");
 }
 
 export function getStockStateReportHandler(req, res, next) {

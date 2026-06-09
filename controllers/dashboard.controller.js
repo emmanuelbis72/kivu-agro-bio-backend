@@ -26,6 +26,7 @@ import {
   getCommercialDashboard,
   getAccountingHealthSnapshot
 } from "../models/dashboard.model.js";
+import { getBreakEvenReport } from "../models/report.model.js";
 
 function parsePositiveLimit(value, defaultValue = 10, maxValue = 100) {
   if (value === undefined) {
@@ -140,6 +141,11 @@ export async function getDashboardOverviewHandler(req, res, next) {
 export async function getAccountingDashboardOverviewHandler(req, res, next) {
   try {
     const recentLimit = parsePositiveLimit(req.query.recent_limit, 10, 50);
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+      .toISOString()
+      .split("T")[0];
+    const today = now.toISOString().split("T")[0];
 
     const [
       accountingStats,
@@ -148,7 +154,8 @@ export async function getAccountingDashboardOverviewHandler(req, res, next) {
       classBalances,
       recentJournalEntries,
       cashForecast,
-      accountingHealth
+      accountingHealth,
+      breakEvenAnalysis
     ] = await Promise.all([
       getAccountingGlobalStats(),
       getGlobalStats(),
@@ -156,7 +163,11 @@ export async function getAccountingDashboardOverviewHandler(req, res, next) {
       getAccountClassBalances(),
       getRecentJournalEntries(recentLimit),
       getCashForecast(recentLimit),
-      getAccountingHealthSnapshot()
+      getAccountingHealthSnapshot(),
+      getBreakEvenReport({
+        startDate: monthStart,
+        endDate: today
+      })
     ]);
 
     return res.status(200).json({
@@ -168,7 +179,8 @@ export async function getAccountingDashboardOverviewHandler(req, res, next) {
         account_class_balances: classBalances,
         recent_journal_entries: recentJournalEntries,
         cash_forecast: cashForecast,
-        accounting_health: accountingHealth
+        accounting_health: accountingHealth,
+        break_even_analysis: breakEvenAnalysis
       }
     });
   } catch (error) {

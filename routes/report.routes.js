@@ -1,7 +1,10 @@
 import express from "express";
 import {
+  getBreakEvenReportHandler,
   exportReportHandler,
   getCashForecastReportHandler,
+  getCategorySalesReportHandler,
+  getCommercialSalesReportHandler,
   getCustomerAgingReportHandler,
   getCustomerLedgerReportHandler,
   getMonthlyCloseReportHandler,
@@ -18,6 +21,9 @@ router.get("/customer-aging", getCustomerAgingReportHandler);
 router.get("/customer-ledger", getCustomerLedgerReportHandler);
 router.get("/supplier-aging", getSupplierAgingReportHandler);
 router.get("/sales-detail", getSalesDetailReportHandler);
+router.get("/sales-by-category", getCategorySalesReportHandler);
+router.get("/sales-by-commercial", getCommercialSalesReportHandler);
+router.get("/break-even", getBreakEvenReportHandler);
 router.get("/product-ledger", getProductLedgerReportHandler);
 router.get("/product-sales", getProductSalesReportHandler);
 router.get("/stock-state", getStockStateReportHandler);

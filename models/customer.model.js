@@ -22,6 +22,10 @@ async function ensureCustomersSchema(executor = pool) {
     ALTER TABLE customers
     ADD COLUMN IF NOT EXISTS sales_channel VARCHAR(80);
   `);
+  await executor.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS commercial_name VARCHAR(150);
+  `);
 }
 
 export async function createCustomer(data) {
@@ -36,6 +40,7 @@ export async function createCustomer(data) {
       city,
       chain_name,
       sales_channel,
+      commercial_name,
       address,
       payment_terms_days,
       credit_limit,
@@ -44,7 +49,7 @@ export async function createCustomer(data) {
       receivable_account_id,
       warehouse_id
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
     RETURNING *;
   `;
 
@@ -57,6 +62,7 @@ export async function createCustomer(data) {
     data.city || null,
     data.chain_name || null,
     data.sales_channel || null,
+    data.commercial_name || null,
     data.address || null,
     data.payment_terms_days ?? 0,
     data.credit_limit ?? 0,
@@ -353,15 +359,16 @@ export async function updateCustomer(id, data) {
       city = $6,
       chain_name = $7,
       sales_channel = $8,
-      address = $9,
-      payment_terms_days = $10,
-      credit_limit = $11,
-      notes = $12,
-      is_active = $13,
-      receivable_account_id = $14,
-      warehouse_id = $15,
+      commercial_name = $9,
+      address = $10,
+      payment_terms_days = $11,
+      credit_limit = $12,
+      notes = $13,
+      is_active = $14,
+      receivable_account_id = $15,
+      warehouse_id = $16,
       updated_at = NOW()
-    WHERE id = $16
+    WHERE id = $17
     RETURNING *;
   `;
 
@@ -374,6 +381,7 @@ export async function updateCustomer(id, data) {
     data.city || null,
     data.chain_name || null,
     data.sales_channel || null,
+    data.commercial_name || null,
     data.address || null,
     data.payment_terms_days ?? 0,
     data.credit_limit ?? 0,
@@ -386,6 +394,36 @@ export async function updateCustomer(id, data) {
 
   const result = await pool.query(query, values);
   return result.rows[0] || null;
+}
+
+export async function bulkAssignCustomerCommercial(customerIds = [], commercialName = null) {
+  await ensureCustomersSchema(pool);
+
+  const normalizedIds = [...new Set(
+    customerIds
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0)
+  )];
+
+  if (normalizedIds.length === 0) {
+    return [];
+  }
+
+  const query = `
+    UPDATE customers
+    SET
+      commercial_name = $1,
+      updated_at = NOW()
+    WHERE id = ANY($2::int[])
+    RETURNING *;
+  `;
+
+  const result = await pool.query(query, [
+    String(commercialName || "").trim() || null,
+    normalizedIds
+  ]);
+
+  return result.rows;
 }
 
 export async function deleteCustomer(id) {
