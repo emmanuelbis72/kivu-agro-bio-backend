@@ -3025,6 +3025,9 @@ export async function getCollectionsDashboard(filters = {}) {
     1000000
   );
   const customerCity = normalizeOptionalTextFilter(filters.customerCity);
+  const entryType = ["all", "invoices", "payments"].includes(filters.entryType)
+    ? filters.entryType
+    : "all";
   const topProducts = normalizePositiveWholeNumber(filters.topProducts, 8, 20);
   const topCities = normalizePositiveWholeNumber(filters.topCities, 8, 20);
   const invoiceLimit = normalizePositiveWholeNumber(filters.invoiceLimit, 80, 200);
@@ -3046,6 +3049,43 @@ export async function getCollectionsDashboard(filters = {}) {
     invoice: "i",
     customer: "c"
   });
+
+  const invoicesSummaryQuery = `
+    SELECT
+      COUNT(*)::int AS total_invoices,
+      COUNT(DISTINCT i.customer_id)::int AS total_customers,
+      COUNT(DISTINCT LOWER(COALESCE(NULLIF(TRIM(c.city), ''), 'non renseignee')))::int AS total_cities,
+      COALESCE(SUM(i.total_amount), 0) AS total_invoiced_amount,
+      COALESCE(SUM(i.paid_amount), 0) AS total_paid_amount,
+      COALESCE(SUM(i.balance_due), 0) AS total_balance_due
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    ${invoiceBindings.whereClause};
+  `;
+
+  const invoicesRowsQuery = `
+    SELECT
+      i.id AS invoice_id,
+      i.invoice_number,
+      i.invoice_date,
+      i.due_date,
+      i.status,
+      i.customer_id,
+      c.business_name AS customer_name,
+      COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS customer_city,
+      i.warehouse_id,
+      COALESCE(w.name, 'Depot non renseigne') AS warehouse_name,
+      COALESCE(w.city, '') AS warehouse_city,
+      COALESCE(i.total_amount, 0) AS total_amount,
+      COALESCE(i.paid_amount, 0) AS paid_amount,
+      COALESCE(i.balance_due, 0) AS balance_due
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN warehouses w ON w.id = i.warehouse_id
+    ${invoiceBindings.whereClause}
+    ORDER BY i.invoice_date DESC, i.id DESC
+    LIMIT $${invoiceBindings.nextParameterIndex};
+  `;
 
   const unpaidSummaryQuery = `
     SELECT
@@ -3254,12 +3294,16 @@ export async function getCollectionsDashboard(filters = {}) {
   `;
 
   const [
+    invoicesSummaryResult,
+    invoicesRowsResult,
     unpaidSummaryResult,
     unpaidRowsResult,
     paymentsSummaryResult,
     paymentsRowsResult,
     heatmapResult
   ] = await Promise.all([
+    pool.query(invoicesSummaryQuery, invoiceBindings.values),
+    pool.query(invoicesRowsQuery, [...invoiceBindings.values, invoiceLimit]),
     pool.query(unpaidSummaryQuery, invoiceBindings.values),
     pool.query(unpaidRowsQuery, [...invoiceBindings.values, invoiceLimit]),
     pool.query(paymentsSummaryQuery, paymentBindings.values),
@@ -3271,8 +3315,11 @@ export async function getCollectionsDashboard(filters = {}) {
     ])
   ]);
 
+  const invoicesSummary = invoicesSummaryResult.rows[0] || {};
   const unpaidSummary = unpaidSummaryResult.rows[0] || {};
   const paymentsSummary = paymentsSummaryResult.rows[0] || {};
+  const totalInvoicedAmount = roundAmount(invoicesSummary.total_invoiced_amount);
+  const totalPaymentsAmount = roundAmount(paymentsSummary.total_payments_amount);
   const heatmapCells = heatmapResult.rows.map((row) => normalizeHeatmapCellRow(row));
   const heatmapProducts = [
     ...new Map(
@@ -3324,12 +3371,19 @@ export async function getCollectionsDashboard(filters = {}) {
       warehouse_id: warehouseId,
       customer_id: customerId,
       customer_city: customerCity,
+      entry_type: entryType,
       top_products: topProducts,
       top_cities: topCities,
       invoice_limit: invoiceLimit,
       payment_limit: paymentLimit
     },
     summary: {
+      total_invoices: Number(invoicesSummary.total_invoices || 0),
+      total_invoice_customers: Number(invoicesSummary.total_customers || 0),
+      total_invoice_cities: Number(invoicesSummary.total_cities || 0),
+      total_invoiced_amount: totalInvoicedAmount,
+      total_invoice_paid_amount: roundAmount(invoicesSummary.total_paid_amount),
+      total_invoice_balance_due: roundAmount(invoicesSummary.total_balance_due),
       total_unpaid_invoices: Number(unpaidSummary.total_unpaid_invoices || 0),
       total_unpaid_customers: Number(unpaidSummary.total_customers || 0),
       total_unpaid_cities: Number(unpaidSummary.total_cities || 0),
@@ -3339,8 +3393,19 @@ export async function getCollectionsDashboard(filters = {}) {
       total_payments: Number(paymentsSummary.total_payments || 0),
       total_payment_customers: Number(paymentsSummary.total_customers || 0),
       total_payment_cities: Number(paymentsSummary.total_cities || 0),
-      total_payments_amount: roundAmount(paymentsSummary.total_payments_amount)
+      total_payments_amount: totalPaymentsAmount,
+      invoiced_payment_gap: roundAmount(totalInvoicedAmount - totalPaymentsAmount),
+      collection_rate_percent:
+        totalInvoicedAmount > 0
+          ? roundAmount((totalPaymentsAmount / totalInvoicedAmount) * 100)
+          : 0
     },
+    issued_invoices: invoicesRowsResult.rows.map((row) => ({
+      ...row,
+      total_amount: roundAmount(row.total_amount),
+      paid_amount: roundAmount(row.paid_amount),
+      balance_due: roundAmount(row.balance_due)
+    })),
     unpaid_invoices: unpaidRowsResult.rows.map((row) => ({
       ...row,
       total_amount: roundAmount(row.total_amount),
@@ -3780,7 +3845,11 @@ export async function getExecutiveAnalyticsDashboard(filters = {}) {
         WHEN COALESCE(sl.sold_quantity, 0) > 0
           THEN ROUND(
             COALESCE(sb.current_stock_quantity, 0)
-            / (COALESCE(sl.sold_quantity, 0) / GREATEST(($2::date - $1::date + 1), 1)),
+            / NULLIF(
+                COALESCE(sl.sold_quantity, 0)
+                / GREATEST(($2::date - $1::date + 1), 1),
+                0
+              ),
             2
           )
         ELSE NULL
@@ -3804,19 +3873,19 @@ export async function getExecutiveAnalyticsDashboard(filters = {}) {
         i.due_date,
         CASE
           WHEN i.due_date IS NULL THEN NULL
-          ELSE GREATEST(($2::date - i.due_date), 0)
+          ELSE GREATEST(($1::date - i.due_date), 0)
         END AS days_overdue
       FROM invoices i
       INNER JOIN customers c ON c.id = i.customer_id
       WHERE i.status IN ('issued', 'partial')
         AND COALESCE(i.balance_due, 0) > 0
-        AND i.invoice_date <= $2::date
-        AND ($3::int IS NULL OR i.warehouse_id = $3)
+        AND i.invoice_date <= $1::date
+        AND ($2::int IS NULL OR i.warehouse_id = $2)
     )
     SELECT
       COUNT(*)::int AS open_invoices_count,
       COALESCE(SUM(balance_due), 0) AS total_balance_due,
-      COALESCE(SUM(CASE WHEN due_date IS NULL OR due_date > $2::date THEN balance_due ELSE 0 END), 0) AS current_balance,
+      COALESCE(SUM(CASE WHEN due_date IS NULL OR due_date > $1::date THEN balance_due ELSE 0 END), 0) AS current_balance,
       COALESCE(SUM(CASE WHEN days_overdue BETWEEN 1 AND 15 THEN balance_due ELSE 0 END), 0) AS bucket_1_15,
       COALESCE(SUM(CASE WHEN days_overdue BETWEEN 16 AND 30 THEN balance_due ELSE 0 END), 0) AS bucket_16_30,
       COALESCE(SUM(CASE WHEN days_overdue BETWEEN 31 AND 60 THEN balance_due ELSE 0 END), 0) AS bucket_31_60,
@@ -3834,14 +3903,14 @@ export async function getExecutiveAnalyticsDashboard(filters = {}) {
         i.due_date,
         CASE
           WHEN i.due_date IS NULL THEN NULL
-          ELSE GREATEST(($2::date - i.due_date), 0)
+          ELSE GREATEST(($1::date - i.due_date), 0)
         END AS days_overdue
       FROM invoices i
       INNER JOIN customers c ON c.id = i.customer_id
       WHERE i.status IN ('issued', 'partial')
         AND COALESCE(i.balance_due, 0) > 0
-        AND i.invoice_date <= $2::date
-        AND ($3::int IS NULL OR i.warehouse_id = $3)
+        AND i.invoice_date <= $1::date
+        AND ($2::int IS NULL OR i.warehouse_id = $2)
     )
     SELECT
       customer_id,
@@ -3854,7 +3923,7 @@ export async function getExecutiveAnalyticsDashboard(filters = {}) {
     WHERE COALESCE(days_overdue, 0) > 0
     GROUP BY customer_id, business_name, city
     ORDER BY total_balance_due DESC, max_days_overdue DESC, business_name ASC
-    LIMIT $4;
+    LIMIT $3;
   `;
 
   const expensesByCategoryQuery = `
@@ -3866,7 +3935,7 @@ export async function getExecutiveAnalyticsDashboard(filters = {}) {
     WHERE e.expense_date BETWEEN $1::date AND $2::date
     GROUP BY COALESCE(NULLIF(TRIM(e.category), ''), 'Non classe')
     ORDER BY total_amount DESC, category ASC
-    LIMIT $4;
+    LIMIT $3;
   `;
 
   const [
@@ -3891,9 +3960,9 @@ export async function getExecutiveAnalyticsDashboard(filters = {}) {
     pool.query(marginByProductQuery, [...baseValues, topLimit]),
     pool.query(heatmapQuery, [...baseValues, Math.min(topLimit, 10), Math.min(topLimit, 8)]),
     pool.query(stockCoverageQuery, [...baseValues, topLimit]),
-    pool.query(receivablesBucketsQuery, baseValues),
-    pool.query(overdueCustomersQuery, [...baseValues, topLimit]),
-    pool.query(expensesByCategoryQuery, [...baseValues, topLimit]),
+    pool.query(receivablesBucketsQuery, [endDate, warehouseId]),
+    pool.query(overdueCustomersQuery, [endDate, warehouseId, topLimit]),
+    pool.query(expensesByCategoryQuery, [startDate, endDate, topLimit]),
     getAIForecasts({ scenario_label: "baseline", limit: 20 })
   ]);
 

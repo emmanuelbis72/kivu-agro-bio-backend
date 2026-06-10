@@ -72,6 +72,13 @@ function parseDateFilter(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : null;
 }
 
+function parseCollectionEntryType(value) {
+  const normalized = String(value || "all").trim().toLowerCase();
+  return ["all", "invoices", "payments"].includes(normalized)
+    ? normalized
+    : "all";
+}
+
 function parseStockVariationFilters(query = {}) {
   return {
     warehouseId: parsePositiveInteger(query.warehouse_id),
@@ -514,6 +521,7 @@ export async function getCollectionsDashboardHandler(req, res, next) {
       customerCity: req.query.customer_city
         ? String(req.query.customer_city).trim()
         : null,
+      entryType: parseCollectionEntryType(req.query.entry_type),
       topProducts: parsePositiveLimit(req.query.top_products, 8, 20),
       topCities: parsePositiveLimit(req.query.top_cities, 8, 20),
       invoiceLimit: parsePositiveLimit(req.query.invoice_limit, 80, 200),
