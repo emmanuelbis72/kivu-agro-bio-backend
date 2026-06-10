@@ -1,6 +1,12 @@
 import { pool } from "../config/db.js";
 
-const allowedTables = ["invoices", "payments", "expenses"];
+const allowedTables = [
+  "invoices",
+  "payments",
+  "expenses",
+  "purchase_invoices",
+  "supplier_payments"
+];
 
 export async function persistAccountingStatus({
   tableName,

@@ -13,6 +13,7 @@ import {
   performBulkToPackageTransform,
   performStockMixture
 } from "../models/stock.model.js";
+import { autoPostStockPurchaseEntry } from "../services/accountingAutoPost.service.js";
 
 const ALLOWED_STOCK_FORMS = ["bulk", "package"];
 const ALLOWED_UNITS = ["g", "kg", "ml", "l", "unit", "piece"];
@@ -121,22 +122,43 @@ export async function createStockEntryHandler(req, res, next) {
 
     await validateWarehouseAndProduct(warehouse_id, product_id);
 
+    const referenceType = req.body.reference_type?.trim();
     const result = await performStockEntry({
       warehouse_id,
       product_id,
       quantity,
       ...variant,
       unit_cost: Number(req.body.unit_cost ?? 0),
-      reference_type: req.body.reference_type?.trim(),
+      reference_type: referenceType,
       reference_id: req.body.reference_id ? Number(req.body.reference_id) : null,
       notes: req.body.notes?.trim(),
       created_by: req.body.created_by ? Number(req.body.created_by) : null
     });
 
+    let accounting = null;
+
+    if (String(referenceType || "").toLowerCase() === "purchase") {
+      try {
+        accounting = await autoPostStockPurchaseEntry({
+          stockMovement: result.movement,
+          accounting: req.body.accounting || {},
+          created_by: req.body.created_by ? Number(req.body.created_by) : null
+        });
+      } catch (accountingError) {
+        accounting = {
+          status: "error",
+          reason: accountingError.message
+        };
+      }
+    }
+
     return res.status(201).json({
       success: true,
       message: "Entrée de stock enregistrée avec succès.",
-      data: result
+      data: {
+        ...result,
+        accounting
+      }
     });
   } catch (error) {
     next(error);

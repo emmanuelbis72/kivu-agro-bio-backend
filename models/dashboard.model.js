@@ -1,10 +1,6 @@
 import { pool } from "../config/db.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 import { ensurePurchaseInvoicesSchema } from "./purchaseInvoice.model.js";
-import {
-  getBusinessRulesMap,
-  getMonthlyRevenueTargets
-} from "../services/ai/businessRules.service.js";
 import { getAIForecasts } from "./ai/forecast.model.js";
 
 function roundAmount(value) {
@@ -48,7 +44,9 @@ function normalizeExecutivePeriodRow(row = {}) {
     total_invoices: Number(row.total_invoices || 0),
     payments_count: Number(row.payments_count || 0),
     expenses_count: Number(row.expenses_count || 0),
+    total_quantity_sold: roundAmount(row.total_quantity_sold),
     invoiced_amount: invoicedAmount,
+    unpaid_amount: roundAmount(row.unpaid_amount),
     net_sales_amount: netSalesAmount,
     cogs_amount: cogsAmount,
     gross_profit_amount: grossProfitAmount,
@@ -93,41 +91,6 @@ function buildExecutivePeriodComparison(currentPeriod = {}, referencePeriod = {}
       referenceNetProfit,
       currentNetProfit - referenceNetProfit
     )
-  };
-}
-
-function resolveMonthlyRevenueTargetForDate(targets = {}, referenceDate = new Date()) {
-  const currentMinimum = Number(
-    targets.current_minimum_monthly_received_payments_usd || 0
-  );
-  const fromJuly = Number(
-    targets.target_from_july_2026_monthly_received_payments_usd ||
-      currentMinimum
-  );
-  const byDecember = Number(
-    targets.target_by_december_2026_monthly_received_payments_usd || fromJuly
-  );
-
-  const year = referenceDate.getUTCFullYear();
-  const month = referenceDate.getUTCMonth() + 1;
-
-  if (year > 2026 || (year === 2026 && month >= 12)) {
-    return {
-      label: "Objectif mensuel cible",
-      value: byDecember
-    };
-  }
-
-  if (year === 2026 && month >= 7) {
-    return {
-      label: "Objectif mensuel a partir de juillet 2026",
-      value: fromJuly
-    };
-  }
-
-  return {
-    label: "Objectif mensuel minimum",
-    value: currentMinimum
   };
 }
 
@@ -901,28 +864,15 @@ export async function getExecutiveKpiSnapshot() {
       FROM (
         VALUES
           ('day', CURRENT_DATE, CURRENT_DATE),
-          ('week', DATE_TRUNC('week', CURRENT_DATE)::date, CURRENT_DATE),
-          ('month', DATE_TRUNC('month', CURRENT_DATE)::date, CURRENT_DATE),
           (
-            'previous_month_to_date',
-            (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month')::date,
-            (
-              (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month')::date
-              + (CURRENT_DATE - DATE_TRUNC('month', CURRENT_DATE)::date) * INTERVAL '1 day'
-            )::date
+            'last_30_days',
+            (CURRENT_DATE - INTERVAL '29 days')::date,
+            CURRENT_DATE
           ),
           (
-            'same_month_last_year_to_date',
-            (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 year')::date,
-            (
-              (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 year')::date
-              + (CURRENT_DATE - DATE_TRUNC('month', CURRENT_DATE)::date) * INTERVAL '1 day'
-            )::date
-          ),
-          (
-            'current_month_full',
-            DATE_TRUNC('month', CURRENT_DATE)::date,
-            (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day')::date
+            'previous_30_days',
+            (CURRENT_DATE - INTERVAL '59 days')::date,
+            (CURRENT_DATE - INTERVAL '30 days')::date
           )
       ) AS period_values(period_key, start_date, end_date)
     )
@@ -943,6 +893,20 @@ export async function getExecutiveKpiSnapshot() {
         WHERE i.status IN ('issued', 'partial', 'paid')
           AND i.invoice_date BETWEEN p.start_date AND p.end_date
       ), 0) AS invoiced_amount,
+      COALESCE((
+        SELECT SUM(i.balance_due)
+        FROM invoices i
+        WHERE i.status IN ('issued', 'partial', 'paid')
+          AND i.invoice_date BETWEEN p.start_date AND p.end_date
+          AND COALESCE(i.balance_due, 0) > 0
+      ), 0) AS unpaid_amount,
+      COALESCE((
+        SELECT SUM(ii.quantity)
+        FROM invoice_items ii
+        INNER JOIN invoices i ON i.id = ii.invoice_id
+        WHERE i.status IN ('issued', 'partial', 'paid')
+          AND i.invoice_date BETWEEN p.start_date AND p.end_date
+      ), 0) AS total_quantity_sold,
       COALESCE((
         SELECT SUM(i.total_amount - COALESCE(i.tax_amount, 0))
         FROM invoices i
@@ -988,24 +952,22 @@ export async function getExecutiveKpiSnapshot() {
     FROM periods p
     ORDER BY
       CASE p.period_key
-        WHEN 'day' THEN 1
-        WHEN 'week' THEN 2
-        WHEN 'month' THEN 3
-        WHEN 'previous_month_to_date' THEN 4
-        WHEN 'same_month_last_year_to_date' THEN 5
-        WHEN 'current_month_full' THEN 6
+        WHEN 'last_30_days' THEN 1
+        WHEN 'previous_30_days' THEN 2
+        WHEN 'day' THEN 3
         ELSE 99
       END;
   `;
 
-  const [periodResult, globalStats, cashForecast, businessRules, forecasts] =
-    await Promise.all([
-      pool.query(query),
-      getGlobalStats(),
-      getCashForecast(6),
-      getBusinessRulesMap(),
-      getAIForecasts({ scenario_label: "baseline", limit: 20 })
-    ]);
+  const [periodResult, openReceivablesResult] = await Promise.all([
+    pool.query(query),
+    pool.query(`
+      SELECT COALESCE(SUM(balance_due), 0) AS open_receivables
+      FROM invoices
+      WHERE status IN ('issued', 'partial')
+        AND COALESCE(balance_due, 0) > 0;
+    `)
+  ]);
 
   const normalizedRows = periodResult.rows.map((row) =>
     normalizeExecutivePeriodRow(row)
@@ -1014,110 +976,39 @@ export async function getExecutiveKpiSnapshot() {
     normalizedRows.map((row) => [row.period_key, row])
   );
 
-  const currentMonth = periods.month || normalizeExecutivePeriodRow();
-  const previousMonthToDate =
-    periods.previous_month_to_date || normalizeExecutivePeriodRow();
-  const sameMonthLastYear =
-    periods.same_month_last_year_to_date || normalizeExecutivePeriodRow();
-  const fullMonth = periods.current_month_full || normalizeExecutivePeriodRow();
-
-  const referenceDate = new Date();
-  const revenueTargets = getMonthlyRevenueTargets(businessRules);
-  const monthlyTarget = resolveMonthlyRevenueTargetForDate(
-    revenueTargets,
-    referenceDate
+  const last30Days =
+    periods.last_30_days || normalizeExecutivePeriodRow();
+  const previous30Days =
+    periods.previous_30_days || normalizeExecutivePeriodRow();
+  const next30DaysPaymentTarget = 35000;
+  const paymentTargetRemaining = roundAmount(
+    next30DaysPaymentTarget - Number(last30Days.payments_received || 0)
   );
-  const monthProgressRatio =
-    Number(fullMonth.span_days || 0) > 0
-      ? Number(currentMonth.span_days || 0) / Number(fullMonth.span_days || 1)
-      : 0;
-
-  const latestSalesForecast =
-    forecasts.find((row) => row.forecast_domain === "sales") || null;
-  const latestCashForecast =
-    forecasts.find((row) => row.forecast_domain === "cash") || null;
-
-  const monthlyRevenueTarget = roundAmount(monthlyTarget.value || 0);
-  const expectedCollectedToDate = roundAmount(
-    monthlyRevenueTarget * monthProgressRatio
-  );
-  const salesForecastFull = latestSalesForecast
-    ? roundAmount(latestSalesForecast.projected_value)
-    : null;
-  const cashForecastFull = latestCashForecast
-    ? roundAmount(latestCashForecast.projected_value)
-    : null;
-  const salesForecastToDate =
-    salesForecastFull === null
-      ? null
-      : roundAmount(salesForecastFull * monthProgressRatio);
-  const cashForecastToDate =
-    cashForecastFull === null
-      ? null
-      : roundAmount(cashForecastFull * monthProgressRatio);
 
   return {
     as_of_date: new Date().toISOString(),
-    current_cash_base: roundAmount(cashForecast?.summary?.current_cash_base || 0),
-    cash_on_hand_base: roundAmount(cashForecast?.summary?.cash_on_hand_base || 0),
-    bank_base: roundAmount(cashForecast?.summary?.bank_base || 0),
-    mobile_money_base: roundAmount(
-      cashForecast?.summary?.mobile_money_base || 0
+    open_receivables: roundAmount(
+      openReceivablesResult.rows[0]?.open_receivables
     ),
-    other_treasury_base: roundAmount(
-      cashForecast?.summary?.other_treasury_base || 0
-    ),
-    open_receivables: roundAmount(globalStats?.total_receivables || 0),
-    open_payables: roundAmount(cashForecast?.summary?.open_payables || 0),
     periods: {
       day: periods.day || null,
-      week: periods.week || null,
-      month: currentMonth
+      last_30_days: last30Days,
+      previous_30_days: previous30Days
     },
     comparisons: {
-      month_vs_previous_month_to_date: buildExecutivePeriodComparison(
-        currentMonth,
-        previousMonthToDate
-      ),
-      month_vs_same_period_last_year: buildExecutivePeriodComparison(
-        currentMonth,
-        sameMonthLastYear
+      last_30_days_vs_previous_30_days: buildExecutivePeriodComparison(
+        last30Days,
+        previous30Days
       )
     },
     targets: {
-      monthly_revenue_target: monthlyRevenueTarget,
-      target_label: monthlyTarget.label,
-      month_progress_ratio: roundAmount(monthProgressRatio),
-      month_progress_percent: roundAmount(monthProgressRatio * 100),
-      expected_collected_to_date: expectedCollectedToDate,
-      actual_collected_to_date: roundAmount(currentMonth.payments_received),
-      collected_gap_to_target: roundAmount(
-        Number(currentMonth.payments_received || 0) - expectedCollectedToDate
-      ),
+      payment_target_next_30_days: next30DaysPaymentTarget,
+      actual_collected_last_30_days: roundAmount(last30Days.payments_received),
+      payment_target_remaining: paymentTargetRemaining,
       collected_achievement_percent: computeMarginPercent(
-        expectedCollectedToDate,
-        currentMonth.payments_received
+        next30DaysPaymentTarget,
+        last30Days.payments_received
       )
-    },
-    forecasts: {
-      sales_30d_forecast: salesForecastFull,
-      sales_30d_forecast_to_date: salesForecastToDate,
-      actual_sales_to_date: roundAmount(currentMonth.invoiced_amount),
-      sales_gap_to_forecast:
-        salesForecastToDate === null
-          ? null
-          : roundAmount(
-              Number(currentMonth.invoiced_amount || 0) - salesForecastToDate
-            ),
-      cash_30d_forecast: cashForecastFull,
-      cash_30d_forecast_to_date: cashForecastToDate,
-      actual_cash_to_date: roundAmount(currentMonth.payments_received),
-      cash_gap_to_forecast:
-        cashForecastToDate === null
-          ? null
-          : roundAmount(
-              Number(currentMonth.payments_received || 0) - cashForecastToDate
-            )
     }
   };
 }

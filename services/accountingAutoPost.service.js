@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { pool } from "../config/db.js";
 import { getAccountById, getAccountByNumber } from "../models/account.model.js";
 import { getCustomerById } from "../models/customer.model.js";
 import { getSupplierById } from "../models/supplier.model.js";
@@ -188,7 +189,7 @@ async function resolveSupplierPayableAccount(supplierId, overrides = {}) {
     return overrideAccount;
   }
 
-  const supplier = await getSupplierById(supplierId);
+  const supplier = supplierId ? await getSupplierById(supplierId) : null;
   const supplierAccount = await resolvePostableAccountById(
     supplier?.payable_account_id || null
   );
@@ -197,9 +198,23 @@ async function resolveSupplierPayableAccount(supplierId, overrides = {}) {
     return supplierAccount;
   }
 
-  return resolvePostableAccount(
+  const envAccount = await resolvePostableAccount(
     process.env.ACCOUNTING_SUPPLIER_ACCOUNT_NUMBER || null
   );
+
+  if (envAccount) {
+    return envAccount;
+  }
+
+  for (const accountNumber of ["401000", "401100", "401200"]) {
+    const account = await resolvePostableAccount(accountNumber);
+
+    if (account) {
+      return account;
+    }
+  }
+
+  return null;
 }
 
 async function resolveDefaultSalesAccount(overrides = {}) {
@@ -341,9 +356,23 @@ async function resolveInventoryAccount(overrides = {}) {
     return overrideAccount;
   }
 
-  return resolvePostableAccount(
+  const envAccount = await resolvePostableAccount(
     process.env.ACCOUNTING_INVENTORY_ACCOUNT_NUMBER || null
   );
+
+  if (envAccount) {
+    return envAccount;
+  }
+
+  for (const accountNumber of ["311000", "310000", "320000"]) {
+    const account = await resolvePostableAccount(accountNumber);
+
+    if (account) {
+      return account;
+    }
+  }
+
+  return null;
 }
 
 async function createAndPostEntry({
@@ -404,6 +433,32 @@ async function createAndPostEntry({
   throw new Error(
     "Impossible de generer un numero d'ecriture comptable unique apres plusieurs tentatives."
   );
+}
+
+async function getExistingActiveEntry(
+  referenceType,
+  referenceId,
+  sourceModule
+) {
+  if (!referenceType || !referenceId) {
+    return null;
+  }
+
+  const result = await pool.query(
+    `
+    SELECT id, entry_number, status
+    FROM journal_entries
+    WHERE reference_type = $1
+      AND reference_id = $2
+      AND source_module = $3
+      AND status <> 'cancelled'
+    ORDER BY id DESC
+    LIMIT 1;
+    `,
+    [referenceType, referenceId, sourceModule]
+  );
+
+  return result.rows[0] || null;
 }
 
 export async function autoPostInvoiceEntry({
@@ -738,6 +793,21 @@ export async function autoPostPurchaseInvoiceEntry({
   accounting = {},
   created_by = null
 }) {
+  const existingEntry = await getExistingActiveEntry(
+    "purchase_invoice",
+    purchaseInvoice.id,
+    "purchase_invoice"
+  );
+
+  if (existingEntry) {
+    return {
+      status: "posted",
+      journal_entry_id: existingEntry.id,
+      entry_number: existingEntry.entry_number,
+      reason: "Ecriture achat deja comptabilisee."
+    };
+  }
+
   const supplierAccount = await resolveSupplierPayableAccount(
     purchaseInvoice.supplier_id,
     accounting
@@ -779,6 +849,89 @@ export async function autoPostPurchaseInvoiceEntry({
         credit: amount,
         partner_type: "supplier",
         partner_id: purchaseInvoice.supplier_id
+      }
+    ]
+  });
+
+  return {
+    status: "posted",
+    journal_entry_id: result.entry.id,
+    entry_number: result.entry.entry_number
+  };
+}
+
+export async function autoPostStockPurchaseEntry({
+  stockMovement,
+  accounting = {},
+  created_by = null
+}) {
+  const existingEntry = await getExistingActiveEntry(
+    "stock_movement",
+    stockMovement.id,
+    "stock"
+  );
+
+  if (existingEntry) {
+    return {
+      status: "posted",
+      journal_entry_id: existingEntry.id,
+      entry_number: existingEntry.entry_number,
+      reason: "Mouvement d'achat deja comptabilise."
+    };
+  }
+
+  const amount = roundAmount(
+    Number(stockMovement.quantity || 0) *
+      Number(stockMovement.unit_cost || 0)
+  );
+
+  if (amount <= 0) {
+    return {
+      status: "skipped",
+      reason:
+        "Comptabilisation achat ignoree : quantite ou cout unitaire nul."
+    };
+  }
+
+  const supplierAccount = await resolveSupplierPayableAccount(
+    null,
+    accounting
+  );
+  const inventoryAccount = await resolveInventoryAccount(accounting);
+
+  if (!supplierAccount || !inventoryAccount) {
+    return {
+      status: "skipped",
+      reason:
+        "Parametrage comptable achat incomplet : compte fournisseur ou compte de stock manquant/invalide."
+    };
+  }
+
+  const result = await createAndPostEntry({
+    entry_date: stockMovement.created_at || new Date(),
+    journal_code: "AF",
+    description: `Achat lie au mouvement de stock ${stockMovement.id}`,
+    reference_type: "stock_movement",
+    reference_id: stockMovement.id,
+    source_module: "stock",
+    created_by,
+    validated_by: created_by,
+    lines: [
+      {
+        account_id: inventoryAccount.id,
+        description: "Debit stock",
+        debit: amount,
+        credit: 0,
+        partner_type: "supplier",
+        partner_id: null
+      },
+      {
+        account_id: supplierAccount.id,
+        description: "Credit fournisseur",
+        debit: 0,
+        credit: amount,
+        partner_type: "supplier",
+        partner_id: null
       }
     ]
   });
