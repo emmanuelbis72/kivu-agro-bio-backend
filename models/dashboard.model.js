@@ -592,7 +592,28 @@ export async function getTopCustomers(limit = 10) {
   return result.rows;
 }
 
-export async function getCustomerBalanceBoard() {
+export async function getCustomerBalanceBoard(filters = {}) {
+  const endDate = filters.endDate || formatIsoDate(new Date());
+  const endDateObject = new Date(`${endDate}T00:00:00`);
+  const startDate =
+    filters.startDate ||
+    formatIsoDate(
+      new Date(
+        endDateObject.getFullYear(),
+        endDateObject.getMonth() - 5,
+        1
+      )
+    );
+  const warehouseId = normalizeOptionalPositiveWholeNumber(
+    filters.warehouseId,
+    1000000
+  );
+  const customerId = normalizeOptionalPositiveWholeNumber(
+    filters.customerId,
+    1000000
+  );
+  const values = [startDate, endDate, warehouseId, customerId];
+
   const query = `
     WITH invoice_summary AS (
       SELECT
@@ -602,6 +623,9 @@ export async function getCustomerBalanceBoard() {
         COALESCE(SUM(i.balance_due), 0) AS balance_due_amount
       FROM invoices i
       WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+        AND ($4::int IS NULL OR i.customer_id = $4)
       GROUP BY i.customer_id
     ),
     payment_summary AS (
@@ -612,6 +636,9 @@ export async function getCustomerBalanceBoard() {
         MAX(p.payment_date) AS last_payment_date
       FROM payments p
       INNER JOIN invoices i ON i.id = p.invoice_id
+      WHERE p.payment_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+        AND ($4::int IS NULL OR i.customer_id = $4)
       GROUP BY i.customer_id
     )
     SELECT
@@ -633,7 +660,60 @@ export async function getCustomerBalanceBoard() {
     ORDER BY LOWER(TRIM(c.business_name)) ASC;
   `;
 
-  const result = await pool.query(query);
+  const trendQuery = `
+    WITH month_series AS (
+      SELECT generate_series(
+        DATE_TRUNC('month', $1::date),
+        DATE_TRUNC('month', $2::date),
+        INTERVAL '1 month'
+      )::date AS month_start
+    ),
+    invoice_monthly AS (
+      SELECT
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
+        COUNT(*)::int AS invoices_count,
+        COALESCE(SUM(i.total_amount), 0) AS invoiced_amount
+      FROM invoices i
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+        AND ($4::int IS NULL OR i.customer_id = $4)
+      GROUP BY DATE_TRUNC('month', i.invoice_date)::date
+    ),
+    payment_monthly AS (
+      SELECT
+        DATE_TRUNC('month', p.payment_date)::date AS month_start,
+        COUNT(*)::int AS payments_count,
+        COALESCE(SUM(p.amount), 0) AS payments_received
+      FROM payments p
+      INNER JOIN invoices i ON i.id = p.invoice_id
+      WHERE p.payment_date BETWEEN $1::date AND $2::date
+        AND ($3::int IS NULL OR i.warehouse_id = $3)
+        AND ($4::int IS NULL OR i.customer_id = $4)
+      GROUP BY DATE_TRUNC('month', p.payment_date)::date
+    )
+    SELECT
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
+      TO_CHAR(ms.month_start, 'YYYY-MM-DD') AS period_start,
+      TO_CHAR(
+        (ms.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date,
+        'YYYY-MM-DD'
+      ) AS period_end,
+      COALESCE(im.invoices_count, 0) AS invoices_count,
+      COALESCE(im.invoiced_amount, 0) AS invoiced_amount,
+      COALESCE(pm.payments_count, 0) AS payments_count,
+      COALESCE(pm.payments_received, 0) AS payments_received
+    FROM month_series ms
+    LEFT JOIN invoice_monthly im ON im.month_start = ms.month_start
+    LEFT JOIN payment_monthly pm ON pm.month_start = ms.month_start
+    ORDER BY ms.month_start ASC;
+  `;
+
+  const [result, trendResult] = await Promise.all([
+    pool.query(query, values),
+    pool.query(trendQuery, values)
+  ]);
   const rows = result.rows.map((row) => ({
     ...row,
     invoices_count: Number(row.invoices_count || 0),
@@ -667,7 +747,20 @@ export async function getCustomerBalanceBoard() {
   );
 
   return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      warehouse_id: warehouseId,
+      customer_id: customerId
+    },
     rows,
+    monthly_trend: trendResult.rows.map((row) => ({
+      ...row,
+      invoices_count: Number(row.invoices_count || 0),
+      invoiced_amount: roundAmount(row.invoiced_amount),
+      payments_count: Number(row.payments_count || 0),
+      payments_received: roundAmount(row.payments_received)
+    })),
     totals: {
       total_customers: Number(totals.total_customers || 0),
       invoices_count: Number(totals.invoices_count || 0),
@@ -738,24 +831,12 @@ export async function getRecentPayments(limit = 10) {
 
 export async function getSalesOverview() {
   const query = `
-    WITH period_series AS (
-      SELECT
-        month_start,
-        half_index,
-        CASE
-          WHEN half_index = 1 THEN month_start
-          ELSE month_start + INTERVAL '15 days'
-        END::date AS period_start,
-        CASE
-          WHEN half_index = 1 THEN month_start + INTERVAL '14 days'
-          ELSE (month_start + INTERVAL '1 month' - INTERVAL '1 day')
-        END::date AS period_end
-      FROM generate_series(
+    WITH month_series AS (
+      SELECT generate_series(
         DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months',
         DATE_TRUNC('month', CURRENT_DATE),
         INTERVAL '1 month'
-      ) AS month_series(month_start)
-      CROSS JOIN generate_series(1, 2) AS halves(half_index)
+      )::date AS month_start
     ),
     invoice_cogs AS (
       SELECT
@@ -765,13 +846,9 @@ export async function getSalesOverview() {
       INNER JOIN products p ON p.id = ii.product_id
       GROUP BY ii.invoice_id
     ),
-    invoice_periods AS (
+    invoice_monthly AS (
       SELECT
-        CASE
-          WHEN EXTRACT(DAY FROM i.invoice_date) <= 15
-            THEN DATE_TRUNC('month', i.invoice_date)::date
-          ELSE (DATE_TRUNC('month', i.invoice_date) + INTERVAL '15 days')::date
-        END AS period_start,
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
         COUNT(*)::int AS total_invoices,
         COALESCE(SUM(i.total_amount), 0) AS total_sales,
         COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) AS total_net_sales,
@@ -786,29 +863,23 @@ export async function getSalesOverview() {
       LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
       WHERE i.status IN ('issued', 'partial', 'paid')
         AND i.invoice_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
-      GROUP BY
-        CASE
-          WHEN EXTRACT(DAY FROM i.invoice_date) <= 15
-            THEN DATE_TRUNC('month', i.invoice_date)::date
-          ELSE (DATE_TRUNC('month', i.invoice_date) + INTERVAL '15 days')::date
-        END
+      GROUP BY DATE_TRUNC('month', i.invoice_date)::date
     )
     SELECT
-      TO_CHAR(ps.month_start, 'YYYY-MM') || '-H' || ps.half_index AS period,
-      TO_CHAR(ps.month_start, 'YYYY-MM') AS month_period,
-      ps.half_index AS period_half,
-      TO_CHAR(ps.period_start, 'YYYY-MM-DD') AS period_start,
-      TO_CHAR(ps.period_end, 'YYYY-MM-DD') AS period_end,
-      COALESCE(ip.total_invoices, 0) AS total_invoices,
-      COALESCE(ip.total_sales, 0) AS total_sales,
-      COALESCE(ip.total_net_sales, 0) AS total_net_sales,
-      COALESCE(ip.total_collected, 0) AS total_collected,
-      COALESCE(ip.total_due, 0) AS total_due,
-      COALESCE(ip.total_cogs, 0) AS total_cogs,
-      COALESCE(ip.gross_profit, 0) AS gross_profit
-    FROM period_series ps
-    LEFT JOIN invoice_periods ip ON ip.period_start = ps.period_start
-    ORDER BY ps.period_start ASC;
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
+      TO_CHAR(ms.month_start, 'YYYY-MM-DD') AS period_start,
+      TO_CHAR((ms.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date, 'YYYY-MM-DD') AS period_end,
+      COALESCE(im.total_invoices, 0) AS total_invoices,
+      COALESCE(im.total_sales, 0) AS total_sales,
+      COALESCE(im.total_net_sales, 0) AS total_net_sales,
+      COALESCE(im.total_collected, 0) AS total_collected,
+      COALESCE(im.total_due, 0) AS total_due,
+      COALESCE(im.total_cogs, 0) AS total_cogs,
+      COALESCE(im.gross_profit, 0) AS gross_profit
+    FROM month_series ms
+    LEFT JOIN invoice_monthly im ON im.month_start = ms.month_start
+    ORDER BY ms.month_start ASC;
   `;
 
   const result = await pool.query(query);
@@ -1054,24 +1125,12 @@ export async function getExecutiveKpiSnapshot() {
 export async function getExecutiveComparisonTimeline(months = 6) {
   const safeMonths = Math.min(Math.max(Number(months || 6), 1), 6);
   const query = `
-    WITH period_series AS (
-      SELECT
-        month_start,
-        half_index,
-        CASE
-          WHEN half_index = 1 THEN month_start
-          ELSE month_start + INTERVAL '15 days'
-        END::date AS period_start,
-        CASE
-          WHEN half_index = 1 THEN month_start + INTERVAL '14 days'
-          ELSE (month_start + INTERVAL '1 month' - INTERVAL '1 day')
-        END::date AS period_end
-      FROM generate_series(
+    WITH month_series AS (
+      SELECT generate_series(
         DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) * INTERVAL '1 month'),
         DATE_TRUNC('month', CURRENT_DATE),
         INTERVAL '1 month'
-      ) AS month_series(month_start)
-      CROSS JOIN generate_series(1, 2) AS halves(half_index)
+      )::date AS month_start
     ),
     invoice_cogs AS (
       SELECT
@@ -1081,13 +1140,9 @@ export async function getExecutiveComparisonTimeline(months = 6) {
       INNER JOIN products p ON p.id = ii.product_id
       GROUP BY ii.invoice_id
     ),
-    invoice_periods AS (
+    invoice_monthly AS (
       SELECT
-        CASE
-          WHEN EXTRACT(DAY FROM i.invoice_date) <= 15
-            THEN DATE_TRUNC('month', i.invoice_date)::date
-          ELSE (DATE_TRUNC('month', i.invoice_date) + INTERVAL '15 days')::date
-        END AS period_start,
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
         COUNT(*)::int AS total_invoices,
         COALESCE(SUM(i.total_amount), 0) AS invoiced_amount,
         COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) AS net_sales_amount,
@@ -1100,53 +1155,29 @@ export async function getExecutiveComparisonTimeline(months = 6) {
       LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
       WHERE i.status IN ('issued', 'partial', 'paid')
         AND i.invoice_date >= DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) * INTERVAL '1 month')
-      GROUP BY
-        CASE
-          WHEN EXTRACT(DAY FROM i.invoice_date) <= 15
-            THEN DATE_TRUNC('month', i.invoice_date)::date
-          ELSE (DATE_TRUNC('month', i.invoice_date) + INTERVAL '15 days')::date
-        END
+      GROUP BY DATE_TRUNC('month', i.invoice_date)::date
     ),
-    payment_periods AS (
+    payment_monthly AS (
       SELECT
-        CASE
-          WHEN EXTRACT(DAY FROM p.payment_date) <= 15
-            THEN DATE_TRUNC('month', p.payment_date)::date
-          ELSE (DATE_TRUNC('month', p.payment_date) + INTERVAL '15 days')::date
-        END AS period_start,
+        DATE_TRUNC('month', p.payment_date)::date AS month_start,
         COALESCE(SUM(p.amount), 0) AS payments_received
       FROM payments p
       WHERE p.payment_date >= DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) * INTERVAL '1 month')
-      GROUP BY
-        CASE
-          WHEN EXTRACT(DAY FROM p.payment_date) <= 15
-            THEN DATE_TRUNC('month', p.payment_date)::date
-          ELSE (DATE_TRUNC('month', p.payment_date) + INTERVAL '15 days')::date
-        END
+      GROUP BY DATE_TRUNC('month', p.payment_date)::date
     ),
-    expense_periods AS (
+    expense_monthly AS (
       SELECT
-        CASE
-          WHEN EXTRACT(DAY FROM e.expense_date) <= 15
-            THEN DATE_TRUNC('month', e.expense_date)::date
-          ELSE (DATE_TRUNC('month', e.expense_date) + INTERVAL '15 days')::date
-        END AS period_start,
+        DATE_TRUNC('month', e.expense_date)::date AS month_start,
         COALESCE(SUM(e.amount), 0) AS expenses_amount
       FROM expenses e
       WHERE e.expense_date >= DATE_TRUNC('month', CURRENT_DATE) - (($1::int - 1) * INTERVAL '1 month')
-      GROUP BY
-        CASE
-          WHEN EXTRACT(DAY FROM e.expense_date) <= 15
-            THEN DATE_TRUNC('month', e.expense_date)::date
-          ELSE (DATE_TRUNC('month', e.expense_date) + INTERVAL '15 days')::date
-        END
+      GROUP BY DATE_TRUNC('month', e.expense_date)::date
     )
     SELECT
-      TO_CHAR(ps.month_start, 'YYYY-MM') || '-H' || ps.half_index AS period,
-      TO_CHAR(ps.month_start, 'YYYY-MM') AS month_period,
-      ps.half_index AS period_half,
-      TO_CHAR(ps.period_start, 'YYYY-MM-DD') AS period_start,
-      TO_CHAR(ps.period_end, 'YYYY-MM-DD') AS period_end,
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
+      TO_CHAR(ms.month_start, 'YYYY-MM-DD') AS period_start,
+      TO_CHAR((ms.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date, 'YYYY-MM-DD') AS period_end,
       COALESCE(im.total_invoices, 0) AS total_invoices,
       COALESCE(im.invoiced_amount, 0) AS invoiced_amount,
       COALESCE(pm.payments_received, 0) AS payments_received,
@@ -1154,11 +1185,11 @@ export async function getExecutiveComparisonTimeline(months = 6) {
       COALESCE(im.gross_profit_amount, 0) AS gross_profit_amount,
       COALESCE(im.net_sales_amount, 0) AS net_sales_amount,
       COALESCE(im.cogs_amount, 0) AS cogs_amount
-    FROM period_series ps
-    LEFT JOIN invoice_periods im ON im.period_start = ps.period_start
-    LEFT JOIN payment_periods pm ON pm.period_start = ps.period_start
-    LEFT JOIN expense_periods em ON em.period_start = ps.period_start
-    ORDER BY ps.period_start ASC;
+    FROM month_series ms
+    LEFT JOIN invoice_monthly im ON im.month_start = ms.month_start
+    LEFT JOIN payment_monthly pm ON pm.month_start = ms.month_start
+    LEFT JOIN expense_monthly em ON em.month_start = ms.month_start
+    ORDER BY ms.month_start ASC;
   `;
 
   const result = await pool.query(query, [safeMonths]);
@@ -1923,24 +1954,12 @@ export async function getCommercialDashboard(
   `;
 
   const monthlyTrendQuery = `
-    WITH period_series AS (
-      SELECT
-        month_start,
-        half_index,
-        CASE
-          WHEN half_index = 1 THEN month_start
-          ELSE month_start + INTERVAL '15 days'
-        END::date AS period_start,
-        CASE
-          WHEN half_index = 1 THEN month_start + INTERVAL '14 days'
-          ELSE (month_start + INTERVAL '1 month' - INTERVAL '1 day')
-        END::date AS period_end
-      FROM generate_series(
+    WITH month_series AS (
+      SELECT generate_series(
         DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months',
         DATE_TRUNC('month', CURRENT_DATE),
         INTERVAL '1 month'
-      ) AS month_series(month_start)
-      CROSS JOIN generate_series(1, 2) AS halves(half_index)
+      )::date AS month_start
     ),
     invoice_cogs AS (
       SELECT
@@ -1950,13 +1969,9 @@ export async function getCommercialDashboard(
       INNER JOIN products p ON p.id = ii.product_id
       GROUP BY ii.invoice_id
     ),
-    invoice_periods AS (
+    invoice_monthly AS (
       SELECT
-        CASE
-          WHEN EXTRACT(DAY FROM i.invoice_date) <= 15
-            THEN DATE_TRUNC('month', i.invoice_date)::date
-          ELSE (DATE_TRUNC('month', i.invoice_date) + INTERVAL '15 days')::date
-        END AS period_start,
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
         COUNT(*)::int AS total_invoices,
         COALESCE(SUM(i.total_amount), 0) AS total_sales_amount,
         COALESCE(SUM(i.total_amount - COALESCE(i.tax_amount, 0)), 0) AS total_net_sales_amount,
@@ -1971,29 +1986,23 @@ export async function getCommercialDashboard(
       LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
       WHERE i.status IN ('issued', 'partial', 'paid')
         AND i.invoice_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
-      GROUP BY
-        CASE
-          WHEN EXTRACT(DAY FROM i.invoice_date) <= 15
-            THEN DATE_TRUNC('month', i.invoice_date)::date
-          ELSE (DATE_TRUNC('month', i.invoice_date) + INTERVAL '15 days')::date
-        END
+      GROUP BY DATE_TRUNC('month', i.invoice_date)::date
     )
     SELECT
-      TO_CHAR(ps.month_start, 'YYYY-MM') || '-H' || ps.half_index AS period,
-      TO_CHAR(ps.month_start, 'YYYY-MM') AS month_period,
-      ps.half_index AS period_half,
-      TO_CHAR(ps.period_start, 'YYYY-MM-DD') AS period_start,
-      TO_CHAR(ps.period_end, 'YYYY-MM-DD') AS period_end,
-      COALESCE(ip.total_invoices, 0) AS total_invoices,
-      COALESCE(ip.total_sales_amount, 0) AS total_sales_amount,
-      COALESCE(ip.total_net_sales_amount, 0) AS total_net_sales_amount,
-      COALESCE(ip.total_collected_amount, 0) AS total_collected_amount,
-      COALESCE(ip.total_receivables, 0) AS total_receivables,
-      COALESCE(ip.total_cogs_amount, 0) AS total_cogs_amount,
-      COALESCE(ip.gross_profit_amount, 0) AS gross_profit_amount
-    FROM period_series ps
-    LEFT JOIN invoice_periods ip ON ip.period_start = ps.period_start
-    ORDER BY ps.period_start ASC;
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
+      TO_CHAR(ms.month_start, 'YYYY-MM-DD') AS period_start,
+      TO_CHAR((ms.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date, 'YYYY-MM-DD') AS period_end,
+      COALESCE(im.total_invoices, 0) AS total_invoices,
+      COALESCE(im.total_sales_amount, 0) AS total_sales_amount,
+      COALESCE(im.total_net_sales_amount, 0) AS total_net_sales_amount,
+      COALESCE(im.total_collected_amount, 0) AS total_collected_amount,
+      COALESCE(im.total_receivables, 0) AS total_receivables,
+      COALESCE(im.total_cogs_amount, 0) AS total_cogs_amount,
+      COALESCE(im.gross_profit_amount, 0) AS gross_profit_amount
+    FROM month_series ms
+    LEFT JOIN invoice_monthly im ON im.month_start = ms.month_start
+    ORDER BY ms.month_start ASC;
   `;
 
   const salesByCityQuery = `
@@ -2512,24 +2521,12 @@ export async function getCommercialDashboard(
   `;
 
   const customerMonthlyTrendQuery = `
-    WITH period_series AS (
-      SELECT
-        month_start,
-        half_index,
-        CASE
-          WHEN half_index = 1 THEN month_start
-          ELSE month_start + INTERVAL '15 days'
-        END::date AS period_start,
-        CASE
-          WHEN half_index = 1 THEN month_start + INTERVAL '14 days'
-          ELSE (month_start + INTERVAL '1 month' - INTERVAL '1 day')
-        END::date AS period_end
-      FROM generate_series(
+    WITH month_series AS (
+      SELECT generate_series(
         DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months',
         DATE_TRUNC('month', CURRENT_DATE),
         INTERVAL '1 month'
-      ) AS month_series(month_start)
-      CROSS JOIN generate_series(1, 2) AS halves(half_index)
+      )::date AS month_start
     ),
     top_customers AS (
       SELECT
@@ -2543,65 +2540,44 @@ export async function getCommercialDashboard(
       ORDER BY COALESCE(SUM(i.total_amount), 0) DESC, c.business_name ASC
       LIMIT $1
     ),
-    billed_periods AS (
+    billed_monthly AS (
       SELECT
         i.customer_id,
-        CASE
-          WHEN EXTRACT(DAY FROM i.invoice_date) <= 15
-            THEN DATE_TRUNC('month', i.invoice_date)::date
-          ELSE (DATE_TRUNC('month', i.invoice_date) + INTERVAL '15 days')::date
-        END AS period_start,
+        DATE_TRUNC('month', i.invoice_date)::date AS month_start,
         COALESCE(SUM(i.total_amount), 0) AS billed_amount
       FROM invoices i
       WHERE i.status IN ('issued', 'partial', 'paid')
         AND i.invoice_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
-      GROUP BY
-        i.customer_id,
-        CASE
-          WHEN EXTRACT(DAY FROM i.invoice_date) <= 15
-            THEN DATE_TRUNC('month', i.invoice_date)::date
-          ELSE (DATE_TRUNC('month', i.invoice_date) + INTERVAL '15 days')::date
-        END
+      GROUP BY i.customer_id, DATE_TRUNC('month', i.invoice_date)::date
     ),
-    paid_periods AS (
+    paid_monthly AS (
       SELECT
         i.customer_id,
-        CASE
-          WHEN EXTRACT(DAY FROM p.payment_date) <= 15
-            THEN DATE_TRUNC('month', p.payment_date)::date
-          ELSE (DATE_TRUNC('month', p.payment_date) + INTERVAL '15 days')::date
-        END AS period_start,
+        DATE_TRUNC('month', p.payment_date)::date AS month_start,
         COALESCE(SUM(p.amount), 0) AS payments_received
       FROM payments p
       INNER JOIN invoices i ON i.id = p.invoice_id
       WHERE p.payment_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
-      GROUP BY
-        i.customer_id,
-        CASE
-          WHEN EXTRACT(DAY FROM p.payment_date) <= 15
-            THEN DATE_TRUNC('month', p.payment_date)::date
-          ELSE (DATE_TRUNC('month', p.payment_date) + INTERVAL '15 days')::date
-        END
+      GROUP BY i.customer_id, DATE_TRUNC('month', p.payment_date)::date
     )
     SELECT
-      TO_CHAR(ps.month_start, 'YYYY-MM') || '-H' || ps.half_index AS period,
-      TO_CHAR(ps.month_start, 'YYYY-MM') AS month_period,
-      ps.half_index AS period_half,
-      TO_CHAR(ps.period_start, 'YYYY-MM-DD') AS period_start,
-      TO_CHAR(ps.period_end, 'YYYY-MM-DD') AS period_end,
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
+      TO_CHAR(ms.month_start, 'YYYY-MM-DD') AS period_start,
+      TO_CHAR((ms.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date, 'YYYY-MM-DD') AS period_end,
       tc.customer_id,
       tc.business_name,
       COALESCE(bm.billed_amount, 0) AS billed_amount,
       COALESCE(pm.payments_received, 0) AS payments_received
     FROM top_customers tc
-    CROSS JOIN period_series ps
-    LEFT JOIN billed_periods bm
+    CROSS JOIN month_series ms
+    LEFT JOIN billed_monthly bm
       ON bm.customer_id = tc.customer_id
-     AND bm.period_start = ps.period_start
-    LEFT JOIN paid_periods pm
+     AND bm.month_start = ms.month_start
+    LEFT JOIN paid_monthly pm
       ON pm.customer_id = tc.customer_id
-     AND pm.period_start = ps.period_start
-    ORDER BY tc.business_name ASC, ps.period_start ASC;
+     AND pm.month_start = ms.month_start
+    ORDER BY tc.business_name ASC, ms.month_start ASC;
   `;
 
   const decliningProductsQuery = `
@@ -3444,9 +3420,16 @@ export async function getExecutiveAnalyticsDashboard(filters = {}) {
     1000000
   );
   const endDate = filters.endDate || formatIsoDate(new Date());
+  const endDateObject = new Date(`${endDate}T00:00:00`);
   const startDate =
     filters.startDate ||
-    formatIsoDate(addDays(new Date(`${endDate}T00:00:00`), -179));
+    formatIsoDate(
+      new Date(
+        endDateObject.getFullYear(),
+        endDateObject.getMonth() - 5,
+        1
+      )
+    );
 
   const baseValues = [startDate, endDate, warehouseId];
 
@@ -4137,32 +4120,16 @@ export async function getExecutiveAnalyticsDashboard(filters = {}) {
 
 export async function getAccountingMonthlyOverview() {
   const query = `
-    WITH period_series AS (
-      SELECT
-        month_start,
-        half_index,
-        CASE
-          WHEN half_index = 1 THEN month_start
-          ELSE month_start + INTERVAL '15 days'
-        END::date AS period_start,
-        CASE
-          WHEN half_index = 1 THEN month_start + INTERVAL '14 days'
-          ELSE (month_start + INTERVAL '1 month' - INTERVAL '1 day')
-        END::date AS period_end
-      FROM generate_series(
+    WITH month_series AS (
+      SELECT generate_series(
         DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months',
         DATE_TRUNC('month', CURRENT_DATE),
         INTERVAL '1 month'
-      ) AS month_series(month_start)
-      CROSS JOIN generate_series(1, 2) AS halves(half_index)
+      )::date AS month_start
     ),
-    entry_periods AS (
+    entry_monthly AS (
       SELECT
-        CASE
-          WHEN EXTRACT(DAY FROM je.entry_date) <= 15
-            THEN DATE_TRUNC('month', je.entry_date)::date
-          ELSE (DATE_TRUNC('month', je.entry_date) + INTERVAL '15 days')::date
-        END AS period_start,
+        DATE_TRUNC('month', je.entry_date)::date AS month_start,
         COUNT(DISTINCT je.id)::int AS total_entries,
         COALESCE(SUM(jel.debit), 0) AS total_debit,
         COALESCE(SUM(jel.credit), 0) AS total_credit
@@ -4170,25 +4137,19 @@ export async function getAccountingMonthlyOverview() {
       INNER JOIN journal_entry_lines jel ON jel.journal_entry_id = je.id
       WHERE je.status = 'posted'
         AND je.entry_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '5 months'
-      GROUP BY
-        CASE
-          WHEN EXTRACT(DAY FROM je.entry_date) <= 15
-            THEN DATE_TRUNC('month', je.entry_date)::date
-          ELSE (DATE_TRUNC('month', je.entry_date) + INTERVAL '15 days')::date
-        END
+      GROUP BY DATE_TRUNC('month', je.entry_date)::date
     )
     SELECT
-      TO_CHAR(ps.month_start, 'YYYY-MM') || '-H' || ps.half_index AS period,
-      TO_CHAR(ps.month_start, 'YYYY-MM') AS month_period,
-      ps.half_index AS period_half,
-      TO_CHAR(ps.period_start, 'YYYY-MM-DD') AS period_start,
-      TO_CHAR(ps.period_end, 'YYYY-MM-DD') AS period_end,
-      COALESCE(ep.total_entries, 0) AS total_entries,
-      COALESCE(ep.total_debit, 0) AS total_debit,
-      COALESCE(ep.total_credit, 0) AS total_credit
-    FROM period_series ps
-    LEFT JOIN entry_periods ep ON ep.period_start = ps.period_start
-    ORDER BY ps.period_start ASC;
+      TO_CHAR(ms.month_start, 'YYYY-MM') AS period,
+      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
+      TO_CHAR(ms.month_start, 'YYYY-MM-DD') AS period_start,
+      TO_CHAR((ms.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date, 'YYYY-MM-DD') AS period_end,
+      COALESCE(em.total_entries, 0) AS total_entries,
+      COALESCE(em.total_debit, 0) AS total_debit,
+      COALESCE(em.total_credit, 0) AS total_credit
+    FROM month_series ms
+    LEFT JOIN entry_monthly em ON em.month_start = ms.month_start
+    ORDER BY ms.month_start ASC;
   `;
 
   const result = await pool.query(query);

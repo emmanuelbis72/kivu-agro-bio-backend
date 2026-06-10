@@ -1,6 +1,7 @@
 import express from "express";
 import {
   getDashboardOverviewHandler,
+  getCustomerBalanceBoardHandler,
   getAccountingDashboardOverviewHandler,
   getExecutiveAnalyticsDashboardHandler,
   getGlobalStatsHandler,
@@ -25,6 +26,7 @@ import {
 const router = express.Router();
 
 router.get("/overview", getDashboardOverviewHandler);
+router.get("/customer-balance-board", getCustomerBalanceBoardHandler);
 router.get("/executive-analytics", getExecutiveAnalyticsDashboardHandler);
 router.get("/commercial-overview", getCommercialDashboardHandler);
 router.get("/collections-overview", getCollectionsDashboardHandler);

@@ -147,6 +147,34 @@ export async function getDashboardOverviewHandler(req, res, next) {
   }
 }
 
+export async function getCustomerBalanceBoardHandler(req, res, next) {
+  try {
+    const now = new Date();
+    const defaultEndDate = now.toISOString().split("T")[0];
+    const defaultStartDate = new Date(
+      now.getFullYear(),
+      now.getMonth() - 5,
+      1
+    )
+      .toISOString()
+      .split("T")[0];
+
+    const data = await getCustomerBalanceBoard({
+      startDate: parseDateFilter(req.query.start_date) || defaultStartDate,
+      endDate: parseDateFilter(req.query.end_date) || defaultEndDate,
+      warehouseId: parsePositiveInteger(req.query.warehouse_id),
+      customerId: parsePositiveInteger(req.query.customer_id)
+    });
+
+    return res.status(200).json({
+      success: true,
+      data
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function getExecutiveAnalyticsDashboardHandler(req, res, next) {
   try {
     const topLimit = parsePositiveLimit(req.query.top_limit, 10, 20);

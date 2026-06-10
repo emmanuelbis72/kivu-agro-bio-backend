@@ -1318,10 +1318,10 @@ const reportDefinitions = {
     buildFilename: (filters) =>
       `compte-resultat-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
     columns: [
-      { key: "section", header: "Section", width: 70, xlsxWidth: 16 },
+      { key: "section", header: "Rubrique", width: 85, xlsxWidth: 22 },
       { key: "account_number", header: "Compte", width: 55, xlsxWidth: 14 },
-      { key: "account_name", header: "Libelle", width: 130, xlsxWidth: 32 },
-      { key: "account_type", header: "Type", width: 60, xlsxWidth: 14 },
+      { key: "account_name", header: "Designation", width: 145, xlsxWidth: 36 },
+      { key: "account_type", header: "Nature", width: 60, xlsxWidth: 14 },
       { key: "total_debit", header: "Debit", type: "money", width: 70, xlsxWidth: 16 },
       { key: "total_credit", header: "Credit", type: "money", width: 70, xlsxWidth: 16 },
       { key: "net_amount", header: "Net", type: "money", width: 75, xlsxWidth: 16 }
@@ -1344,18 +1344,20 @@ const reportDefinitions = {
     buildFilename: (filters) =>
       `etat-tresorerie-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
     columns: [
-      { key: "period_label", header: "Periode", width: 75, xlsxWidth: 18 },
-      { key: "receipts_count", header: "Recettes", type: "integer", width: 50, xlsxWidth: 10 },
-      { key: "customer_receipts", header: "Encaissements", type: "money", width: 75, xlsxWidth: 16 },
-      { key: "supplier_payments_count", header: "Regl. four.", type: "integer", width: 55, xlsxWidth: 12 },
-      { key: "supplier_payments", header: "Paiements four.", type: "money", width: 75, xlsxWidth: 16 },
-      { key: "expenses_count", header: "Depenses", type: "integer", width: 50, xlsxWidth: 10 },
-      { key: "operating_expenses", header: "Depenses op.", type: "money", width: 75, xlsxWidth: 16 },
-      { key: "total_outflows", header: "Sorties", type: "money", width: 70, xlsxWidth: 16 },
-      { key: "net_cash_flow", header: "Flux net", type: "money", width: 70, xlsxWidth: 16 },
-      { key: "cumulative_net_cash_flow", header: "Cumul", type: "money", width: 70, xlsxWidth: 16 }
+      { key: "movement_date", header: "Date", type: "date", width: 58, xlsxWidth: 14 },
+      { key: "flow_type", header: "Nature", width: 75, xlsxWidth: 20 },
+      { key: "designation", header: "Designation", width: 125, xlsxWidth: 34 },
+      { key: "third_party", header: "Client / fournisseur", width: 100, xlsxWidth: 28 },
+      { key: "warehouse_name", header: "Depot", width: 75, xlsxWidth: 18 },
+      { key: "document_reference", header: "Piece", width: 75, xlsxWidth: 18 },
+      { key: "payment_method", header: "Mode", width: 55, xlsxWidth: 14 },
+      { key: "inflow", header: "Entree", type: "money", width: 70, xlsxWidth: 16 },
+      { key: "outflow", header: "Sortie", type: "money", width: 70, xlsxWidth: 16 },
+      { key: "net_amount", header: "Flux net", type: "money", width: 70, xlsxWidth: 16 },
+      { key: "running_balance", header: "Solde cumule", type: "money", width: 75, xlsxWidth: 18 }
     ],
     summaryItems: (summary) => [
+      { label: "Mouvements", value: Number(summary.movements_count || 0), rawValue: Number(summary.movements_count || 0), type: "integer" },
       { label: "Encaissements", value: Number(summary.total_receipts || 0), rawValue: Number(summary.total_receipts || 0), type: "money" },
       { label: "Paiements fournisseurs", value: Number(summary.total_supplier_payments || 0), rawValue: Number(summary.total_supplier_payments || 0), type: "money" },
       { label: "Depenses", value: Number(summary.total_operating_expenses || 0), rawValue: Number(summary.total_operating_expenses || 0), type: "money" },

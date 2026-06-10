@@ -1711,32 +1711,100 @@ export async function getIncomeStatementReport(filters = {}) {
   const totalCogsAmount = Number(grossProfitRow.total_cogs_amount || 0);
   const grossProfitAmount = netSalesAmount - totalCogsAmount;
 
+  const revenueRows = (incomeStatement.revenues || []).map((row) => ({
+    section: "Produits comptables",
+    line_type: "account",
+    account_number: row.account_number,
+    account_name: row.account_name,
+    account_type: row.account_type,
+    total_debit: roundAmount(row.total_debit),
+    total_credit: roundAmount(row.total_credit),
+    net_amount: roundAmount(row.net_amount)
+  }));
+  const expenseRows = (incomeStatement.expenses || []).map((row) => ({
+    section: "Charges comptables",
+    line_type: "account",
+    account_number: row.account_number,
+    account_name: row.account_name,
+    account_type: row.account_type,
+    total_debit: roundAmount(row.total_debit),
+    total_credit: roundAmount(row.total_credit),
+    net_amount: roundAmount(row.net_amount)
+  }));
+  const totalRevenue = roundAmount(incomeStatement.totals?.total_revenue || 0);
+  const totalExpense = roundAmount(incomeStatement.totals?.total_expense || 0);
+  const netResult = roundAmount(incomeStatement.totals?.net_result || 0);
+
   const rows = [
-    ...(incomeStatement.revenues || []).map((row) => ({
-      section: "Produits",
-      account_number: row.account_number,
-      account_name: row.account_name,
-      account_type: row.account_type,
-      total_debit: roundAmount(row.total_debit),
-      total_credit: roundAmount(row.total_credit),
-      net_amount: roundAmount(row.net_amount)
-    })),
-    ...(incomeStatement.expenses || []).map((row) => ({
-      section: "Charges",
-      account_number: row.account_number,
-      account_name: row.account_name,
-      account_type: row.account_type,
-      total_debit: roundAmount(row.total_debit),
-      total_credit: roundAmount(row.total_credit),
-      net_amount: roundAmount(row.net_amount)
-    }))
+    {
+      section: "Indicateurs de gestion",
+      line_type: "management",
+      account_number: "",
+      account_name: "Ventes nettes facturees",
+      account_type: "income",
+      total_debit: 0,
+      total_credit: roundAmount(netSalesAmount),
+      net_amount: roundAmount(netSalesAmount)
+    },
+    {
+      section: "Indicateurs de gestion",
+      line_type: "management",
+      account_number: "",
+      account_name: "Cout des ventes",
+      account_type: "expense",
+      total_debit: roundAmount(totalCogsAmount),
+      total_credit: 0,
+      net_amount: roundAmount(totalCogsAmount)
+    },
+    {
+      section: "Indicateurs de gestion",
+      line_type: "subtotal",
+      account_number: "",
+      account_name: "Marge brute commerciale",
+      account_type: "result",
+      total_debit: 0,
+      total_credit: 0,
+      net_amount: roundAmount(grossProfitAmount)
+    },
+    ...revenueRows,
+    {
+      section: "Produits comptables",
+      line_type: "subtotal",
+      account_number: "",
+      account_name: "Total produits",
+      account_type: "income",
+      total_debit: 0,
+      total_credit: totalRevenue,
+      net_amount: totalRevenue
+    },
+    ...expenseRows,
+    {
+      section: "Charges comptables",
+      line_type: "subtotal",
+      account_number: "",
+      account_name: "Total charges",
+      account_type: "expense",
+      total_debit: totalExpense,
+      total_credit: 0,
+      net_amount: totalExpense
+    },
+    {
+      section: "Resultat",
+      line_type: "total",
+      account_number: "",
+      account_name: netResult >= 0 ? "Benefice net" : "Perte nette",
+      account_type: "result",
+      total_debit: 0,
+      total_credit: 0,
+      net_amount: netResult
+    }
   ];
 
   return {
     summary: {
-      total_revenue: roundAmount(incomeStatement.totals?.total_revenue || 0),
-      total_expense: roundAmount(incomeStatement.totals?.total_expense || 0),
-      net_result: roundAmount(incomeStatement.totals?.net_result || 0),
+      total_revenue: totalRevenue,
+      total_expense: totalExpense,
+      net_result: netResult,
       net_sales_amount: roundAmount(netSalesAmount),
       total_cogs_amount: roundAmount(totalCogsAmount),
       gross_profit_amount: roundAmount(grossProfitAmount),
@@ -1751,116 +1819,120 @@ export async function getIncomeStatementReport(filters = {}) {
 export async function getTreasuryStatementReport(filters = {}) {
   await ensureReportsSchema(pool);
 
-  const paymentValues = [];
-  const paymentConditions = [`1 = 1`];
-  const supplierPaymentConditions = [`1 = 1`];
-  const expenseConditions = [`1 = 1`];
-
-  if (filters.startDate) {
-    paymentValues.push(filters.startDate);
-    paymentConditions.push(`p.payment_date >= $${paymentValues.length}`);
-    supplierPaymentConditions.push(`sp.payment_date >= $${paymentValues.length}`);
-    expenseConditions.push(`e.expense_date >= $${paymentValues.length}`);
-  }
-
-  if (filters.endDate) {
-    paymentValues.push(filters.endDate);
-    paymentConditions.push(`p.payment_date <= $${paymentValues.length}`);
-    supplierPaymentConditions.push(`sp.payment_date <= $${paymentValues.length}`);
-    expenseConditions.push(`e.expense_date <= $${paymentValues.length}`);
-  }
-
-  const monthlyValues = [
-    ...paymentValues,
-    filters.startDate || null,
-    filters.endDate || null
-  ];
-
-  const monthlyQuery = `
-    WITH month_series AS (
-      SELECT generate_series(
-        DATE_TRUNC('month', COALESCE($${paymentValues.length + 1}::date, CURRENT_DATE - INTERVAL '5 months')),
-        DATE_TRUNC('month', COALESCE($${paymentValues.length + 2}::date, CURRENT_DATE)),
-        INTERVAL '1 month'
-      )::date AS month_start
-    ),
-    customer_receipts AS (
+  const values = [filters.startDate || null, filters.endDate || null];
+  const movementsQuery = `
+    SELECT *
+    FROM (
       SELECT
-        DATE_TRUNC('month', p.payment_date)::date AS month_start,
-        COUNT(*)::int AS receipts_count,
-        COALESCE(SUM(p.amount), 0) AS customer_receipts
+        p.payment_date AS movement_date,
+        1 AS flow_order,
+        p.id AS movement_id,
+        'Encaissement client' AS flow_type,
+        COALESCE(
+          NULLIF(TRIM(p.notes), ''),
+          'Reglement facture ' || i.invoice_number
+        ) AS designation,
+        c.business_name AS third_party,
+        c.business_name AS customer_name,
+        w.name AS warehouse_name,
+        i.invoice_number AS document_reference,
+        p.reference AS payment_reference,
+        p.payment_method,
+        p.amount AS inflow,
+        0::numeric AS outflow
       FROM payments p
-      WHERE ${paymentConditions.join(" AND ")}
-      GROUP BY DATE_TRUNC('month', p.payment_date)::date
-    ),
-    supplier_payments AS (
+      INNER JOIN invoices i ON i.id = p.invoice_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      LEFT JOIN warehouses w ON w.id = i.warehouse_id
+      WHERE ($1::date IS NULL OR p.payment_date >= $1)
+        AND ($2::date IS NULL OR p.payment_date <= $2)
+
+      UNION ALL
+
       SELECT
-        DATE_TRUNC('month', sp.payment_date)::date AS month_start,
-        COUNT(*)::int AS supplier_payments_count,
-        COALESCE(SUM(sp.amount), 0) AS supplier_payments
+        sp.payment_date AS movement_date,
+        2 AS flow_order,
+        sp.id AS movement_id,
+        'Paiement fournisseur' AS flow_type,
+        COALESCE(
+          NULLIF(TRIM(sp.notes), ''),
+          CASE
+            WHEN pi.purchase_invoice_number IS NOT NULL
+              THEN 'Reglement facture ' || pi.purchase_invoice_number
+            ELSE 'Paiement fournisseur'
+          END
+        ) AS designation,
+        s.business_name AS third_party,
+        NULL::varchar AS customer_name,
+        w.name AS warehouse_name,
+        pi.purchase_invoice_number AS document_reference,
+        sp.reference AS payment_reference,
+        sp.payment_method,
+        0::numeric AS inflow,
+        sp.amount AS outflow
       FROM supplier_payments sp
-      WHERE ${supplierPaymentConditions.join(" AND ")}
-      GROUP BY DATE_TRUNC('month', sp.payment_date)::date
-    ),
-    operating_expenses AS (
+      INNER JOIN suppliers s ON s.id = sp.supplier_id
+      LEFT JOIN purchase_invoices pi ON pi.id = sp.purchase_invoice_id
+      LEFT JOIN warehouses w ON w.id = pi.warehouse_id
+      WHERE ($1::date IS NULL OR sp.payment_date >= $1)
+        AND ($2::date IS NULL OR sp.payment_date <= $2)
+
+      UNION ALL
+
       SELECT
-        DATE_TRUNC('month', e.expense_date)::date AS month_start,
-        COUNT(*)::int AS expenses_count,
-        COALESCE(SUM(e.amount), 0) AS operating_expenses
+        e.expense_date AS movement_date,
+        3 AS flow_order,
+        e.id AS movement_id,
+        'Depense' AS flow_type,
+        COALESCE(NULLIF(TRIM(e.description), ''), e.category) AS designation,
+        COALESCE(s.business_name, NULLIF(TRIM(e.supplier), ''), 'Non renseigne') AS third_party,
+        NULL::varchar AS customer_name,
+        NULL::varchar AS warehouse_name,
+        e.reference AS document_reference,
+        e.reference AS payment_reference,
+        e.payment_method,
+        0::numeric AS inflow,
+        e.amount AS outflow
       FROM expenses e
-      WHERE ${expenseConditions.join(" AND ")}
-      GROUP BY DATE_TRUNC('month', e.expense_date)::date
-    )
-    SELECT
-      ms.month_start,
-      TO_CHAR(ms.month_start, 'YYYY-MM') AS period_key,
-      TO_CHAR(ms.month_start, 'Mon YYYY') AS period_label,
-      COALESCE(cr.receipts_count, 0) AS receipts_count,
-      COALESCE(cr.customer_receipts, 0) AS customer_receipts,
-      COALESCE(sp.supplier_payments_count, 0) AS supplier_payments_count,
-      COALESCE(sp.supplier_payments, 0) AS supplier_payments,
-      COALESCE(oe.expenses_count, 0) AS expenses_count,
-      COALESCE(oe.operating_expenses, 0) AS operating_expenses
-    FROM month_series ms
-    LEFT JOIN customer_receipts cr ON cr.month_start = ms.month_start
-    LEFT JOIN supplier_payments sp ON sp.month_start = ms.month_start
-    LEFT JOIN operating_expenses oe ON oe.month_start = ms.month_start
-    ORDER BY ms.month_start ASC;
+      LEFT JOIN suppliers s ON s.id = e.supplier_id
+      WHERE ($1::date IS NULL OR e.expense_date >= $1)
+        AND ($2::date IS NULL OR e.expense_date <= $2)
+    ) movements
+    ORDER BY movement_date ASC, flow_order ASC, movement_id ASC;
   `;
 
-  const monthlyResult = await pool.query(monthlyQuery, monthlyValues);
-  const forecast = await getCashForecast(10);
+  const [movementsResult, forecast] = await Promise.all([
+    pool.query(movementsQuery, values),
+    getCashForecast(10),
+  ]);
 
-  let runningNetCash = 0;
-  const rows = monthlyResult.rows.map((row) => {
-    const customerReceipts = Number(row.customer_receipts || 0);
-    const supplierPayments = Number(row.supplier_payments || 0);
-    const operatingExpenses = Number(row.operating_expenses || 0);
-    const totalOutflows = supplierPayments + operatingExpenses;
-    const netCashFlow = customerReceipts - totalOutflows;
-    runningNetCash += netCashFlow;
+  let runningBalance = 0;
+  const detailRows = movementsResult.rows.map((row) => {
+    const inflow = Number(row.inflow || 0);
+    const outflow = Number(row.outflow || 0);
+    const netAmount = inflow - outflow;
+    runningBalance += netAmount;
 
     return {
       ...row,
-      receipts_count: Number(row.receipts_count || 0),
-      customer_receipts: roundAmount(customerReceipts),
-      supplier_payments_count: Number(row.supplier_payments_count || 0),
-      supplier_payments: roundAmount(supplierPayments),
-      expenses_count: Number(row.expenses_count || 0),
-      operating_expenses: roundAmount(operatingExpenses),
-      total_outflows: roundAmount(totalOutflows),
-      net_cash_flow: roundAmount(netCashFlow),
-      cumulative_net_cash_flow: roundAmount(runningNetCash)
+      inflow: roundAmount(inflow),
+      outflow: roundAmount(outflow),
+      net_amount: roundAmount(netAmount),
+      running_balance: roundAmount(runningBalance),
+      is_total: false
     };
   });
 
-  const summary = rows.reduce(
+  const summary = detailRows.reduce(
     (acc, row) => {
-      acc.total_receipts += Number(row.customer_receipts || 0);
-      acc.total_supplier_payments += Number(row.supplier_payments || 0);
-      acc.total_operating_expenses += Number(row.operating_expenses || 0);
-      acc.total_outflows += Number(row.total_outflows || 0);
-      acc.net_cash_flow += Number(row.net_cash_flow || 0);
+      acc.total_receipts += Number(row.inflow || 0);
+      acc.total_outflows += Number(row.outflow || 0);
+      if (row.flow_type === "Paiement fournisseur") {
+        acc.total_supplier_payments += Number(row.outflow || 0);
+      }
+      if (row.flow_type === "Depense") {
+        acc.total_operating_expenses += Number(row.outflow || 0);
+      }
       return acc;
     },
     {
@@ -1868,13 +1940,32 @@ export async function getTreasuryStatementReport(filters = {}) {
       total_supplier_payments: 0,
       total_operating_expenses: 0,
       total_outflows: 0,
-      net_cash_flow: 0
     }
   );
+  summary.net_cash_flow = summary.total_receipts - summary.total_outflows;
+  const rows = [
+    ...detailRows,
+    {
+      movement_date: null,
+      flow_type: "TOTAL",
+      designation: "Total des mouvements de tresorerie",
+      third_party: "",
+      customer_name: "",
+      warehouse_name: "",
+      document_reference: "",
+      payment_reference: "",
+      payment_method: "",
+      inflow: roundAmount(summary.total_receipts),
+      outflow: roundAmount(summary.total_outflows),
+      net_amount: roundAmount(summary.net_cash_flow),
+      running_balance: roundAmount(summary.net_cash_flow),
+      is_total: true
+    }
+  ];
 
   return {
     summary: {
-      periods_count: rows.length,
+      movements_count: detailRows.length,
       total_receipts: roundAmount(summary.total_receipts),
       total_supplier_payments: roundAmount(summary.total_supplier_payments),
       total_operating_expenses: roundAmount(summary.total_operating_expenses),
