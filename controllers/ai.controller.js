@@ -4,6 +4,7 @@ import {
   getAIHistory
 } from "../services/ai/aiOrchestrator.service.js";
 import {
+  getBusinessRuleValue,
   getBusinessRulesMap,
   saveBusinessRule,
   validateBusinessRuleValue
@@ -12,6 +13,8 @@ import { getCEOBRIEF } from "../services/ai/ceoReasoning.service.js";
 import {
   createStoredAIRecommendation,
   decideStoredAIRecommendation,
+  getStoredAIAlertById,
+  getStoredAIRecommendationById,
   listPersistedAIRuns,
   listStoredAIAlerts,
   listStoredAIRecommendations,
@@ -23,6 +26,7 @@ import {
   listPersistedAIForecasts,
   syncAIForecasts
 } from "../services/ai/forecasting.service.js";
+import { safeRecordAuditEvent } from "../services/audit.service.js";
 
 export async function askAIHandler(req, res, next) {
   try {
@@ -41,7 +45,8 @@ export async function askAIHandler(req, res, next) {
 
     const result = await askAIQuestion({
       question,
-      context
+      context,
+      user: req.user || null
     });
 
     try {
@@ -51,7 +56,8 @@ export async function askAIHandler(req, res, next) {
         question,
         context,
         response: result,
-        businessRules
+        businessRules,
+        createdBy: req.user?.id || null
       });
     } catch (persistError) {
       console.error("Impossible de persister le run IA :", persistError);
@@ -162,10 +168,24 @@ export async function updateBusinessRuleHandler(req, res, next) {
       });
     }
 
+    const oldValue = await getBusinessRuleValue(ruleKey);
     const savedRule = await saveBusinessRule({
       ruleKey,
       ruleValue: req.body.rule_value,
       description: req.body.description || null
+    });
+
+    await safeRecordAuditEvent({
+      req,
+      module: "business_rules",
+      action_type: "update",
+      entity_type: "business_rule",
+      entity_id: savedRule.id,
+      document_reference: ruleKey,
+      old_value: { rule_key: ruleKey, rule_value: oldValue },
+      new_value: savedRule,
+      reason: req.body.reason || "Mise a jour d'une regle metier",
+      risk_level: "high"
     });
 
     return res.status(200).json({
@@ -181,6 +201,16 @@ export async function updateBusinessRuleHandler(req, res, next) {
 export async function syncAIAlertsHandler(req, res, next) {
   try {
     const result = await syncKabotAlertsToStore();
+
+    await safeRecordAuditEvent({
+      req,
+      module: "ai_alerts",
+      action_type: "analysis",
+      entity_type: "alert_batch",
+      new_value: { synced_count: result.synced_count },
+      reason: "Synchronisation des alertes analytiques",
+      risk_level: "medium"
+    });
 
     return res.status(200).json({
       success: true,
@@ -227,8 +257,9 @@ export async function resolveAIAlertHandler(req, res, next) {
       });
     }
 
+    const previousAlert = await getStoredAIAlertById(id);
     const alert = await resolveStoredAIAlert(id, {
-      resolved_by: req.body?.resolved_by || null,
+      resolved_by: req.user?.id || null,
       resolution_notes: req.body?.resolution_notes || null
     });
 
@@ -238,6 +269,18 @@ export async function resolveAIAlertHandler(req, res, next) {
         message: "Alerte IA introuvable."
       });
     }
+
+    await safeRecordAuditEvent({
+      req,
+      module: "ai_alerts",
+      action_type: "validate",
+      entity_type: "ai_alert",
+      entity_id: id,
+      old_value: previousAlert,
+      new_value: alert,
+      reason: req.body?.resolution_notes || "Resolution d'une alerte",
+      risk_level: "medium"
+    });
 
     return res.status(200).json({
       success: true,
@@ -318,6 +361,17 @@ export async function createAIRecommendationHandler(req, res, next) {
       approval_requirement: req.body?.approval_requirement || "approval_required"
     });
 
+    await safeRecordAuditEvent({
+      req,
+      module: "ai_recommendations",
+      action_type: "create",
+      entity_type: "ai_recommendation",
+      entity_id: data.id,
+      new_value: data,
+      reason: req.body?.reason || "Creation d'une recommandation",
+      risk_level: "medium"
+    });
+
     return res.status(201).json({
       success: true,
       message: "Recommandation IA creee avec succes.",
@@ -347,9 +401,10 @@ export async function decideAIRecommendationHandler(req, res, next) {
       });
     }
 
+    const previousRecommendation = await getStoredAIRecommendationById(id);
     const data = await decideStoredAIRecommendation(id, {
       decision_state: decisionState,
-      decided_by: req.body?.decided_by || null,
+      decided_by: req.user?.id || null,
       decision_notes: req.body?.decision_notes || null
     });
 
@@ -359,6 +414,18 @@ export async function decideAIRecommendationHandler(req, res, next) {
         message: "Recommandation IA introuvable."
       });
     }
+
+    await safeRecordAuditEvent({
+      req,
+      module: "ai_recommendations",
+      action_type: "validate",
+      entity_type: "ai_recommendation",
+      entity_id: id,
+      old_value: previousRecommendation,
+      new_value: data,
+      reason: req.body?.decision_notes || `Decision: ${decisionState}`,
+      risk_level: "high"
+    });
 
     return res.status(200).json({
       success: true,
@@ -373,6 +440,16 @@ export async function decideAIRecommendationHandler(req, res, next) {
 export async function syncAIForecastsHandler(req, res, next) {
   try {
     const data = await syncAIForecasts();
+
+    await safeRecordAuditEvent({
+      req,
+      module: "ai_forecasts",
+      action_type: "analysis",
+      entity_type: "forecast_batch",
+      new_value: { generated_count: data.length },
+      reason: "Recalcul des previsions",
+      risk_level: "medium"
+    });
 
     return res.status(200).json({
       success: true,

@@ -201,6 +201,19 @@ export async function getAIAlerts({
   return result.rows;
 }
 
+export async function getAIAlertById(id) {
+  const result = await queryWithAIAlertsSchemaRetry(
+    `
+      SELECT *
+      FROM ai_alerts
+      WHERE id = $1
+      LIMIT 1;
+    `,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
 export async function resolveAIAlert(id, { resolved_by = null, resolution_notes = null } = {}) {
   const query = `
     UPDATE ai_alerts

@@ -45,6 +45,26 @@ export function detectIntent(question) {
 
   if (
     containsAny(normalizedQuestion, [
+      "rentabilite",
+      "rentable",
+      "rentables",
+      "marge brute",
+      "marge nette",
+      "produit profitable",
+      "produits profitables",
+      "profitabilite",
+      "profitability"
+    ])
+  ) {
+    return {
+      intent: "profitability_analysis",
+      period,
+      confidence: 0.91
+    };
+  }
+
+  if (
+    containsAny(normalizedQuestion, [
       "clients me doivent",
       "client risque",
       "clients risques",
@@ -54,6 +74,9 @@ export function detectIntent(question) {
       "impayes",
       "impayés",
       "creance",
+      "recouvrer",
+      "recouvrement",
+      "relancer",
       "créance",
       "debiteur",
       "débiteur"

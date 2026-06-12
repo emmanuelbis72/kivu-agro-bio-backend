@@ -11,6 +11,7 @@ import {
 } from "../models/invoice.model.js";
 import { autoPostInvoiceEntry } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
+import { safeRecordAuditEvent } from "../services/audit.service.js";
 
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
@@ -309,7 +310,7 @@ export async function createInvoiceHandler(req, res, next) {
       paid_amount: 0,
       balance_due: total_amount,
       notes: req.body.notes?.trim(),
-      created_by: req.body.created_by ? Number(req.body.created_by) : null,
+      created_by: req.user?.id || null,
       items: normalizedItems
     });
 
@@ -328,7 +329,7 @@ export async function createInvoiceHandler(req, res, next) {
         accounting = await autoPostInvoiceEntry({
           invoice,
           accounting: req.body.accounting || {},
-          created_by: req.body.created_by ? Number(req.body.created_by) : null
+          created_by: req.user?.id || null
         });
       } catch (accountingError) {
         accounting = {
@@ -342,6 +343,19 @@ export async function createInvoiceHandler(req, res, next) {
       tableName: "invoices",
       recordId: invoice.id,
       accountingResult: accounting
+    });
+
+    await safeRecordAuditEvent({
+      req,
+      module: "invoices",
+      action_type: "create",
+      entity_type: "invoice",
+      entity_id: invoice.id,
+      document_reference: invoice.invoice_number,
+      new_value: invoice,
+      reason: req.body.reason || "Creation d'une facture",
+      risk_level: "high",
+      metadata: { accounting_status: accounting.status }
     });
 
     return res.status(201).json({
@@ -579,7 +593,7 @@ export async function updateInvoiceHandler(req, res, next) {
       tax_amount,
       total_amount,
       notes: req.body.notes?.trim(),
-      created_by: req.body.created_by ? Number(req.body.created_by) : null,
+      created_by: req.user?.id || existingInvoice.created_by || null,
       items: normalizedItems
     });
 
@@ -592,7 +606,7 @@ export async function updateInvoiceHandler(req, res, next) {
       accounting = await autoPostInvoiceEntry({
         invoice,
         accounting: req.body.accounting || {},
-        created_by: req.body.created_by ? Number(req.body.created_by) : null
+        created_by: req.user?.id || existingInvoice.created_by || null
       });
     } catch (accountingError) {
       accounting = {
@@ -605,6 +619,20 @@ export async function updateInvoiceHandler(req, res, next) {
       tableName: "invoices",
       recordId: invoice.id,
       accountingResult: accounting
+    });
+
+    await safeRecordAuditEvent({
+      req,
+      module: "invoices",
+      action_type: "update",
+      entity_type: "invoice",
+      entity_id: invoice.id,
+      document_reference: invoice.invoice_number,
+      old_value: existingInvoice,
+      new_value: invoice,
+      reason: req.body.reason || "Modification d'une facture",
+      risk_level: "critical",
+      metadata: { accounting_status: accounting.status }
     });
 
     return res.status(200).json({
@@ -636,7 +664,11 @@ export async function deleteInvoiceHandler(req, res, next) {
       });
     }
 
-    const deletedInvoice = await deleteInvoiceById(id);
+    const existingInvoice = await getInvoiceById(id);
+    const deletedInvoice = await deleteInvoiceById(id, {
+      archived_by: req.user?.id || null,
+      reason: req.body?.reason || "Annulation et archivage d'une facture"
+    });
 
     if (!deletedInvoice) {
       return res.status(404).json({
@@ -645,9 +677,22 @@ export async function deleteInvoiceHandler(req, res, next) {
       });
     }
 
+    await safeRecordAuditEvent({
+      req,
+      module: "invoices",
+      action_type: "archive",
+      entity_type: "invoice",
+      entity_id: id,
+      document_reference: deletedInvoice.invoice_number,
+      old_value: existingInvoice || deletedInvoice,
+      new_value: deletedInvoice,
+      reason: req.body?.reason || "Annulation et archivage d'une facture",
+      risk_level: "critical"
+    });
+
     return res.status(200).json({
       success: true,
-      message: "Facture supprimee avec succes.",
+      message: "Facture annulee et archivee avec succes.",
       data: deletedInvoice
     });
   } catch (error) {

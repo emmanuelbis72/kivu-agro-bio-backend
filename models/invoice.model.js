@@ -27,6 +27,12 @@ async function ensureInvoicesSchema(executor = pool) {
     ALTER TABLE invoice_items
     ADD COLUMN IF NOT EXISTS package_unit VARCHAR(20);
   `);
+  await executor.query(`
+    ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+  `);
 }
 
 export async function getInvoiceById(id) {
@@ -183,6 +189,7 @@ export async function getAllInvoices() {
     INNER JOIN customers c ON c.id = i.customer_id
     INNER JOIN warehouses w ON w.id = i.warehouse_id
     LEFT JOIN invoice_cogs ic ON ic.invoice_id = i.id
+    WHERE i.archived_at IS NULL
     ORDER BY i.created_at DESC;
   `;
 
@@ -476,6 +483,13 @@ async function ensureInvoiceCanBeChanged(client, invoiceId) {
     return { invoice: null, error: "Facture introuvable." };
   }
 
+  if (invoice.status === "cancelled" || invoice.archived_at) {
+    return {
+      invoice,
+      error: "Cette facture est deja annulee ou archivee."
+    };
+  }
+
   const paymentResult = await client.query(
     `
     SELECT COUNT(*)::int AS count
@@ -630,7 +644,10 @@ export async function updateInvoiceWithItems(id, data) {
   }
 }
 
-export async function deleteInvoiceById(id) {
+export async function deleteInvoiceById(
+  id,
+  { archived_by = null, reason = null } = {}
+) {
   const client = await pool.connect();
 
   try {
@@ -652,17 +669,22 @@ export async function deleteInvoiceById(id) {
       reason: `Suppression facture ${invoice.invoice_number}`,
       created_by: invoice.created_by || null
     });
-    await client.query("DELETE FROM invoice_items WHERE invoice_id = $1;", [id]);
-
     await cancelInvoiceJournalEntries(client, id);
 
     const deletedResult = await client.query(
       `
-      DELETE FROM invoices
+      UPDATE invoices
+      SET
+        status = 'cancelled',
+        balance_due = 0,
+        archived_at = NOW(),
+        archived_by = $2,
+        archive_reason = $3,
+        updated_at = NOW()
       WHERE id = $1
       RETURNING *;
       `,
-      [id]
+      [id, archived_by, reason]
     );
 
     await client.query("COMMIT");

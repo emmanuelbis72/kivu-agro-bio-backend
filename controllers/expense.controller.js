@@ -8,6 +8,7 @@ import {
 import { getSupplierById } from "../models/supplier.model.js";
 import { autoPostExpenseEntry } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
+import { safeRecordAuditEvent } from "../services/audit.service.js";
 
 const ALLOWED_EXPENSE_PAYMENT_METHODS = [
   "cash",
@@ -115,7 +116,8 @@ export async function createExpenseHandler(req, res, next) {
       supplier_id: supplierPayload.supplier_id,
       supplier: supplierPayload.supplier,
       reference: req.body.reference?.trim(),
-      notes: req.body.notes?.trim()
+      notes: req.body.notes?.trim(),
+      created_by: req.user?.id || null
     });
 
     let accounting = {
@@ -127,7 +129,7 @@ export async function createExpenseHandler(req, res, next) {
       accounting = await autoPostExpenseEntry({
         expense,
         accounting: req.body.accounting || {},
-        created_by: req.body.created_by ? Number(req.body.created_by) : null
+        created_by: req.user?.id || null
       });
     } catch (accountingError) {
       accounting = {
@@ -140,6 +142,19 @@ export async function createExpenseHandler(req, res, next) {
       tableName: "expenses",
       recordId: expense.id,
       accountingResult: accounting
+    });
+
+    await safeRecordAuditEvent({
+      req,
+      module: "expenses",
+      action_type: "create",
+      entity_type: "expense",
+      entity_id: expense.id,
+      document_reference: expense.reference,
+      new_value: expense,
+      reason: req.body.reason || "Creation d'une depense",
+      risk_level: "high",
+      metadata: { accounting_status: accounting.status }
     });
 
     return res.status(201).json({
@@ -259,6 +274,19 @@ export async function updateExpenseHandler(req, res, next) {
       notes: mergedPayload.notes?.trim()
     });
 
+    await safeRecordAuditEvent({
+      req,
+      module: "expenses",
+      action_type: "update",
+      entity_type: "expense",
+      entity_id: id,
+      document_reference: updatedExpense.reference,
+      old_value: existingExpense,
+      new_value: updatedExpense,
+      reason: req.body.reason || "Modification d'une depense",
+      risk_level: "high"
+    });
+
     return res.status(200).json({
       success: true,
       message: "Depense mise a jour avec succes.",
@@ -287,7 +315,11 @@ export async function deleteExpenseHandler(req, res, next) {
       });
     }
 
-    const deletedExpense = await deleteExpense(id);
+    const existingExpense = await getExpenseById(id);
+    const deletedExpense = await deleteExpense(id, {
+      archived_by: req.user?.id || null,
+      reason: req.body?.reason || "Archivage d'une depense"
+    });
 
     if (!deletedExpense) {
       return res.status(404).json({
@@ -296,9 +328,22 @@ export async function deleteExpenseHandler(req, res, next) {
       });
     }
 
+    await safeRecordAuditEvent({
+      req,
+      module: "expenses",
+      action_type: "archive",
+      entity_type: "expense",
+      entity_id: id,
+      document_reference: deletedExpense.reference,
+      old_value: existingExpense,
+      new_value: deletedExpense,
+      reason: req.body?.reason || "Archivage d'une depense",
+      risk_level: "high"
+    });
+
     return res.status(200).json({
       success: true,
-      message: "Depense supprimee avec succes.",
+      message: "Depense archivee avec succes.",
       data: deletedExpense
     });
   } catch (error) {

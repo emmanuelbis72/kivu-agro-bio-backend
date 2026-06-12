@@ -26,6 +26,12 @@ async function ensureCustomersSchema(executor = pool) {
     ALTER TABLE customers
     ADD COLUMN IF NOT EXISTS commercial_name VARCHAR(150);
   `);
+  await executor.query(`
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+  `);
 }
 
 export async function createCustomer(data) {
@@ -87,6 +93,7 @@ export async function getAllCustomers() {
     FROM customers c
     LEFT JOIN accounts a ON a.id = c.receivable_account_id
     LEFT JOIN warehouses w ON w.id = c.warehouse_id
+    WHERE c.archived_at IS NULL
     ORDER BY c.created_at DESC;
   `;
   const result = await queryWithSchemaOrColumnRetry({
@@ -109,6 +116,7 @@ export async function getCustomerById(id) {
     LEFT JOIN accounts a ON a.id = c.receivable_account_id
     LEFT JOIN warehouses w ON w.id = c.warehouse_id
     WHERE c.id = $1
+      AND c.archived_at IS NULL
     LIMIT 1;
   `;
   const result = await queryWithSchemaOrColumnRetry({
@@ -369,6 +377,7 @@ export async function updateCustomer(id, data) {
       warehouse_id = $16,
       updated_at = NOW()
     WHERE id = $17
+      AND archived_at IS NULL
     RETURNING *;
   `;
 
@@ -426,12 +435,20 @@ export async function bulkAssignCustomerCommercial(customerIds = [], commercialN
   return result.rows;
 }
 
-export async function deleteCustomer(id) {
+export async function deleteCustomer(id, { archived_by = null, reason = null } = {}) {
+  await ensureCustomersSchema(pool);
   const query = `
-    DELETE FROM customers
+    UPDATE customers
+    SET
+      is_active = FALSE,
+      archived_at = NOW(),
+      archived_by = $2,
+      archive_reason = $3,
+      updated_at = NOW()
     WHERE id = $1
+      AND archived_at IS NULL
     RETURNING *;
   `;
-  const result = await pool.query(query, [id]);
+  const result = await pool.query(query, [id, archived_by, reason]);
   return result.rows[0] || null;
 }

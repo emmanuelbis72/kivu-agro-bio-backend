@@ -10,6 +10,12 @@ async function ensureProductsSchema(executor = pool) {
     ALTER TABLE products
     ADD COLUMN IF NOT EXISTS product_role VARCHAR(30) NOT NULL DEFAULT 'finished_product';
   `);
+  await executor.query(`
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+  `);
 }
 
 function isProductsPrimaryKeyConflict(error) {
@@ -99,6 +105,7 @@ export async function getAllProducts() {
   const query = `
     SELECT *
     FROM products
+    WHERE archived_at IS NULL
     ORDER BY created_at DESC;
   `;
   const result = await queryWithSchemaOrColumnRetry({
@@ -114,6 +121,7 @@ export async function getProductById(id) {
     SELECT *
     FROM products
     WHERE id = $1
+      AND archived_at IS NULL
     LIMIT 1;
   `;
   const result = await queryWithSchemaOrColumnRetry({
@@ -130,6 +138,7 @@ export async function getProductBySku(sku) {
     SELECT *
     FROM products
     WHERE sku = $1
+      AND archived_at IS NULL
     LIMIT 1;
   `;
   const result = await queryWithSchemaOrColumnRetry({
@@ -160,6 +169,7 @@ export async function updateProduct(id, data) {
       sales_account_id = $12,
       updated_at = NOW()
     WHERE id = $13
+      AND archived_at IS NULL
     RETURNING *;
   `;
 
@@ -184,12 +194,20 @@ export async function updateProduct(id, data) {
   return result.rows[0] || null;
 }
 
-export async function deleteProduct(id) {
+export async function deleteProduct(id, { archived_by = null, reason = null } = {}) {
+  await ensureProductsSchema(pool);
   const query = `
-    DELETE FROM products
+    UPDATE products
+    SET
+      is_active = FALSE,
+      archived_at = NOW(),
+      archived_by = $2,
+      archive_reason = $3,
+      updated_at = NOW()
     WHERE id = $1
+      AND archived_at IS NULL
     RETURNING *;
   `;
-  const result = await pool.query(query, [id]);
+  const result = await pool.query(query, [id, archived_by, reason]);
   return result.rows[0] || null;
 }

@@ -36,6 +36,7 @@ import {
 } from "./businessRules.service.js";
 import { runDeepseekReasoning } from "./deepseekReasoner.service.js";
 import { getActiveCompanyKnowledge } from "./companyKnowledge.service.js";
+import { runDeterministicAnalysis } from "../analytics/deterministicAnalytics.service.js";
 
 const aiHistory = [];
 
@@ -253,6 +254,8 @@ function getReasoningFocus(intent) {
     case "sales_overview":
     case "sales_variance_explanation":
       return "sales";
+    case "profitability_analysis":
+      return "profitability";
     case "stock_priority_restock":
       return "stock";
     case "customer_receivables_risk":
@@ -2017,9 +2020,83 @@ function pushHistory(item) {
   }
 }
 
-export async function askAIQuestion({ question, context = {} }) {
+function attachCertifiedAnalysis(response, certifiedAnalysis) {
+  const deterministicRecommendations = certifiedAnalysis.recommendations.map(
+    (item) =>
+      `${item.title}: ${item.action} Justification: ${item.justification}`
+  );
+
+  return {
+    ...response,
+    intent: certifiedAnalysis.intent,
+    period: certifiedAnalysis.period,
+    metrics: certifiedAnalysis.metrics,
+    tables: certifiedAnalysis.tables,
+    charts: certifiedAnalysis.charts,
+    forecast: certifiedAnalysis.forecast,
+    recommendations: deterministicRecommendations,
+    actions: deterministicRecommendations,
+    recommendation_details: certifiedAnalysis.recommendations,
+    narrative_recommendations:
+      response.recommendations || response.actions || [],
+    methodology: certifiedAnalysis.methodology,
+    sources: certifiedAnalysis.sources,
+    data_quality: certifiedAnalysis.data_quality,
+    analysis_id: certifiedAnalysis.analysis_id,
+    analytics_engine: certifiedAnalysis.engine,
+    generated_at: certifiedAnalysis.generated_at
+  };
+}
+
+function analyzeCertifiedProfitability(certifiedAnalysis) {
+  const profitability =
+    certifiedAnalysis.tables.find(
+      (table) => table.id === "profitability_by_product"
+    )?.rows || [];
+  const topProducts = profitability.slice(0, 5);
+  const lossProducts = profitability.filter((row) => row.at_loss);
+  const leader = topProducts[0];
+
+  return {
+    source_module: "deterministic_analytics",
+    summary: leader
+      ? `${leader.product_name} genere la meilleure marge brute de la periode avec ${round2(leader.gross_profit)} USD.`
+      : "Aucune vente produit n'est disponible sur la periode.",
+    answer: leader
+      ? `Le produit le plus rentable est ${leader.product_name}, avec ${round2(leader.gross_profit)} USD de marge brute et un taux de ${round2(leader.gross_margin_percent)} %. Les produits suivants sont ${
+          topProducts
+            .slice(1, 4)
+            .map(
+              (row) =>
+                `${row.product_name} (${round2(row.gross_profit)} USD)`
+            )
+            .join(", ") || "non disponibles"
+        }.`
+      : "La rentabilite ne peut pas etre classee sans ventes produit sur la periode.",
+    metrics: certifiedAnalysis.metrics,
+    drivers: topProducts.map(
+      (row) =>
+        `${row.product_name}: ${round2(row.gross_profit)} USD de marge brute (${round2(row.gross_margin_percent)} %)`
+    ),
+    recommendations: lossProducts.length
+      ? [
+          `Revoir le prix ou le cout de revient de ${lossProducts.length} produit(s) vendu(s) a perte.`
+        ]
+      : [
+          "Concentrer l'effort commercial sur les produits a forte marge sans provoquer de rupture."
+        ]
+  };
+}
+
+export async function askAIQuestion({ question, context = {}, user = null }) {
   const intentResult = detectIntent(question);
-  const businessRules = await getBusinessRulesMap();
+  const [businessRules, certifiedAnalysis] = await Promise.all([
+    getBusinessRulesMap(),
+    runDeterministicAnalysis({
+      intent: intentResult.intent,
+      period: intentResult.period
+    })
+  ]);
   const assistantBudgetMs = Math.min(
     getEnvNumber("AI_ASSISTANT_TIMEOUT_MS", 90000),
     115000
@@ -2042,9 +2119,19 @@ export async function askAIQuestion({ question, context = {} }) {
         context && typeof context === "object" && Object.keys(context).length > 0
           ? {
               ...contextData,
-              userContext: context
+              userContext: context,
+              certified_analysis: certifiedAnalysis,
+              requester: user
+                ? { id: user.id, role: user.role, name: user.full_name }
+                : null
             }
-          : contextData;
+          : {
+              ...contextData,
+              certified_analysis: certifiedAnalysis,
+              requester: user
+                ? { id: user.id, role: user.role, name: user.full_name }
+                : null
+            };
 
       const reasoning = await withTimeout(
         runDeepseekReasoning({
@@ -2084,9 +2171,9 @@ export async function askAIQuestion({ question, context = {} }) {
         },
         intentResult.period || "global"
       );
-      const enrichedResponse = enrichReasoningResponsePayload(
-        safeResponse,
-        mergedContextData
+      const enrichedResponse = attachCertifiedAnalysis(
+        enrichReasoningResponsePayload(safeResponse, mergedContextData),
+        certifiedAnalysis
       );
 
       pushHistory({
@@ -2110,6 +2197,9 @@ export async function askAIQuestion({ question, context = {} }) {
       break;
     case "sales_variance_explanation":
       analysis = await analyzeSalesVariance(businessRules);
+      break;
+    case "profitability_analysis":
+      analysis = analyzeCertifiedProfitability(certifiedAnalysis);
       break;
     case "stock_priority_restock":
       analysis = await analyzeStockPriority(businessRules);
@@ -2140,15 +2230,19 @@ export async function askAIQuestion({ question, context = {} }) {
       business_rules_applied: true
     }
   });
+  const certifiedResponse = attachCertifiedAnalysis(
+    response,
+    certifiedAnalysis
+  );
 
   pushHistory({
     question,
-    intent: response.intent,
-    summary: response.summary,
-    created_at: response.generated_at
+    intent: certifiedResponse.intent,
+    summary: certifiedResponse.summary,
+    created_at: certifiedResponse.generated_at
   });
 
-  return response;
+  return certifiedResponse;
 }
 
 export function getQuickQuestions() {

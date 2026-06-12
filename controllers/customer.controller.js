@@ -12,6 +12,7 @@ import {
   createCustomerAccountStatementPdfBuffer,
   sendDownloadBuffer
 } from "../services/reportExport.service.js";
+import { safeRecordAuditEvent } from "../services/audit.service.js";
 
 function validateCustomerPayload(body) {
   const errors = [];
@@ -113,6 +114,18 @@ export async function createCustomerHandler(req, res, next) {
           : Number(req.body.warehouse_id)
     });
 
+    await safeRecordAuditEvent({
+      req,
+      module: "customers",
+      action_type: "create",
+      entity_type: "customer",
+      entity_id: customer.id,
+      document_reference: customer.business_name,
+      new_value: customer,
+      reason: req.body.reason || "Creation d'un client",
+      risk_level: "medium"
+    });
+
     return res.status(201).json({
       success: true,
       message: "Client cree avec succes.",
@@ -210,6 +223,16 @@ export async function bulkAssignCustomerCommercialHandler(req, res, next) {
       customerIds,
       req.body.commercial_name
     );
+
+    await safeRecordAuditEvent({
+      req,
+      module: "customers",
+      action_type: "update",
+      entity_type: "customer_assignment",
+      new_value: updatedCustomers,
+      reason: req.body.reason || "Affectation commerciale en lot",
+      risk_level: "medium"
+    });
 
     return res.status(200).json({
       success: true,
@@ -324,6 +347,19 @@ export async function updateCustomerHandler(req, res, next) {
           : Number(mergedPayload.warehouse_id)
     });
 
+    await safeRecordAuditEvent({
+      req,
+      module: "customers",
+      action_type: "update",
+      entity_type: "customer",
+      entity_id: id,
+      document_reference: updatedCustomer.business_name,
+      old_value: existingCustomer,
+      new_value: updatedCustomer,
+      reason: req.body.reason || "Modification d'un client",
+      risk_level: "medium"
+    });
+
     return res.status(200).json({
       success: true,
       message: "Client mis a jour avec succes.",
@@ -345,7 +381,11 @@ export async function deleteCustomerHandler(req, res, next) {
       });
     }
 
-    const deletedCustomer = await deleteCustomer(id);
+    const existingCustomer = await getCustomerById(id);
+    const deletedCustomer = await deleteCustomer(id, {
+      archived_by: req.user?.id || null,
+      reason: req.body?.reason || "Archivage d'un client"
+    });
 
     if (!deletedCustomer) {
       return res.status(404).json({
@@ -354,9 +394,22 @@ export async function deleteCustomerHandler(req, res, next) {
       });
     }
 
+    await safeRecordAuditEvent({
+      req,
+      module: "customers",
+      action_type: "archive",
+      entity_type: "customer",
+      entity_id: id,
+      document_reference: deletedCustomer.business_name,
+      old_value: existingCustomer,
+      new_value: deletedCustomer,
+      reason: req.body?.reason || "Archivage d'un client",
+      risk_level: "high"
+    });
+
     return res.status(200).json({
       success: true,
-      message: "Client supprime avec succes.",
+      message: "Client archive avec succes.",
       data: deletedCustomer
     });
   } catch (error) {

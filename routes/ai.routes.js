@@ -15,27 +15,91 @@ import {
   syncAIAlertsHandler,
   updateBusinessRuleHandler
 } from "../controllers/ai.controller.js";
+import {
+  ROLE_GROUPS,
+  requireAuthentication,
+  requireConfiguredAuthentication,
+  requireConfiguredRoles,
+  requireRoles
+} from "../middlewares/auth.middleware.js";
 
 const router = express.Router();
 
-router.post("/ask", askAIHandler);
+router.post(
+  "/ask",
+  requireConfiguredAuthentication,
+  requireConfiguredRoles(...ROLE_GROUPS.executive),
+  askAIHandler
+);
 router.get("/quick-questions", getQuickQuestionsHandler);
-router.get("/history", getAIHistoryHandler);
+router.get(
+  "/history",
+  requireConfiguredAuthentication,
+  requireConfiguredRoles(...ROLE_GROUPS.executive),
+  getAIHistoryHandler
+);
 
-router.get("/ceo-brief", getCEOBRIEFHandler);
+router.get(
+  "/ceo-brief",
+  requireConfiguredAuthentication,
+  requireConfiguredRoles(...ROLE_GROUPS.executive),
+  getCEOBRIEFHandler
+);
 
-router.get("/business-rules", getBusinessRulesHandler);
-router.put("/business-rules/:ruleKey", updateBusinessRuleHandler);
+router.get(
+  "/business-rules",
+  requireConfiguredAuthentication,
+  getBusinessRulesHandler
+);
+router.put(
+  "/business-rules/:ruleKey",
+  requireAuthentication,
+  requireRoles(...ROLE_GROUPS.executive),
+  updateBusinessRuleHandler
+);
 
-router.post("/alerts/sync", syncAIAlertsHandler);
-router.get("/alerts", getAIAlertsStoreHandler);
-router.patch("/alerts/:id/resolve", resolveAIAlertHandler);
+router.post(
+  "/alerts/sync",
+  requireAuthentication,
+  requireRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.finance),
+  syncAIAlertsHandler
+);
+router.get("/alerts", requireConfiguredAuthentication, getAIAlertsStoreHandler);
+router.patch(
+  "/alerts/:id/resolve",
+  requireAuthentication,
+  requireRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.finance),
+  resolveAIAlertHandler
+);
 
-router.post("/forecasts/sync", syncAIForecastsHandler);
-router.get("/forecasts", getAIForecastsHandler);
+router.post(
+  "/forecasts/sync",
+  requireAuthentication,
+  requireRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.finance),
+  syncAIForecastsHandler
+);
+router.get(
+  "/forecasts",
+  requireConfiguredAuthentication,
+  getAIForecastsHandler
+);
 
-router.get("/recommendations", getAIRecommendationsHandler);
-router.post("/recommendations", createAIRecommendationHandler);
-router.patch("/recommendations/:id/decision", decideAIRecommendationHandler);
+router.get(
+  "/recommendations",
+  requireConfiguredAuthentication,
+  getAIRecommendationsHandler
+);
+router.post(
+  "/recommendations",
+  requireAuthentication,
+  requireRoles(...ROLE_GROUPS.executive),
+  createAIRecommendationHandler
+);
+router.patch(
+  "/recommendations/:id/decision",
+  requireAuthentication,
+  requireRoles(...ROLE_GROUPS.executive),
+  decideAIRecommendationHandler
+);
 
 export default router;

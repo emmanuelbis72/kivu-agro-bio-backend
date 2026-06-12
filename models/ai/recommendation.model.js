@@ -183,6 +183,19 @@ export async function getAIRecommendations({
   return result.rows;
 }
 
+export async function getAIRecommendationById(id) {
+  const result = await queryWithAIRecommendationsSchemaRetry(
+    `
+      SELECT *
+      FROM ai_recommendations
+      WHERE id = $1
+      LIMIT 1;
+    `,
+    [id]
+  );
+  return result.rows[0] || null;
+}
+
 export async function decideAIRecommendation(
   id,
   { decision_state, decided_by = null, decision_notes = null } = {}

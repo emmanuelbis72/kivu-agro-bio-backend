@@ -29,6 +29,10 @@ import aiScoringRoutes from "./routes/aiScoring.routes.js";
 import kabotRoutes from "./routes/kabot.routes.js";
 import companyKnowledgeRoutes from "./routes/companyKnowledge.routes.js";
 import productionRoutes from "./routes/production.routes.js";
+import authRoutes from "./routes/auth.routes.js";
+import auditRoutes from "./routes/audit.routes.js";
+import analyticsRoutes from "./routes/analytics.routes.js";
+import { optionalAuthenticate } from "./middlewares/auth.middleware.js";
 import { notFoundHandler, errorHandler } from "./middlewares/errorHandler.js";
 
 dotenv.config();
@@ -46,6 +50,7 @@ app.use(helmet());
 app.use(morgan("dev"));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use(optionalAuthenticate);
 
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -55,6 +60,9 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api/health", healthRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/audit", auditRoutes);
+app.use("/api/analytics", analyticsRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/warehouses", warehouseRoutes);
 app.use("/api/stock", stockRoutes);

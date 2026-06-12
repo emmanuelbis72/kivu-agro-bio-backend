@@ -5,6 +5,7 @@ import {
   getRecentAIAgentRuns
 } from "../../models/ai/agentRun.model.js";
 import {
+  getAIAlertById,
   getAIAlerts,
   resolveAIAlert,
   upsertAIAlert
@@ -12,6 +13,7 @@ import {
 import {
   createAIRecommendation,
   decideAIRecommendation,
+  getAIRecommendationById,
   getAIRecommendations
 } from "../../models/ai/recommendation.model.js";
 import { getKabotAlerts } from "./kabotAlerts.service.js";
@@ -160,6 +162,10 @@ export async function resolveStoredAIAlert(id, options = {}) {
   return resolveAIAlert(id, options);
 }
 
+export async function getStoredAIAlertById(id) {
+  return getAIAlertById(id);
+}
+
 export async function createStoredAIRecommendation(payload) {
   return createAIRecommendation({
     recommendation_key: payload.recommendation_key || makeKey("recommendation"),
@@ -177,4 +183,8 @@ export async function listStoredAIRecommendations({
 
 export async function decideStoredAIRecommendation(id, options = {}) {
   return decideAIRecommendation(id, options);
+}
+
+export async function getStoredAIRecommendationById(id) {
+  return getAIRecommendationById(id);
 }

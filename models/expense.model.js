@@ -2,8 +2,18 @@ import { pool } from "../config/db.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 import { ensureSuppliersSchema } from "./supplier.model.js";
 
+async function ensureExpensesArchiveSchema(executor = pool) {
+  await executor.query(`
+    ALTER TABLE expenses
+      ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+  `);
+}
+
 export async function createExpense(data) {
   await ensureSuppliersSchema(pool);
+  await ensureExpensesArchiveSchema(pool);
   const query = `
     INSERT INTO expenses (
       expense_date,
@@ -14,9 +24,10 @@ export async function createExpense(data) {
       supplier_id,
       supplier,
       reference,
-      notes
+      notes,
+      created_by
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     RETURNING *;
   `;
 
@@ -29,7 +40,8 @@ export async function createExpense(data) {
     data.supplier_id || null,
     data.supplier || null,
     data.reference || null,
-    data.notes || null
+    data.notes || null,
+    data.created_by || null
   ];
 
   const result = await pool.query(query, values);
@@ -37,6 +49,7 @@ export async function createExpense(data) {
 }
 
 export async function getAllExpenses() {
+  await ensureExpensesArchiveSchema(pool);
   const query = `
     SELECT
       e.id,
@@ -59,6 +72,7 @@ export async function getAllExpenses() {
       e.updated_at
     FROM expenses e
     LEFT JOIN suppliers s ON s.id = e.supplier_id
+    WHERE e.archived_at IS NULL
     ORDER BY e.expense_date DESC, e.created_at DESC;
   `;
 
@@ -72,6 +86,7 @@ export async function getAllExpenses() {
 }
 
 export async function getExpenseById(id) {
+  await ensureExpensesArchiveSchema(pool);
   const query = `
     SELECT
       e.*,
@@ -81,6 +96,7 @@ export async function getExpenseById(id) {
     FROM expenses e
     LEFT JOIN suppliers s ON s.id = e.supplier_id
     WHERE e.id = $1
+      AND e.archived_at IS NULL
     LIMIT 1;
   `;
 
@@ -96,6 +112,7 @@ export async function getExpenseById(id) {
 
 export async function updateExpense(id, data) {
   await ensureSuppliersSchema(pool);
+  await ensureExpensesArchiveSchema(pool);
   const query = `
     UPDATE expenses
     SET
@@ -110,6 +127,7 @@ export async function updateExpense(id, data) {
       notes = $9,
       updated_at = NOW()
     WHERE id = $10
+      AND archived_at IS NULL
     RETURNING *;
   `;
 
@@ -135,13 +153,20 @@ export async function updateExpense(id, data) {
   return getExpenseById(id);
 }
 
-export async function deleteExpense(id) {
+export async function deleteExpense(id, { archived_by = null, reason = null } = {}) {
+  await ensureExpensesArchiveSchema(pool);
   const query = `
-    DELETE FROM expenses
+    UPDATE expenses
+    SET
+      archived_at = NOW(),
+      archived_by = $2,
+      archive_reason = $3,
+      updated_at = NOW()
     WHERE id = $1
+      AND archived_at IS NULL
     RETURNING *;
   `;
 
-  const result = await pool.query(query, [id]);
+  const result = await pool.query(query, [id, archived_by, reason]);
   return result.rows[0] || null;
 }

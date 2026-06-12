@@ -346,6 +346,9 @@ function buildAssistantPrompt({ question, businessRules, contextData }) {
   const enrichedInstructions = [
     extraInstructions,
     "Instructions transversales:",
+    '- Le bloc "certified_analysis" est produit par le moteur analytique deterministe.',
+    "- Ne recalcule, ne corrige et ne remplace jamais ses chiffres.",
+    '- Toute recommandation chiffree doit citer un indicateur de "certified_analysis".',
     "- Exploite tous les secteurs disponibles du contexte, pas uniquement le focus prioritaire.",
     "- Croise commercial, tresorerie, stock, achats, production, comptabilite, budget, cloture et previsions quand ces donnees existent.",
     "- Fais ressortir les liens de cause a effet et projette la trajectoire a court terme quand les horizons de cash ou les tendances sont disponibles.",

@@ -9,16 +9,36 @@ import {
   updateCustomerHandler,
   deleteCustomerHandler
 } from "../controllers/customer.controller.js";
+import {
+  ROLE_GROUPS,
+  requireConfiguredRoles
+} from "../middlewares/auth.middleware.js";
 
 const router = express.Router();
 
-router.post("/", createCustomerHandler);
+router.post(
+  "/",
+  requireConfiguredRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.commercial),
+  createCustomerHandler
+);
 router.get("/", getAllCustomersHandler);
-router.put("/bulk-commercial", bulkAssignCustomerCommercialHandler);
+router.put(
+  "/bulk-commercial",
+  requireConfiguredRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.commercial),
+  bulkAssignCustomerCommercialHandler
+);
 router.get("/:id/account-statement", getCustomerAccountStatementHandler);
 router.get("/:id/account-statement.pdf", exportCustomerAccountStatementPdfHandler);
 router.get("/:id", getCustomerByIdHandler);
-router.put("/:id", updateCustomerHandler);
-router.delete("/:id", deleteCustomerHandler);
+router.put(
+  "/:id",
+  requireConfiguredRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.commercial),
+  updateCustomerHandler
+);
+router.delete(
+  "/:id",
+  requireConfiguredRoles(...ROLE_GROUPS.executive),
+  deleteCustomerHandler
+);
 
 export default router;

@@ -6,6 +6,7 @@ import {
   updateProduct,
   deleteProduct
 } from "../models/product.model.js";
+import { safeRecordAuditEvent } from "../services/audit.service.js";
 
 const ALLOWED_PRODUCT_ROLES = [
   "finished_product",
@@ -107,6 +108,18 @@ export async function createProductHandler(req, res, next) {
         req.body.sales_account_id === ""
           ? null
           : Number(req.body.sales_account_id)
+    });
+
+    await safeRecordAuditEvent({
+      req,
+      module: "products",
+      action_type: "create",
+      entity_type: "product",
+      entity_id: product.id,
+      document_reference: product.sku,
+      new_value: product,
+      reason: req.body.reason || "Creation d'un produit",
+      risk_level: "medium"
     });
 
     return res.status(201).json({
@@ -230,6 +243,23 @@ export async function updateProductHandler(req, res, next) {
           : Number(mergedPayload.sales_account_id)
     });
 
+    await safeRecordAuditEvent({
+      req,
+      module: "products",
+      action_type: "update",
+      entity_type: "product",
+      entity_id: id,
+      document_reference: updatedProduct.sku,
+      old_value: existingProduct,
+      new_value: updatedProduct,
+      reason: req.body.reason || "Modification d'un produit",
+      risk_level:
+        existingProduct.cost_price !== updatedProduct.cost_price ||
+        existingProduct.selling_price !== updatedProduct.selling_price
+          ? "high"
+          : "medium"
+    });
+
     return res.status(200).json({
       success: true,
       message: "Produit mis à jour avec succès.",
@@ -251,7 +281,11 @@ export async function deleteProductHandler(req, res, next) {
       });
     }
 
-    const deletedProduct = await deleteProduct(id);
+    const existingProduct = await getProductById(id);
+    const deletedProduct = await deleteProduct(id, {
+      archived_by: req.user?.id || null,
+      reason: req.body?.reason || "Archivage d'un produit"
+    });
 
     if (!deletedProduct) {
       return res.status(404).json({
@@ -260,9 +294,22 @@ export async function deleteProductHandler(req, res, next) {
       });
     }
 
+    await safeRecordAuditEvent({
+      req,
+      module: "products",
+      action_type: "archive",
+      entity_type: "product",
+      entity_id: id,
+      document_reference: deletedProduct.sku,
+      old_value: existingProduct,
+      new_value: deletedProduct,
+      reason: req.body?.reason || "Archivage d'un produit",
+      risk_level: "high"
+    });
+
     return res.status(200).json({
       success: true,
-      message: "Produit supprimé avec succès.",
+      message: "Produit archive avec succes.",
       data: deletedProduct
     });
   } catch (error) {

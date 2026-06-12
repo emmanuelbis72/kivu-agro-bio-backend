@@ -6,13 +6,29 @@ import {
   updateExpenseHandler,
   deleteExpenseHandler
 } from "../controllers/expense.controller.js";
+import {
+  ROLE_GROUPS,
+  requireConfiguredRoles
+} from "../middlewares/auth.middleware.js";
 
 const router = express.Router();
 
-router.post("/", createExpenseHandler);
+router.post(
+  "/",
+  requireConfiguredRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.finance),
+  createExpenseHandler
+);
 router.get("/", getAllExpensesHandler);
 router.get("/:id", getExpenseByIdHandler);
-router.put("/:id", updateExpenseHandler);
-router.delete("/:id", deleteExpenseHandler);
+router.put(
+  "/:id",
+  requireConfiguredRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.finance),
+  updateExpenseHandler
+);
+router.delete(
+  "/:id",
+  requireConfiguredRoles(...ROLE_GROUPS.executive, ...ROLE_GROUPS.finance),
+  deleteExpenseHandler
+);
 
 export default router;
