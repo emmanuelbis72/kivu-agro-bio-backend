@@ -290,6 +290,12 @@ function drawPdfTableRow(doc, columns, values, y, options = {}) {
       .roundedRect(startX, y - 3, totalWidth, rowHeight, 6)
       .fill("#EAF5EE")
       .restore();
+  } else if (options.fillColor) {
+    doc
+      .save()
+      .rect(startX, y, totalWidth, rowHeight)
+      .fill(options.fillColor)
+      .restore();
   }
 
   columns.forEach((column, index) => {
@@ -314,7 +320,7 @@ function drawPdfTableRow(doc, columns, values, y, options = {}) {
   return y + rowHeight;
 }
 
-function drawPdfTable(doc, title, columns, rows, startY) {
+function drawPdfTable(doc, title, columns, rows, startY, options = {}) {
   let currentY = startY;
 
   if (title) {
@@ -329,7 +335,7 @@ function drawPdfTable(doc, title, columns, rows, startY) {
     rowHeight: 24
   });
 
-  for (const rowValues of rows) {
+  for (const [rowIndex, rowValues] of rows.entries()) {
     const rowHeight = computePdfRowHeight(doc, columns, rowValues);
 
     if (currentY + rowHeight > doc.page.height - 55) {
@@ -349,7 +355,8 @@ function drawPdfTable(doc, title, columns, rows, startY) {
     }
 
     currentY = drawPdfTableRow(doc, columns, rowValues, currentY, {
-      rowHeight
+      rowHeight,
+      fillColor: options.rowFillColors?.[rowIndex] || null
     });
   }
 
@@ -607,12 +614,18 @@ export async function createTabularReportPdfBuffer(reportDefinition, reportData,
         formatValueForPdf(extractCellValue(row, column), column.type)
       )
     );
+    const rowFillColors = (reportData.rows || []).map((row) =>
+      reportDefinition.getPdfRowFillColor
+        ? reportDefinition.getPdfRowFillColor(row)
+        : null
+    );
     currentY = drawPdfTable(
       doc,
       reportDefinition.tableTitle || reportDefinition.title,
       reportDefinition.columns,
       rows,
-      currentY
+      currentY,
+      { rowFillColors }
     );
 
     if (currentY < doc.page.height - 40) {

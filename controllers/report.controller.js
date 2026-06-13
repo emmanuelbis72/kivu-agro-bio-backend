@@ -6,6 +6,7 @@ import {
   getCategorySalesReport,
   getCommissionDueReport,
   getCommercialSalesReport,
+  getCollectionsReport,
   getCustomerAgingReport,
   getCustomerLedgerReport,
   getExpenseCategoryReport,
@@ -109,6 +110,92 @@ function parseBoolean(value) {
 }
 
 const reportDefinitions = {
+  collections: {
+    title: "Etat de recouvrement clients",
+    subtitle:
+      "Factures classees par statut de paiement et niveau d'alerte depuis leur emission",
+    tableTitle: "Plan de recouvrement par facture",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `etat-recouvrement-${filters.as_of_date || getTodayString()}`,
+    getPdfRowFillColor: (row) =>
+      ({
+        red: "#FEE2E2",
+        orange: "#FFEDD5",
+        light_green: "#ECFCCB",
+        green: "#DCFCE7",
+        paid: "#DBEAFE"
+      })[row.alert_level] || null,
+    columns: [
+      { key: "alert_label", header: "Alerte", width: 94, xlsxWidth: 24 },
+      {
+        key: "collection_age_days",
+        header: "Age",
+        type: "integer",
+        width: 34,
+        xlsxWidth: 9
+      },
+      { key: "invoice_number", header: "Facture", width: 72, xlsxWidth: 17 },
+      { key: "invoice_date", header: "Emission", type: "date", width: 56, xlsxWidth: 13 },
+      { key: "customer_name", header: "Client", width: 88, xlsxWidth: 22 },
+      { key: "customer_phone", header: "Telephone", width: 68, xlsxWidth: 17 },
+      { key: "commercial_name", header: "Commercial", width: 70, xlsxWidth: 18 },
+      { key: "payment_status_label", header: "Paiement", width: 70, xlsxWidth: 18 },
+      { key: "total_amount", header: "Facture", type: "money", width: 62, xlsxWidth: 15 },
+      { key: "paid_amount", header: "Paye", type: "money", width: 58, xlsxWidth: 15 },
+      { key: "balance_due", header: "Solde", type: "money", width: 62, xlsxWidth: 15 }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Factures",
+        value: Number(summary.total_invoices || 0),
+        rawValue: Number(summary.total_invoices || 0),
+        type: "integer"
+      },
+      {
+        label: "Montant facture",
+        value: Number(summary.total_invoiced_amount || 0),
+        rawValue: Number(summary.total_invoiced_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Montant paye",
+        value: Number(summary.total_paid_amount || 0),
+        rawValue: Number(summary.total_paid_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Solde a recouvrer",
+        value: Number(summary.total_balance_due || 0),
+        rawValue: Number(summary.total_balance_due || 0),
+        type: "money"
+      },
+      {
+        label: "Non payees",
+        value: Number(summary.unpaid_invoices_count || 0),
+        rawValue: Number(summary.unpaid_invoices_count || 0),
+        type: "integer"
+      },
+      {
+        label: "Partielles",
+        value: Number(summary.partial_invoices_count || 0),
+        rawValue: Number(summary.partial_invoices_count || 0),
+        type: "integer"
+      },
+      {
+        label: "Orange 30-44 j",
+        value: Number(summary.orange_balance_amount || 0),
+        rawValue: Number(summary.orange_balance_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Rouge 45+ j",
+        value: Number(summary.red_balance_amount || 0),
+        rawValue: Number(summary.red_balance_amount || 0),
+        type: "money"
+      }
+    ]
+  },
   "customer-aging": {
     title: "Balance agee clients",
     subtitle: "Creances ouvertes par client et tranches d'age",
@@ -1678,6 +1765,43 @@ async function getSupplierAgingPayload(query) {
   };
 }
 
+async function getCollectionsPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const asOfDate =
+    parseDateFilter(query.as_of_date, getTodayString()) || getTodayString();
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+  const paymentStatus = ["all", "open", "unpaid", "partial", "paid"].includes(
+    String(query.payment_status || "all").trim().toLowerCase()
+  )
+    ? String(query.payment_status || "all").trim().toLowerCase()
+    : "all";
+  const alertLevel = [
+    "all",
+    "green",
+    "light_green",
+    "orange",
+    "red"
+  ].includes(String(query.alert_level || "all").trim().toLowerCase())
+    ? String(query.alert_level || "all").trim().toLowerCase()
+    : "all";
+
+  return getCollectionsReport({
+    startDate,
+    endDate,
+    asOfDate,
+    warehouseId,
+    customerId,
+    customerCity: query.customer_city
+      ? String(query.customer_city).trim()
+      : null,
+    paymentStatus,
+    alertLevel,
+    limit: parsePositiveLimit(query.limit, 5000, 5000)
+  });
+}
+
 async function getCustomerLedgerPayload(query) {
   const startDate = parseDateFilter(query.start_date, null);
   const endDate = parseDateFilter(query.end_date, null);
@@ -2191,6 +2315,7 @@ async function getMonthlyClosePayload(query) {
 }
 
 const reportLoaders = {
+  collections: getCollectionsPayload,
   "customer-aging": getCustomerAgingPayload,
   "supplier-aging": getSupplierAgingPayload,
   "customer-ledger": getCustomerLedgerPayload,
@@ -2246,6 +2371,10 @@ async function respondWithTableReport(req, res, next, reportKey) {
 
 export function getCustomerAgingReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "customer-aging");
+}
+
+export function getCollectionsReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "collections");
 }
 
 export function getSupplierAgingReportHandler(req, res, next) {

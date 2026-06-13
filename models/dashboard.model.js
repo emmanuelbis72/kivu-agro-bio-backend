@@ -1,4 +1,9 @@
 import { pool } from "../config/db.js";
+import {
+  COLLECTION_ALERT_LEVELS,
+  COLLECTION_PAYMENT_STATUSES,
+  normalizeCollectionInvoice
+} from "../utils/collectionStatus.util.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 import { ensurePurchaseInvoicesSchema } from "./purchaseInvoice.model.js";
 import { getAIForecasts } from "./ai/forecast.model.js";
@@ -242,9 +247,13 @@ function buildCollectionInvoiceFilterBindings(
 ) {
   const invoiceAlias = aliases.invoice || "i";
   const customerAlias = aliases.customer || "c";
-  const values = [];
-  const conditions = [`${invoiceAlias}.status IN ('issued', 'partial', 'paid')`];
-  let parameterIndex = startIndex;
+  const values = [filters.asOfDate];
+  const conditions = [
+    `$${startIndex}::date IS NOT NULL`,
+    `${invoiceAlias}.status IN ('issued', 'partial', 'paid')`
+  ];
+  const asOfDateParameterIndex = startIndex;
+  let parameterIndex = startIndex + 1;
 
   if (filters.startDate) {
     values.push(filters.startDate);
@@ -278,6 +287,34 @@ function buildCollectionInvoiceFilterBindings(
     parameterIndex += 1;
   }
 
+  if (filters.paymentStatus === "open") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) > 0`);
+  } else if (filters.paymentStatus === "unpaid") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) > 0`);
+    conditions.push(`COALESCE(${invoiceAlias}.paid_amount, 0) <= 0`);
+  } else if (filters.paymentStatus === "partial") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) > 0`);
+    conditions.push(`COALESCE(${invoiceAlias}.paid_amount, 0) > 0`);
+  } else if (filters.paymentStatus === "paid") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) <= 0`);
+  }
+
+  if (filters.alertLevel && filters.alertLevel !== "all") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) > 0`);
+    const ageExpression =
+      `GREATEST(($${asOfDateParameterIndex}::date - ${invoiceAlias}.invoice_date), 0)`;
+
+    if (filters.alertLevel === "green") {
+      conditions.push(`${ageExpression} <= 21`);
+    } else if (filters.alertLevel === "light_green") {
+      conditions.push(`${ageExpression} BETWEEN 22 AND 29`);
+    } else if (filters.alertLevel === "orange") {
+      conditions.push(`${ageExpression} BETWEEN 30 AND 44`);
+    } else if (filters.alertLevel === "red") {
+      conditions.push(`${ageExpression} >= 45`);
+    }
+  }
+
   return {
     values,
     whereClause: `WHERE ${conditions.join(" AND ")}`,
@@ -285,7 +322,8 @@ function buildCollectionInvoiceFilterBindings(
       conditions.length > 1
         ? `AND ${conditions.slice(1).join(" AND ")}`
         : "",
-    nextParameterIndex: parameterIndex
+    nextParameterIndex: parameterIndex,
+    asOfDateParameterIndex
   };
 }
 
@@ -297,9 +335,10 @@ function buildCollectionPaymentFilterBindings(
   const paymentAlias = aliases.payment || "p";
   const invoiceAlias = aliases.invoice || "i";
   const customerAlias = aliases.customer || "c";
-  const values = [];
-  const conditions = ["1 = 1"];
-  let parameterIndex = startIndex;
+  const values = [filters.asOfDate];
+  const conditions = [`$${startIndex}::date IS NOT NULL`];
+  const asOfDateParameterIndex = startIndex;
+  let parameterIndex = startIndex + 1;
 
   if (filters.startDate) {
     values.push(filters.startDate);
@@ -333,10 +372,39 @@ function buildCollectionPaymentFilterBindings(
     parameterIndex += 1;
   }
 
+  if (filters.paymentStatus === "open") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) > 0`);
+  } else if (filters.paymentStatus === "unpaid") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) > 0`);
+    conditions.push(`COALESCE(${invoiceAlias}.paid_amount, 0) <= 0`);
+  } else if (filters.paymentStatus === "partial") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) > 0`);
+    conditions.push(`COALESCE(${invoiceAlias}.paid_amount, 0) > 0`);
+  } else if (filters.paymentStatus === "paid") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) <= 0`);
+  }
+
+  if (filters.alertLevel && filters.alertLevel !== "all") {
+    conditions.push(`COALESCE(${invoiceAlias}.balance_due, 0) > 0`);
+    const ageExpression =
+      `GREATEST(($${asOfDateParameterIndex}::date - ${invoiceAlias}.invoice_date), 0)`;
+
+    if (filters.alertLevel === "green") {
+      conditions.push(`${ageExpression} <= 21`);
+    } else if (filters.alertLevel === "light_green") {
+      conditions.push(`${ageExpression} BETWEEN 22 AND 29`);
+    } else if (filters.alertLevel === "orange") {
+      conditions.push(`${ageExpression} BETWEEN 30 AND 44`);
+    } else if (filters.alertLevel === "red") {
+      conditions.push(`${ageExpression} >= 45`);
+    }
+  }
+
   return {
     values,
     whereClause: `WHERE ${conditions.join(" AND ")}`,
-    nextParameterIndex: parameterIndex
+    nextParameterIndex: parameterIndex,
+    asOfDateParameterIndex
   };
 }
 
@@ -2883,6 +2951,7 @@ export async function getCollectionsDashboard(filters = {}) {
   const startDate =
     filters.startDate ||
     formatIsoDate(addDays(new Date(`${endDate}T00:00:00`), -89));
+  const asOfDate = filters.asOfDate || formatIsoDate(now);
   const warehouseId = normalizeOptionalPositiveWholeNumber(
     filters.warehouseId,
     1000000
@@ -2895,6 +2964,14 @@ export async function getCollectionsDashboard(filters = {}) {
   const entryType = ["all", "invoices", "payments"].includes(filters.entryType)
     ? filters.entryType
     : "all";
+  const paymentStatus = COLLECTION_PAYMENT_STATUSES.includes(
+    filters.paymentStatus
+  )
+    ? filters.paymentStatus
+    : "all";
+  const alertLevel = COLLECTION_ALERT_LEVELS.includes(filters.alertLevel)
+    ? filters.alertLevel
+    : "all";
   const topProducts = normalizePositiveWholeNumber(filters.topProducts, 8, 20);
   const topCities = normalizePositiveWholeNumber(filters.topCities, 8, 20);
   const invoiceLimit = normalizePositiveWholeNumber(filters.invoiceLimit, 80, 200);
@@ -2905,7 +2982,10 @@ export async function getCollectionsDashboard(filters = {}) {
     endDate,
     warehouseId,
     customerId,
-    customerCity
+    customerCity,
+    asOfDate,
+    paymentStatus,
+    alertLevel
   };
   const invoiceBindings = buildCollectionInvoiceFilterBindings(scopedFilters, {
     invoice: "i",
@@ -2924,7 +3004,60 @@ export async function getCollectionsDashboard(filters = {}) {
       COUNT(DISTINCT LOWER(COALESCE(NULLIF(TRIM(c.city), ''), 'non renseignee')))::int AS total_cities,
       COALESCE(SUM(i.total_amount), 0) AS total_invoiced_amount,
       COALESCE(SUM(i.paid_amount), 0) AS total_paid_amount,
-      COALESCE(SUM(i.balance_due), 0) AS total_balance_due
+      COALESCE(SUM(i.balance_due), 0) AS total_balance_due,
+      COUNT(*) FILTER (WHERE COALESCE(i.balance_due, 0) <= 0)::int
+        AS paid_invoices_count,
+      COALESCE(SUM(i.total_amount) FILTER (
+        WHERE COALESCE(i.balance_due, 0) <= 0
+      ), 0) AS paid_invoices_amount,
+      COUNT(*) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND COALESCE(i.paid_amount, 0) > 0
+      )::int AS partial_invoices_count,
+      COALESCE(SUM(i.balance_due) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND COALESCE(i.paid_amount, 0) > 0
+      ), 0) AS partial_balance_amount,
+      COUNT(*) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND COALESCE(i.paid_amount, 0) <= 0
+      )::int AS unpaid_invoices_count,
+      COALESCE(SUM(i.balance_due) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND COALESCE(i.paid_amount, 0) <= 0
+      ), 0) AS unpaid_balance_amount,
+      COUNT(*) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND GREATEST(($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date), 0) <= 21
+      )::int AS green_invoices_count,
+      COALESCE(SUM(i.balance_due) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND GREATEST(($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date), 0) <= 21
+      ), 0) AS green_balance_amount,
+      COUNT(*) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND GREATEST(($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date), 0) BETWEEN 22 AND 29
+      )::int AS light_green_invoices_count,
+      COALESCE(SUM(i.balance_due) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND GREATEST(($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date), 0) BETWEEN 22 AND 29
+      ), 0) AS light_green_balance_amount,
+      COUNT(*) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND GREATEST(($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date), 0) BETWEEN 30 AND 44
+      )::int AS orange_invoices_count,
+      COALESCE(SUM(i.balance_due) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND GREATEST(($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date), 0) BETWEEN 30 AND 44
+      ), 0) AS orange_balance_amount,
+      COUNT(*) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND GREATEST(($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date), 0) >= 45
+      )::int AS red_invoices_count,
+      COALESCE(SUM(i.balance_due) FILTER (
+        WHERE COALESCE(i.balance_due, 0) > 0
+          AND GREATEST(($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date), 0) >= 45
+      ), 0) AS red_balance_amount
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     ${invoiceBindings.whereClause};
@@ -2940,17 +3073,28 @@ export async function getCollectionsDashboard(filters = {}) {
       i.customer_id,
       c.business_name AS customer_name,
       COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS customer_city,
+      COALESCE(NULLIF(TRIM(c.phone), ''), '-') AS customer_phone,
+      COALESCE(NULLIF(TRIM(c.commercial_name), ''), 'Non affecte') AS commercial_name,
       i.warehouse_id,
       COALESCE(w.name, 'Depot non renseigne') AS warehouse_name,
       COALESCE(w.city, '') AS warehouse_city,
       COALESCE(i.total_amount, 0) AS total_amount,
       COALESCE(i.paid_amount, 0) AS paid_amount,
-      COALESCE(i.balance_due, 0) AS balance_due
+      COALESCE(i.balance_due, 0) AS balance_due,
+      GREATEST(
+        ($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date),
+        0
+      )::int AS collection_age_days
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     LEFT JOIN warehouses w ON w.id = i.warehouse_id
     ${invoiceBindings.whereClause}
-    ORDER BY i.invoice_date DESC, i.id DESC
+    ORDER BY
+      CASE WHEN COALESCE(i.balance_due, 0) > 0 THEN 0 ELSE 1 END,
+      collection_age_days DESC,
+      i.balance_due DESC,
+      i.invoice_date DESC,
+      i.id DESC
     LIMIT $${invoiceBindings.nextParameterIndex};
   `;
 
@@ -2962,12 +3106,12 @@ export async function getCollectionsDashboard(filters = {}) {
       COALESCE(SUM(i.balance_due), 0) AS total_unpaid_amount,
       COUNT(*) FILTER (
         WHERE i.due_date IS NOT NULL
-          AND i.due_date < CURRENT_DATE
+          AND i.due_date < $${invoiceBindings.asOfDateParameterIndex}::date
       )::int AS overdue_invoices_count,
       COALESCE(SUM(
         CASE
           WHEN i.due_date IS NOT NULL
-           AND i.due_date < CURRENT_DATE
+           AND i.due_date < $${invoiceBindings.asOfDateParameterIndex}::date
             THEN i.balance_due
           ELSE 0
         END
@@ -2975,7 +3119,6 @@ export async function getCollectionsDashboard(filters = {}) {
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     ${invoiceBindings.whereClause}
-      AND i.status IN ('issued', 'partial')
       AND COALESCE(i.balance_due, 0) > 0;
   `;
 
@@ -2989,27 +3132,65 @@ export async function getCollectionsDashboard(filters = {}) {
       i.customer_id,
       c.business_name AS customer_name,
       COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS customer_city,
+      COALESCE(NULLIF(TRIM(c.phone), ''), '-') AS customer_phone,
+      COALESCE(NULLIF(TRIM(c.commercial_name), ''), 'Non affecte') AS commercial_name,
       i.warehouse_id,
       COALESCE(w.name, 'Depot non renseigne') AS warehouse_name,
       COALESCE(w.city, '') AS warehouse_city,
       COALESCE(i.total_amount, 0) AS total_amount,
       COALESCE(i.paid_amount, 0) AS paid_amount,
       COALESCE(i.balance_due, 0) AS balance_due,
+      GREATEST(
+        ($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date),
+        0
+      )::int AS collection_age_days,
       CASE
         WHEN i.due_date IS NULL THEN NULL
-        ELSE GREATEST((CURRENT_DATE - i.due_date), 0)
+        ELSE GREATEST(
+          ($${invoiceBindings.asOfDateParameterIndex}::date - i.due_date),
+          0
+        )
       END AS days_overdue
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     LEFT JOIN warehouses w ON w.id = i.warehouse_id
     ${invoiceBindings.whereClause}
-      AND i.status IN ('issued', 'partial')
       AND COALESCE(i.balance_due, 0) > 0
     ORDER BY
-      CASE WHEN i.due_date IS NULL THEN 1 ELSE 0 END ASC,
-      i.due_date ASC,
-      i.invoice_date DESC,
+      collection_age_days DESC,
+      i.balance_due DESC,
       i.id DESC
+    LIMIT $${invoiceBindings.nextParameterIndex};
+  `;
+
+  const paidRowsQuery = `
+    SELECT
+      i.id AS invoice_id,
+      i.invoice_number,
+      i.invoice_date,
+      i.due_date,
+      i.status,
+      i.customer_id,
+      c.business_name AS customer_name,
+      COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS customer_city,
+      COALESCE(NULLIF(TRIM(c.phone), ''), '-') AS customer_phone,
+      COALESCE(NULLIF(TRIM(c.commercial_name), ''), 'Non affecte') AS commercial_name,
+      i.warehouse_id,
+      COALESCE(w.name, 'Depot non renseigne') AS warehouse_name,
+      COALESCE(w.city, '') AS warehouse_city,
+      COALESCE(i.total_amount, 0) AS total_amount,
+      COALESCE(i.paid_amount, 0) AS paid_amount,
+      COALESCE(i.balance_due, 0) AS balance_due,
+      GREATEST(
+        ($${invoiceBindings.asOfDateParameterIndex}::date - i.invoice_date),
+        0
+      )::int AS collection_age_days
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN warehouses w ON w.id = i.warehouse_id
+    ${invoiceBindings.whereClause}
+      AND COALESCE(i.balance_due, 0) <= 0
+    ORDER BY i.invoice_date DESC, i.id DESC
     LIMIT $${invoiceBindings.nextParameterIndex};
   `;
 
@@ -3165,6 +3346,7 @@ export async function getCollectionsDashboard(filters = {}) {
     invoicesRowsResult,
     unpaidSummaryResult,
     unpaidRowsResult,
+    paidRowsResult,
     paymentsSummaryResult,
     paymentsRowsResult,
     heatmapResult
@@ -3173,6 +3355,7 @@ export async function getCollectionsDashboard(filters = {}) {
     pool.query(invoicesRowsQuery, [...invoiceBindings.values, invoiceLimit]),
     pool.query(unpaidSummaryQuery, invoiceBindings.values),
     pool.query(unpaidRowsQuery, [...invoiceBindings.values, invoiceLimit]),
+    pool.query(paidRowsQuery, [...invoiceBindings.values, invoiceLimit]),
     pool.query(paymentsSummaryQuery, paymentBindings.values),
     pool.query(paymentsRowsQuery, [...paymentBindings.values, paymentLimit]),
     pool.query(productCityHeatmapQuery, [
@@ -3235,10 +3418,13 @@ export async function getCollectionsDashboard(filters = {}) {
     filters: {
       start_date: startDate,
       end_date: endDate,
+      as_of_date: asOfDate,
       warehouse_id: warehouseId,
       customer_id: customerId,
       customer_city: customerCity,
       entry_type: entryType,
+      payment_status: paymentStatus,
+      alert_level: alertLevel,
       top_products: topProducts,
       top_cities: topCities,
       invoice_limit: invoiceLimit,
@@ -3251,6 +3437,24 @@ export async function getCollectionsDashboard(filters = {}) {
       total_invoiced_amount: totalInvoicedAmount,
       total_invoice_paid_amount: roundAmount(invoicesSummary.total_paid_amount),
       total_invoice_balance_due: roundAmount(invoicesSummary.total_balance_due),
+      paid_invoices_count: Number(invoicesSummary.paid_invoices_count || 0),
+      paid_invoices_amount: roundAmount(invoicesSummary.paid_invoices_amount),
+      partial_invoices_count: Number(invoicesSummary.partial_invoices_count || 0),
+      partial_balance_amount: roundAmount(invoicesSummary.partial_balance_amount),
+      unpaid_invoices_count: Number(invoicesSummary.unpaid_invoices_count || 0),
+      unpaid_balance_amount: roundAmount(invoicesSummary.unpaid_balance_amount),
+      green_invoices_count: Number(invoicesSummary.green_invoices_count || 0),
+      green_balance_amount: roundAmount(invoicesSummary.green_balance_amount),
+      light_green_invoices_count: Number(
+        invoicesSummary.light_green_invoices_count || 0
+      ),
+      light_green_balance_amount: roundAmount(
+        invoicesSummary.light_green_balance_amount
+      ),
+      orange_invoices_count: Number(invoicesSummary.orange_invoices_count || 0),
+      orange_balance_amount: roundAmount(invoicesSummary.orange_balance_amount),
+      red_invoices_count: Number(invoicesSummary.red_invoices_count || 0),
+      red_balance_amount: roundAmount(invoicesSummary.red_balance_amount),
       total_unpaid_invoices: Number(unpaidSummary.total_unpaid_invoices || 0),
       total_unpaid_customers: Number(unpaidSummary.total_customers || 0),
       total_unpaid_cities: Number(unpaidSummary.total_cities || 0),
@@ -3264,23 +3468,25 @@ export async function getCollectionsDashboard(filters = {}) {
       invoiced_payment_gap: roundAmount(totalInvoicedAmount - totalPaymentsAmount),
       collection_rate_percent:
         totalInvoicedAmount > 0
-          ? roundAmount((totalPaymentsAmount / totalInvoicedAmount) * 100)
+          ? roundAmount(
+              (Number(invoicesSummary.total_paid_amount || 0) /
+                totalInvoicedAmount) *
+                100
+            )
           : 0
     },
-    issued_invoices: invoicesRowsResult.rows.map((row) => ({
-      ...row,
-      total_amount: roundAmount(row.total_amount),
-      paid_amount: roundAmount(row.paid_amount),
-      balance_due: roundAmount(row.balance_due)
-    })),
-    unpaid_invoices: unpaidRowsResult.rows.map((row) => ({
-      ...row,
-      total_amount: roundAmount(row.total_amount),
-      paid_amount: roundAmount(row.paid_amount),
-      balance_due: roundAmount(row.balance_due),
+    issued_invoices: invoicesRowsResult.rows.map(normalizeCollectionInvoice),
+    open_invoices: unpaidRowsResult.rows.map((row) => ({
+      ...normalizeCollectionInvoice(row),
       days_overdue:
         row.days_overdue === null ? null : Number(row.days_overdue || 0)
     })),
+    unpaid_invoices: unpaidRowsResult.rows.map((row) => ({
+      ...normalizeCollectionInvoice(row),
+      days_overdue:
+        row.days_overdue === null ? null : Number(row.days_overdue || 0)
+    })),
+    paid_invoices: paidRowsResult.rows.map(normalizeCollectionInvoice),
     payments: paymentsRowsResult.rows.map((row) => ({
       ...row,
       amount: roundAmount(row.amount)

@@ -1,4 +1,9 @@
 import { pool } from "../config/db.js";
+import {
+  COLLECTION_ALERT_LEVELS,
+  COLLECTION_PAYMENT_STATUSES,
+  normalizeCollectionInvoice
+} from "../utils/collectionStatus.util.js";
 import { getIncomeStatement } from "./accountingReport.model.js";
 import {
   ensureBudgetSchema,
@@ -10,6 +15,186 @@ import { ensurePurchaseInvoicesSchema } from "./purchaseInvoice.model.js";
 
 function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
+}
+
+export async function getCollectionsReport(filters = {}) {
+  await ensureReportsSchema(pool);
+
+  const asOfDate =
+    filters.asOfDate || new Date().toISOString().split("T")[0];
+  const paymentStatus = COLLECTION_PAYMENT_STATUSES.includes(
+    filters.paymentStatus
+  )
+    ? filters.paymentStatus
+    : "all";
+  const alertLevel = COLLECTION_ALERT_LEVELS.includes(filters.alertLevel)
+    ? filters.alertLevel
+    : "all";
+  const limit = Math.min(Math.max(Number(filters.limit || 5000), 1), 5000);
+  const values = [asOfDate];
+  const conditions = [
+    "$1::date IS NOT NULL",
+    "i.status IN ('issued', 'partial', 'paid')"
+  ];
+
+  function addCondition(value, sqlBuilder) {
+    if (value === undefined || value === null || value === "") {
+      return;
+    }
+
+    values.push(value);
+    conditions.push(sqlBuilder(values.length));
+  }
+
+  addCondition(filters.startDate, (index) => `i.invoice_date >= $${index}`);
+  addCondition(filters.endDate, (index) => `i.invoice_date <= $${index}`);
+  addCondition(filters.warehouseId, (index) => `i.warehouse_id = $${index}`);
+  addCondition(filters.customerId, (index) => `i.customer_id = $${index}`);
+  addCondition(
+    filters.customerCity,
+    (index) => `LOWER(COALESCE(c.city, '')) = LOWER($${index})`
+  );
+
+  if (paymentStatus === "open") {
+    conditions.push("COALESCE(i.balance_due, 0) > 0");
+  } else if (paymentStatus === "unpaid") {
+    conditions.push("COALESCE(i.balance_due, 0) > 0");
+    conditions.push("COALESCE(i.paid_amount, 0) <= 0");
+  } else if (paymentStatus === "partial") {
+    conditions.push("COALESCE(i.balance_due, 0) > 0");
+    conditions.push("COALESCE(i.paid_amount, 0) > 0");
+  } else if (paymentStatus === "paid") {
+    conditions.push("COALESCE(i.balance_due, 0) <= 0");
+  }
+
+  const ageExpression = "GREATEST(($1::date - i.invoice_date), 0)";
+
+  if (alertLevel === "green") {
+    conditions.push("COALESCE(i.balance_due, 0) > 0");
+    conditions.push(`${ageExpression} <= 21`);
+  } else if (alertLevel === "light_green") {
+    conditions.push("COALESCE(i.balance_due, 0) > 0");
+    conditions.push(`${ageExpression} BETWEEN 22 AND 29`);
+  } else if (alertLevel === "orange") {
+    conditions.push("COALESCE(i.balance_due, 0) > 0");
+    conditions.push(`${ageExpression} BETWEEN 30 AND 44`);
+  } else if (alertLevel === "red") {
+    conditions.push("COALESCE(i.balance_due, 0) > 0");
+    conditions.push(`${ageExpression} >= 45`);
+  }
+
+  values.push(limit);
+  const query = `
+    SELECT
+      i.id AS invoice_id,
+      i.invoice_number,
+      i.invoice_date,
+      i.due_date,
+      i.status,
+      i.customer_id,
+      c.business_name AS customer_name,
+      COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS customer_city,
+      COALESCE(NULLIF(TRIM(c.phone), ''), '-') AS customer_phone,
+      COALESCE(NULLIF(TRIM(c.commercial_name), ''), 'Non affecte') AS commercial_name,
+      i.warehouse_id,
+      COALESCE(w.name, 'Depot non renseigne') AS warehouse_name,
+      COALESCE(i.total_amount, 0) AS total_amount,
+      COALESCE(i.paid_amount, 0) AS paid_amount,
+      COALESCE(i.balance_due, 0) AS balance_due,
+      ${ageExpression}::int AS collection_age_days
+    FROM invoices i
+    INNER JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN warehouses w ON w.id = i.warehouse_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY
+      CASE WHEN COALESCE(i.balance_due, 0) > 0 THEN 0 ELSE 1 END,
+      collection_age_days DESC,
+      i.balance_due DESC,
+      i.invoice_date DESC,
+      i.id DESC
+    LIMIT $${values.length};
+  `;
+
+  const result = await pool.query(query, values);
+  const rows = result.rows.map(normalizeCollectionInvoice);
+  const customerIds = new Set();
+  const summary = rows.reduce(
+    (acc, row) => {
+      customerIds.add(row.customer_id);
+      acc.total_invoices += 1;
+      acc.total_invoiced_amount += row.total_amount;
+      acc.total_paid_amount += row.paid_amount;
+      acc.total_balance_due += row.balance_due;
+
+      if (row.payment_status === "paid") {
+        acc.paid_invoices_count += 1;
+        acc.paid_invoices_amount += row.total_amount;
+      } else if (row.payment_status === "partial") {
+        acc.partial_invoices_count += 1;
+        acc.partial_balance_amount += row.balance_due;
+      } else {
+        acc.unpaid_invoices_count += 1;
+        acc.unpaid_balance_amount += row.balance_due;
+      }
+
+      if (row.alert_level !== "paid") {
+        acc[`${row.alert_level}_invoices_count`] += 1;
+        acc[`${row.alert_level}_balance_amount`] += row.balance_due;
+      }
+
+      return acc;
+    },
+    {
+      total_invoices: 0,
+      total_invoiced_amount: 0,
+      total_paid_amount: 0,
+      total_balance_due: 0,
+      paid_invoices_count: 0,
+      paid_invoices_amount: 0,
+      partial_invoices_count: 0,
+      partial_balance_amount: 0,
+      unpaid_invoices_count: 0,
+      unpaid_balance_amount: 0,
+      green_invoices_count: 0,
+      green_balance_amount: 0,
+      light_green_invoices_count: 0,
+      light_green_balance_amount: 0,
+      orange_invoices_count: 0,
+      orange_balance_amount: 0,
+      red_invoices_count: 0,
+      red_balance_amount: 0
+    }
+  );
+
+  Object.keys(summary).forEach((key) => {
+    if (key.endsWith("_amount") || key === "total_balance_due") {
+      summary[key] = roundAmount(summary[key]);
+    }
+  });
+
+  return {
+    filters: {
+      start_date: filters.startDate || null,
+      end_date: filters.endDate || null,
+      as_of_date: asOfDate,
+      warehouse_id: filters.warehouseId || null,
+      customer_id: filters.customerId || null,
+      customer_city: filters.customerCity || null,
+      payment_status: paymentStatus,
+      alert_level: alertLevel
+    },
+    summary: {
+      ...summary,
+      total_customers: customerIds.size,
+      collection_rate_percent:
+        summary.total_invoiced_amount > 0
+          ? roundAmount(
+              (summary.total_paid_amount / summary.total_invoiced_amount) * 100
+            )
+          : 0
+    },
+    rows
+  };
 }
 
 async function ensureReportsSchema(executor = pool) {

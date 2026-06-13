@@ -79,6 +79,20 @@ function parseCollectionEntryType(value) {
     : "all";
 }
 
+function parseCollectionPaymentStatus(value) {
+  const normalized = String(value || "all").trim().toLowerCase();
+  return ["all", "open", "unpaid", "partial", "paid"].includes(normalized)
+    ? normalized
+    : "all";
+}
+
+function parseCollectionAlertLevel(value) {
+  const normalized = String(value || "all").trim().toLowerCase();
+  return ["all", "green", "light_green", "orange", "red"].includes(normalized)
+    ? normalized
+    : "all";
+}
+
 function parseStockVariationFilters(query = {}) {
   return {
     warehouseId: parsePositiveInteger(query.warehouse_id),
@@ -544,12 +558,15 @@ export async function getCollectionsDashboardHandler(req, res, next) {
     const dashboard = await getCollectionsDashboard({
       startDate: parseDateFilter(req.query.start_date) || defaultStartDate,
       endDate: parseDateFilter(req.query.end_date) || defaultEndDate,
+      asOfDate: parseDateFilter(req.query.as_of_date) || defaultEndDate,
       warehouseId: parsePositiveInteger(req.query.warehouse_id),
       customerId: parsePositiveInteger(req.query.customer_id),
       customerCity: req.query.customer_city
         ? String(req.query.customer_city).trim()
         : null,
       entryType: parseCollectionEntryType(req.query.entry_type),
+      paymentStatus: parseCollectionPaymentStatus(req.query.payment_status),
+      alertLevel: parseCollectionAlertLevel(req.query.alert_level),
       topProducts: parsePositiveLimit(req.query.top_products, 8, 20),
       topCities: parsePositiveLimit(req.query.top_cities, 8, 20),
       invoiceLimit: parsePositiveLimit(req.query.invoice_limit, 80, 200),

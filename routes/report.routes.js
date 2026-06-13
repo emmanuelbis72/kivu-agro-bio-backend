@@ -9,6 +9,7 @@ import {
   getCashForecastReportHandler,
   getCategorySalesReportHandler,
   getCommercialSalesReportHandler,
+  getCollectionsReportHandler,
   getCustomerAgingReportHandler,
   getCustomerLedgerReportHandler,
   getIncomeStatementReportHandler,
@@ -27,6 +28,7 @@ import {
 
 const router = express.Router();
 
+router.get("/collections", getCollectionsReportHandler);
 router.get("/customer-aging", getCustomerAgingReportHandler);
 router.get("/customer-ledger", getCustomerLedgerReportHandler);
 router.get("/supplier-aging", getSupplierAgingReportHandler);
