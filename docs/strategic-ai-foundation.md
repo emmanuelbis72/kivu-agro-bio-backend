@@ -38,7 +38,10 @@ d'une ligne d'audit existante.
 5. Regler `AUTH_ENFORCEMENT_MODE=strict`.
 
 Le mode `transition` conserve la compatibilite des lectures et analyses pendant
-la creation des comptes. Les modifications IA sensibles exigent deja un compte.
+la creation des comptes. Il reste le mode par defaut, y compris en production,
+afin d'eviter de verrouiller l'application avant la creation du premier compte.
+Le mode strict doit etre active explicitement apres verification de la connexion.
+Les modifications IA sensibles exigent deja un compte.
 
 ## Archivage
 

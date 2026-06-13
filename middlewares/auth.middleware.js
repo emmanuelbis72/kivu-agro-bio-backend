@@ -38,6 +38,12 @@ export function hasAnyRole(user, roles = []) {
   return roles.map(normalizeRole).includes(userRole);
 }
 
+export function resolveAuthEnforcementMode(value = process.env.AUTH_ENFORCEMENT_MODE) {
+  return String(value || "transition").trim().toLowerCase() === "strict"
+    ? "strict"
+    : "transition";
+}
+
 export async function optionalAuthenticate(req, res, next) {
   try {
     const token = getBearerToken(req);
@@ -114,12 +120,7 @@ export function requireRoles(...roles) {
 }
 
 export function requireConfiguredAuthentication(req, res, next) {
-  const configured = String(
-    process.env.AUTH_ENFORCEMENT_MODE ||
-      (process.env.NODE_ENV === "production" ? "strict" : "transition")
-  )
-    .trim()
-    .toLowerCase();
+  const configured = resolveAuthEnforcementMode();
 
   if (configured === "strict") {
     return requireAuthentication(req, res, next);
@@ -130,12 +131,7 @@ export function requireConfiguredAuthentication(req, res, next) {
 
 export function requireConfiguredRoles(...roles) {
   return function configuredRoleAuthorization(req, res, next) {
-    const configured = String(
-      process.env.AUTH_ENFORCEMENT_MODE ||
-        (process.env.NODE_ENV === "production" ? "strict" : "transition")
-    )
-      .trim()
-      .toLowerCase();
+    const configured = resolveAuthEnforcementMode();
 
     if (configured === "strict") {
       return requireRoles(...roles)(req, res, next);
