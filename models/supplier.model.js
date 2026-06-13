@@ -216,6 +216,22 @@ export async function getSupplierById(id) {
   };
 }
 
+export async function getSupplierByBusinessName(businessName) {
+  await ensureSuppliersSchema(pool);
+
+  const result = await pool.query(
+    `
+    SELECT *
+    FROM suppliers
+    WHERE LOWER(BTRIM(business_name)) = LOWER(BTRIM($1))
+    LIMIT 1;
+    `,
+    [businessName]
+  );
+
+  return result.rows[0] || null;
+}
+
 export async function updateSupplier(id, data) {
   await ensureSuppliersSchema(pool);
 

@@ -12,6 +12,7 @@ import {
 import { autoPostInvoiceEntry } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
 import { safeRecordAuditEvent } from "../services/audit.service.js";
+import { normalizeBusinessDate } from "../utils/businessDate.util.js";
 
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
@@ -19,49 +20,6 @@ function isPositiveInteger(value) {
 
 function isNonNegativeNumber(value) {
   return !Number.isNaN(Number(value)) && Number(value) >= 0;
-}
-
-function normalizeBusinessDate(value, fieldLabel, { required = false } = {}) {
-  if (value === undefined || value === null || String(value).trim() === "") {
-    if (required) {
-      return {
-        error: `Le champ '${fieldLabel}' est obligatoire.`
-      };
-    }
-
-    return { value: null };
-  }
-
-  const normalized = String(value).trim();
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
-    return {
-      error: `Le champ '${fieldLabel}' doit etre au format YYYY-MM-DD.`
-    };
-  }
-
-  const [year, month, day] = normalized.split("-").map(Number);
-
-  if (year < 2000 || year > 2100) {
-    return {
-      error: `Le champ '${fieldLabel}' doit avoir une annee comprise entre 2000 et 2100.`
-    };
-  }
-
-  const date = new Date(`${normalized}T00:00:00.000Z`);
-
-  if (
-    Number.isNaN(date.getTime()) ||
-    date.getUTCFullYear() !== year ||
-    date.getUTCMonth() + 1 !== month ||
-    date.getUTCDate() !== day
-  ) {
-    return {
-      error: `Le champ '${fieldLabel}' contient une date invalide.`
-    };
-  }
-
-  return { value: normalized };
 }
 
 function normalizeStockForm(value) {

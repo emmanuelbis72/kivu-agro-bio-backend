@@ -13,6 +13,7 @@ import {
   autoPostSupplierPaymentEntry
 } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
+import { normalizeBusinessDate } from "../utils/businessDate.util.js";
 
 const ALLOWED_PAYMENT_METHODS = [
   "cash",
@@ -66,6 +67,29 @@ function validatePurchaseInvoicePayload(body) {
   }
 
   return errors;
+}
+
+function normalizePurchaseInvoiceDates(body) {
+  const invoiceDate = normalizeBusinessDate(
+    body.invoice_date,
+    "invoice_date",
+    { required: true }
+  );
+
+  if (invoiceDate.error) {
+    return { error: invoiceDate.error };
+  }
+
+  const dueDate = normalizeBusinessDate(body.due_date, "due_date");
+
+  if (dueDate.error) {
+    return { error: dueDate.error };
+  }
+
+  return {
+    invoice_date: invoiceDate.value,
+    due_date: dueDate.value
+  };
 }
 
 async function ensurePurchaseInvoiceAccounting(purchaseInvoice, accounting = {}, created_by = null) {
@@ -142,6 +166,15 @@ export async function createPurchaseInvoiceHandler(req, res, next) {
       });
     }
 
+    const normalizedDates = normalizePurchaseInvoiceDates(req.body);
+
+    if (normalizedDates.error) {
+      return res.status(400).json({
+        success: false,
+        message: normalizedDates.error
+      });
+    }
+
     const normalizedItems = req.body.items.map((item) => ({
       product_id: Number(item.product_id),
       quantity: Number(item.quantity),
@@ -157,14 +190,14 @@ export async function createPurchaseInvoiceHandler(req, res, next) {
     const totalAmount = subtotal + taxAmount;
     const purchaseInvoiceNumber =
       req.body.purchase_invoice_number?.trim() ||
-      (await getNextPurchaseInvoiceNumberForDate(req.body.invoice_date));
+      (await getNextPurchaseInvoiceNumberForDate(normalizedDates.invoice_date));
 
     const purchaseInvoice = await createPurchaseInvoiceWithItems({
       purchase_invoice_number: purchaseInvoiceNumber,
       supplier_id: Number(req.body.supplier_id),
       warehouse_id: Number(req.body.warehouse_id),
-      invoice_date: req.body.invoice_date,
-      due_date: req.body.due_date || null,
+      invoice_date: normalizedDates.invoice_date,
+      due_date: normalizedDates.due_date,
       subtotal,
       tax_amount: taxAmount,
       total_amount: totalAmount,
@@ -263,6 +296,15 @@ export async function updatePurchaseInvoiceHandler(req, res, next) {
       });
     }
 
+    const normalizedDates = normalizePurchaseInvoiceDates(req.body);
+
+    if (normalizedDates.error) {
+      return res.status(400).json({
+        success: false,
+        message: normalizedDates.error
+      });
+    }
+
     const normalizedItems = req.body.items.map((item) => ({
       product_id: Number(item.product_id),
       quantity: Number(item.quantity),
@@ -280,8 +322,8 @@ export async function updatePurchaseInvoiceHandler(req, res, next) {
     const purchaseInvoice = await updatePurchaseInvoiceWithItems(id, {
       supplier_id: Number(req.body.supplier_id),
       warehouse_id: Number(req.body.warehouse_id),
-      invoice_date: req.body.invoice_date,
-      due_date: req.body.due_date || null,
+      invoice_date: normalizedDates.invoice_date,
+      due_date: normalizedDates.due_date,
       subtotal,
       tax_amount: taxAmount,
       total_amount: totalAmount,

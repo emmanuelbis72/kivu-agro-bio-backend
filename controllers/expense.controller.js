@@ -5,7 +5,10 @@ import {
   updateExpense,
   deleteExpense
 } from "../models/expense.model.js";
-import { getSupplierById } from "../models/supplier.model.js";
+import {
+  getSupplierByBusinessName,
+  getSupplierById
+} from "../models/supplier.model.js";
 import { autoPostExpenseEntry } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
 import { safeRecordAuditEvent } from "../services/audit.service.js";
@@ -65,12 +68,33 @@ function validateExpensePayload(body) {
 }
 
 async function normalizeExpenseSupplierPayload(body) {
+  const category = String(body.category || "").trim().toLowerCase();
+  const isTanzaniaFreight =
+    ["transport", "fret"].includes(category) &&
+    String(body.supplier || "").trim().toLowerCase() === "tanzanie";
   const supplierId =
     body.supplier_id === undefined ||
     body.supplier_id === null ||
     body.supplier_id === ""
       ? null
       : Number(body.supplier_id);
+
+  if (!supplierId && isTanzaniaFreight) {
+    const ratco = await getSupplierByBusinessName("RATCO");
+
+    if (!ratco) {
+      const error = new Error(
+        "Le fournisseur RATCO doit etre cree avant d'enregistrer ce transport."
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return {
+      supplier_id: ratco.id,
+      supplier: ratco.business_name
+    };
+  }
 
   if (!supplierId) {
     return {
@@ -85,6 +109,26 @@ async function normalizeExpenseSupplierPayload(body) {
     const error = new Error("Fournisseur introuvable.");
     error.statusCode = 400;
     throw error;
+  }
+
+  if (
+    ["transport", "fret"].includes(category) &&
+    String(supplier.business_name || "").trim().toLowerCase() === "tanzanie"
+  ) {
+    const ratco = await getSupplierByBusinessName("RATCO");
+
+    if (!ratco) {
+      const error = new Error(
+        "Le fournisseur RATCO doit etre cree avant d'enregistrer ce transport."
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return {
+      supplier_id: ratco.id,
+      supplier: ratco.business_name
+    };
   }
 
   return {
