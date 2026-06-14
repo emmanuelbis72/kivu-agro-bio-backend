@@ -91,23 +91,41 @@ export function calculateCollectionPriority({
 
   let priority = "monitor";
   let action = "Surveiller l'echeance et maintenir le suivi normal.";
+  let deadlineDays = 7;
+  let creditDecision = "Maintenir les conditions actuelles sous surveillance.";
 
   if (score >= 80) {
     priority = "critical";
     action = "Relancer aujourd'hui et faire valider toute nouvelle vente a credit.";
+    deadlineDays = 0;
+    creditDecision = "Suspendre toute nouvelle vente a credit jusqu'a engagement de paiement.";
   } else if (score >= 60) {
     priority = "urgent";
     action = "Relancer aujourd'hui avec un engagement de paiement date.";
+    deadlineDays = 1;
+    creditDecision = "Soumettre toute nouvelle vente a credit a validation finance.";
   } else if (score >= 40) {
     priority = "important";
     action = "Relancer cette semaine et verifier l'historique des paiements.";
+    deadlineDays = 3;
+    creditDecision = "Conserver le credit uniquement dans la limite existante.";
   }
 
   return {
     score,
     priority,
     action,
-    payment_likelihood_score: round(Math.max(5, 100 - score))
+    payment_likelihood_score: round(Math.max(5, 100 - score)),
+    owner_role: "Finance / Recouvrement",
+    deadline_days: deadlineDays,
+    credit_decision: creditDecision,
+    score_breakdown: {
+      exposure_amount: round(amountScore),
+      lateness: round(latenessScore),
+      payment_history: round(historyScore),
+      unpaid_ratio: round(partialPaymentScore),
+      strategic_weight: round(strategic_weight)
+    }
   };
 }
 
@@ -513,40 +531,113 @@ function buildRecommendations({ metrics, collections, stock, profitability }) {
   const lossProducts = profitability.filter((row) => row.at_loss);
 
   if (criticalDebt.length) {
+    const priorityDebt = criticalDebt[0];
+    const targetAmount = round(
+      criticalDebt.reduce((sum, row) => sum + row.balance_due, 0)
+    );
+
     recommendations.push({
+      id: "collections-critical",
+      domain: "receivables",
       priority: "urgent",
       title: "Accelerer le recouvrement",
-      justification: `${criticalDebt.length} facture(s) ont un score de recouvrement urgent ou critique pour ${round(
-        criticalDebt.reduce((sum, row) => sum + row.balance_due, 0)
-      )} USD.`,
-      action: "Traiter les dossiers classes en tete du tableau de recouvrement."
+      justification: `${criticalDebt.length} facture(s) ont un score de recouvrement urgent ou critique pour ${targetAmount} USD.`,
+      action: `Contacter aujourd'hui ${priorityDebt.customer_name} pour la facture ${priorityDebt.invoice_number} de ${round(priorityDebt.balance_due)} USD, puis traiter les dossiers suivants par score decroissant.`,
+      owner_role: "Finance / Recouvrement",
+      deadline_days: 0,
+      amount_at_stake: targetAmount,
+      target_amount: targetAmount,
+      entity_type: "invoice",
+      entity_id: priorityDebt.invoice_id,
+      entity_label: priorityDebt.invoice_number,
+      first_step: `Appeler ${priorityDebt.customer_name} et obtenir une date ferme de paiement.`,
+      steps: [
+        "Confirmer le solde et l'echeance avec le client.",
+        "Obtenir un engagement date et un montant.",
+        "Bloquer ou faire valider toute nouvelle vente a credit si aucun engagement n'est obtenu.",
+        "Mettre a jour le suivi apres chaque contact."
+      ],
+      success_metric: `Engagements de paiement documentes sur ${targetAmount} USD de creances prioritaires.`,
+      decision_required: "Valider le blocage du credit pour les comptes sans engagement."
     });
   }
 
   if (criticalStock.length) {
+    const priorityStock = criticalStock[0];
+    const reorderQuantity = round(priorityStock.recommended_reorder_quantity);
+
     recommendations.push({
+      id: "stock-critical",
+      domain: "stock",
       priority: "urgent",
       title: "Proteger la disponibilite produit",
       justification: `${criticalStock.length} ligne(s) de stock sont critiques ou sous 10 jours de couverture.`,
-      action: "Reapprovisionner selon la quantite recommandee ou transferer le stock disponible."
+      action: `Reapprovisionner ou transferer ${reorderQuantity} unite(s) de ${priorityStock.product_name} vers ${priorityStock.warehouse_name}.`,
+      owner_role: "Stock / Achats",
+      deadline_days: 1,
+      target_amount: reorderQuantity,
+      target_unit: "unites",
+      entity_type: "product",
+      entity_id: priorityStock.product_id,
+      entity_label: priorityStock.product_name,
+      first_step: "Verifier aujourd'hui le stock disponible dans les autres depots.",
+      steps: [
+        "Confirmer le stock physique.",
+        "Verifier les possibilites de transfert inter-depots.",
+        "Creer la commande ou le transfert.",
+        "Confirmer la nouvelle date de disponibilite."
+      ],
+      success_metric: "Couverture ramenee a au moins 20 jours sur la ligne prioritaire.",
+      decision_required: "Choisir entre transfert interne et achat."
     });
   }
 
   if (lossProducts.length) {
+    const lossProduct = lossProducts[0];
+
     recommendations.push({
+      id: "margin-loss",
+      domain: "profitability",
       priority: "important",
       title: "Corriger les ventes a perte",
       justification: `${lossProducts.length} produit(s) presentent une marge brute negative sur la periode.`,
-      action: "Verifier prix, remises et couts de revient avant la prochaine vente."
+      action: `Revoir avant la prochaine vente le prix et le cout de ${lossProduct.product_name}, dont la marge brute est de ${round(lossProduct.gross_profit)} USD.`,
+      owner_role: "Direction commerciale / Finance",
+      deadline_days: 2,
+      entity_type: "product",
+      entity_id: lossProduct.product_id,
+      entity_label: lossProduct.product_name,
+      first_step: "Comparer le prix net facture au cout de revient actuel.",
+      steps: [
+        "Verifier le cout unitaire et les remises.",
+        "Calculer le prix plancher.",
+        "Valider le nouveau prix ou retirer la remise.",
+        "Controler les prochaines factures."
+      ],
+      success_metric: "Aucune nouvelle vente avec marge brute negative.",
+      decision_required: "Valider le prix plancher du produit."
     });
   }
 
   if (Number(metrics.estimated_net_margin_percent || 0) < 20) {
     recommendations.push({
+      id: "margin-recovery",
+      domain: "profitability",
       priority: "important",
       title: "Restaurer la marge estimee",
       justification: `La marge nette estimee est de ${metrics.estimated_net_margin_percent} %.`,
-      action: "Analyser les depenses dominantes et ajuster les prix des produits a faible marge."
+      action: "Revoir les trois premieres categories de depenses et les produits sous 20 % de marge avant le prochain cycle de vente.",
+      owner_role: "Direction / Finance",
+      deadline_days: 5,
+      first_step: "Extraire les trois charges les plus elevees de la periode.",
+      steps: [
+        "Identifier les charges reduisibles sans affecter la production.",
+        "Lister les produits sous le seuil de marge.",
+        "Chiffrer deux mesures de reduction ou de repricing.",
+        "Valider un plan avec impact mensuel."
+      ],
+      success_metric: "Plan chiffre visant une marge nette positive puis le seuil cible.",
+      decision_required: "Arbitrer les reductions de charges et ajustements de prix."
     });
   }
 

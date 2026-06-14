@@ -37,19 +37,22 @@ import {
 import { runDeepseekReasoning } from "./deepseekReasoner.service.js";
 import { getActiveCompanyKnowledge } from "./companyKnowledge.service.js";
 import { runDeterministicAnalysis } from "../analytics/deterministicAnalytics.service.js";
+import {
+  buildPracticalActionPlan,
+  formatPracticalAction
+} from "../../utils/practicalAI.util.js";
 
 const aiHistory = [];
 
 const quickQuestions = [
-  "Pourquoi les ventes ont baissé cette semaine ?",
-  "Quels produits dois-je réapprovisionner en priorité ?",
-  "Quels sont mes clients les plus risqués ?",
-  "Quelles dépenses pèsent le plus ce mois ?",
-  "Quelle est ma situation de trésorerie ?",
-  "Résume-moi la situation comptable actuelle.",
-  "Donne-moi un brief CEO global de KIVU AGRO BIO.",
-  "Quels sont les risques les plus urgents pour KIVU AGRO BIO ?",
-  "Quelles opportunités dois-je exploiter ce mois ?"
+  "Quels clients relancer aujourd'hui, pour quel montant et par qui ?",
+  "Quels credits clients faut-il suspendre ou renegocier cette semaine ?",
+  "Quels produits commander ou transferer aujourd'hui, et en quelle quantite ?",
+  "Quelles depenses faut-il reduire en premier pour proteger la tresorerie ?",
+  "Quelles sont les trois decisions de direction a prendre aujourd'hui ?",
+  "Quel plan concret pour ameliorer la marge ce mois-ci ?",
+  "Quels ecarts comptables doivent etre corriges avant la cloture ?",
+  "Donne-moi le plan d'action direction avec responsables et echeances."
 ];
 
 function round2(value) {
@@ -2021,10 +2024,15 @@ function pushHistory(item) {
 }
 
 function attachCertifiedAnalysis(response, certifiedAnalysis) {
-  const deterministicRecommendations = certifiedAnalysis.recommendations.map(
-    (item) =>
-      `${item.title}: ${item.action} Justification: ${item.justification}`
+  const actionPlan = buildPracticalActionPlan(
+    certifiedAnalysis.recommendations
   );
+  const deterministicRecommendations = actionPlan.map(formatPracticalAction);
+  const immediatePlan = actionPlan
+    .slice(0, 3)
+    .map((item, index) => `${index + 1}. ${formatPracticalAction(item)}`)
+    .join("\n");
+  const baseAnswer = String(response.answer || response.analysis || "").trim();
 
   return {
     ...response,
@@ -2036,6 +2044,20 @@ function attachCertifiedAnalysis(response, certifiedAnalysis) {
     forecast: certifiedAnalysis.forecast,
     recommendations: deterministicRecommendations,
     actions: deterministicRecommendations,
+    action_plan: actionPlan,
+    decisions_required: actionPlan
+      .filter((item) => item.decision_required)
+      .map((item) => ({
+        action_id: item.id,
+        title: item.title,
+        decision: item.decision_required,
+        deadline: item.deadline
+      })),
+    answer: immediatePlan
+      ? `Plan d'action immediat:\n${immediatePlan}${
+          baseAnswer ? `\n\nAnalyse:\n${baseAnswer}` : ""
+        }`.trim()
+      : baseAnswer,
     recommendation_details: certifiedAnalysis.recommendations,
     narrative_recommendations:
       response.recommendations || response.actions || [],

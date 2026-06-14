@@ -2,9 +2,11 @@ import {
   getGlobalStats,
   getStockAlerts,
   getTopCustomers,
-  getTopProducts
+  getTopProducts,
+  getCashForecast
 } from "../../models/dashboard.model.js";
 import { getAllInvoices } from "../../models/invoice.model.js";
+import { createPracticalAction } from "../../utils/practicalAI.util.js";
 import {
   getBusinessRulesMap,
   isPriorityCity,
@@ -52,19 +54,70 @@ function makeAlert({
   recommendation,
   entity_type = null,
   entity_id = null,
-  meta = {}
+  meta = {},
+  owner_role = null,
+  deadline_days = null,
+  first_step = null,
+  success_metric = null,
+  decision_required = null
 }) {
+  const normalizedPriority = String(priority || "LOW").toUpperCase();
+  const defaultOwner = {
+    receivables: "Responsable recouvrement",
+    cash: "Direction financiere",
+    stock: "Responsable stock et achats",
+    margin: "Direction commerciale et finance",
+    sales: "Direction commerciale"
+  };
+  const practicalAction = createPracticalAction({
+    id: code,
+    domain: category,
+    priority: normalizedPriority,
+    title,
+    action: recommendation,
+    rationale: summary,
+    owner_role: owner_role || defaultOwner[category] || "Direction",
+    deadline_days:
+      deadline_days ??
+      (normalizedPriority === "CRITICAL"
+        ? 0
+        : normalizedPriority === "HIGH"
+          ? 2
+          : 7),
+    amount_at_stake:
+      meta.balance_due ??
+      meta.overdue_receivables ??
+      meta.total_receivables ??
+      meta.concentration_amount ??
+      null,
+    entity_type,
+    entity_id,
+    entity_label:
+      meta.customer_name || meta.product_name || meta.invoice_number || null,
+    first_step: first_step || recommendation,
+    success_metric:
+      success_metric ||
+      "Action executee, resultat mesure et alerte cloturee par le responsable.",
+    decision_required
+  });
+
   return {
     code,
     title,
     category,
-    priority: String(priority || "LOW").toUpperCase(),
+    priority: normalizedPriority,
     priority_weight: priorityWeight(priority),
     summary,
     recommendation,
     entity_type,
     entity_id,
     meta,
+    owner_role: practicalAction.owner_role,
+    deadline: practicalAction.deadline,
+    first_step: practicalAction.first_step,
+    success_metric: practicalAction.success_metric,
+    decision_required: practicalAction.decision_required,
+    practical_action: practicalAction,
     generated_at: new Date().toISOString()
   };
 }
@@ -245,54 +298,64 @@ function analyzeLowMarginInvoices(invoices) {
   return alerts;
 }
 
-function analyzeCashAlerts(globalStats, businessRules) {
+function analyzeCashAlerts(cashForecast, businessRules) {
   const alerts = [];
-  const collected = Number(globalStats?.total_collected_amount || 0);
-  const receivables = Number(globalStats?.total_receivables || 0);
-  const sales = Number(globalStats?.total_sales_amount || 0);
+  const summary = cashForecast?.summary || {};
+  const currentCash = Number(summary.current_cash_base || 0);
+  const receivables = Number(summary.open_receivables || 0);
+  const overdueReceivables = Number(summary.overdue_receivables || 0);
   const minimumCashThreshold = Number(
     businessRules?.minimum_cash_threshold_usd || 3000
   );
 
-  if (collected < minimumCashThreshold) {
+  if (currentCash < minimumCashThreshold) {
     alerts.push(
       makeAlert({
         code: "cash_below_threshold",
         title: "Seuil de cash sous vigilance",
         category: "cash",
         priority: "CRITICAL",
-        summary:
-          `Les encaissements cumulés (${round2(collected)} USD) sont sous le seuil de vigilance fixé à ${round2(
-            minimumCashThreshold
-          )} USD.`,
+        summary: `La tresorerie disponible (${round2(currentCash)} USD) est sous le seuil de vigilance de ${round2(minimumCashThreshold)} USD.`,
         recommendation:
-          "Accélérer les encaissements, limiter les dépenses non stratégiques et protéger les achats de stock prioritaires.",
+          "Geler les sorties non essentielles et confirmer aujourd'hui les encaissements attendus a J+7.",
+        first_step:
+          "Extraire les paiements prevus sous 7 jours et appeler les trois clients aux plus forts encours.",
+        success_metric: `Tresorerie disponible ramenee au-dessus de ${round2(minimumCashThreshold)} USD.`,
+        decision_required:
+          "Valider le gel temporaire des depenses non prioritaires.",
         meta: {
-          total_collected_amount: round2(collected),
+          current_cash_base: round2(currentCash),
           total_receivables: round2(receivables),
-          total_sales_amount: round2(sales),
+          overdue_receivables: round2(overdueReceivables),
           minimum_cash_threshold_usd: round2(minimumCashThreshold)
         }
       })
     );
   }
 
-  if (receivables > sales * 0.35 && sales > 0) {
+  if (
+    overdueReceivables > 0 &&
+    overdueReceivables / Math.max(receivables, 1) >= 0.25
+  ) {
     alerts.push(
       makeAlert({
         code: "receivables_pressure",
         title: "Pression créances élevée",
         category: "cash",
         priority: "HIGH",
-        summary:
-          `Les créances (${round2(receivables)} USD) représentent une part significative des ventes (${round2(
-            sales
-          )} USD).`,
+        summary: `${round2(overdueReceivables)} USD de creances sont echues sur ${round2(receivables)} USD d'encours ouverts.`,
         recommendation:
-          "Mettre la priorité sur la relance des comptes débiteurs et renforcer la discipline de crédit client.",
+          "Obtenir un paiement ou un engagement date sur les cinq plus gros encours echus.",
+        deadline_days: 0,
+        first_step:
+          "Affecter aujourd'hui chaque encours prioritaire a un responsable de relance.",
+        success_metric:
+          "100 % des cinq principaux encours ont un paiement ou un engagement date.",
+        decision_required:
+          "Valider la suspension de credit des comptes sans engagement.",
         meta: {
           total_receivables: round2(receivables),
-          total_sales_amount: round2(sales)
+          overdue_receivables: round2(overdueReceivables)
         }
       })
     );
@@ -363,18 +426,19 @@ function analyzeChannelConcentration(topCustomers) {
 }
 
 export async function getKabotAlerts() {
-  const [businessRules, globalStats, stockAlerts, topCustomers, topProducts, invoices] =
+  const [businessRules, globalStats, stockAlerts, topCustomers, topProducts, invoices, cashForecast] =
     await Promise.all([
       getBusinessRulesMap(),
       getGlobalStats(),
       getStockAlerts(),
       getTopCustomers(10),
       getTopProducts(10),
-      getAllInvoices()
+      getAllInvoices(),
+      getCashForecast(10)
     ]);
 
   const alerts = [
-    ...analyzeCashAlerts(globalStats, businessRules),
+    ...analyzeCashAlerts(cashForecast, businessRules),
     ...analyzeReceivableAlerts(invoices, businessRules),
     ...analyzeStockAlerts(stockAlerts, businessRules),
     ...analyzeLowMarginInvoices(invoices),
@@ -401,6 +465,24 @@ export async function getKabotAlerts() {
 
   return {
     summary,
-    alerts
+    alerts,
+    control_tower: {
+      priorities_today: alerts
+        .filter((item) => item.practical_action.deadline_days <= 1)
+        .slice(0, 10)
+        .map((item) => item.practical_action),
+      action_plan: alerts.slice(0, 15).map((item) => item.practical_action),
+      decisions_required: alerts
+        .filter((item) => item.decision_required)
+        .slice(0, 10)
+        .map((item) => ({
+          alert_code: item.code,
+          title: item.title,
+          decision: item.decision_required,
+          deadline: item.deadline
+        })),
+      closure_rule:
+        "Une alerte est cloturee seulement quand le responsable renseigne le resultat et que l'indicateur de succes est atteint."
+    }
   };
 }

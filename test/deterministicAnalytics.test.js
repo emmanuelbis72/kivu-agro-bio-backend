@@ -39,6 +39,10 @@ test("collection priority becomes critical for large and old receivables", () =>
   assert.equal(result.priority, "critical");
   assert.ok(result.score >= 80);
   assert.ok(result.payment_likelihood_score <= 20);
+  assert.equal(result.owner_role, "Finance / Recouvrement");
+  assert.equal(result.deadline_days, 0);
+  assert.match(result.credit_decision, /Suspendre/);
+  assert.equal(result.score_breakdown.lateness, 30);
 });
 
 test("collection priority remains monitored for a small current balance", () => {

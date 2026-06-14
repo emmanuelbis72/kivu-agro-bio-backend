@@ -95,8 +95,6 @@ export async function getCollectionsReport(filters = {}) {
       i.customer_id,
       c.business_name AS customer_name,
       COALESCE(NULLIF(TRIM(c.city), ''), 'Non renseignee') AS customer_city,
-      COALESCE(NULLIF(TRIM(c.phone), ''), '-') AS customer_phone,
-      COALESCE(NULLIF(TRIM(c.commercial_name), ''), 'Non affecte') AS commercial_name,
       i.warehouse_id,
       COALESCE(w.name, 'Depot non renseigne') AS warehouse_name,
       COALESCE(i.total_amount, 0) AS total_amount,

@@ -7,6 +7,10 @@ import {
   getIncomeStatement,
   getTrialBalance
 } from "../../models/accountingReport.model.js";
+import {
+  createPracticalAction,
+  formatPracticalAction
+} from "../../utils/practicalAI.util.js";
 
 function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
@@ -91,15 +95,23 @@ async function getCriticalReceivables(limit = 10) {
       i.id,
       i.invoice_number,
       i.invoice_date,
+      i.due_date,
       i.balance_due,
       i.total_amount,
+      GREATEST(
+        CURRENT_DATE - COALESCE(i.due_date, i.invoice_date),
+        0
+      )::int AS days_overdue,
       c.business_name AS customer_name,
       w.name AS warehouse_name
     FROM invoices i
     INNER JOIN customers c ON c.id = i.customer_id
     INNER JOIN warehouses w ON w.id = i.warehouse_id
     WHERE COALESCE(i.balance_due, 0) > 0
-    ORDER BY i.balance_due DESC, i.invoice_date ASC
+      AND i.status IN ('issued', 'partial')
+    ORDER BY
+      GREATEST(CURRENT_DATE - COALESCE(i.due_date, i.invoice_date), 0) DESC,
+      i.balance_due DESC
     LIMIT $1;
   `;
 
@@ -151,6 +163,7 @@ async function getLowMarginInvoices(limit = 10) {
 async function getStockAlerts(limit = 10) {
   const query = `
     SELECT
+      p.id AS product_id,
       ws.quantity,
       p.name AS product_name,
       p.sku,
@@ -202,6 +215,120 @@ function compactKnowledgeRows(rows) {
   }));
 }
 
+function buildCEOActionPlan(context) {
+  const receivables = Array.isArray(context?.receivables)
+    ? context.receivables
+    : [];
+  const stockAlerts = Array.isArray(context?.stock_alerts)
+    ? context.stock_alerts
+    : [];
+  const lowMarginInvoices = Array.isArray(context?.low_margin_invoices)
+    ? context.low_margin_invoices
+    : [];
+  const accounting = context?.accounting_reporting || {};
+  const trialBalance = accounting.trial_balance || {};
+  const actions = [];
+  const topReceivable = receivables[0];
+  const topStockAlert = stockAlerts[0];
+  const topLowMargin = lowMarginInvoices[0];
+  const accountingGap = Math.abs(
+    Number(trialBalance.total_debit || 0) -
+      Number(trialBalance.total_credit || 0)
+  );
+
+  if (topReceivable) {
+    actions.push(
+      createPracticalAction({
+        id: `ceo-receivable-${topReceivable.id}`,
+        domain: "receivables",
+        priority: "critical",
+        title: `Recouvrer ${topReceivable.customer_name}`,
+        action: `Obtenir un paiement ou un engagement date sur la facture ${topReceivable.invoice_number}.`,
+        rationale: `Encours prioritaire de ${roundAmount(topReceivable.balance_due)} USD, en retard de ${Number(topReceivable.days_overdue || 0)} jour(s).`,
+        owner_role: "Responsable recouvrement",
+        deadline_days: 0,
+        amount_at_stake: topReceivable.balance_due,
+        target_amount: topReceivable.balance_due,
+        entity_type: "invoice",
+        entity_id: topReceivable.id,
+        entity_label: topReceivable.invoice_number,
+        first_step:
+          "Appeler le client aujourd'hui, confirmer le motif du retard et envoyer un engagement de paiement ecrit.",
+        success_metric: "Paiement recu ou engagement date confirme par ecrit.",
+        decision_required:
+          "Suspendre ou maintenir le credit client jusqu'au paiement."
+      })
+    );
+  }
+
+  if (topStockAlert) {
+    actions.push(
+      createPracticalAction({
+        id: `ceo-stock-${topStockAlert.product_id || topStockAlert.id}`,
+        domain: "stock",
+        priority: "high",
+        title: `Securiser ${topStockAlert.product_name}`,
+        action: "Verifier le besoin puis lancer un transfert ou un achat prioritaire.",
+        rationale: `Stock disponible: ${roundAmount(topStockAlert.available_quantity || topStockAlert.quantity)}.`,
+        owner_role: "Responsable stock et achats",
+        deadline_days: 1,
+        entity_type: "product",
+        entity_id: topStockAlert.product_id || topStockAlert.id,
+        entity_label: topStockAlert.product_name,
+        first_step:
+          "Verifier les stocks des autres depots et la consommation des 30 derniers jours.",
+        success_metric: "Decision de transfert ou commande validee sous 24 heures.",
+        decision_required: "Valider transfert inter-depots ou commande fournisseur."
+      })
+    );
+  }
+
+  if (topLowMargin) {
+    actions.push(
+      createPracticalAction({
+        id: `ceo-margin-${topLowMargin.id}`,
+        domain: "margin",
+        priority: "high",
+        title: `Corriger la marge de ${topLowMargin.invoice_number}`,
+        action:
+          "Verifier le prix, les remises et le cout de revient avant toute vente comparable.",
+        rationale: `Facture identifiee parmi les plus faibles marges: ${roundAmount(topLowMargin.gross_margin_percent)} %.`,
+        owner_role: "Direction commerciale et finance",
+        deadline_days: 3,
+        entity_type: "invoice",
+        entity_id: topLowMargin.id,
+        entity_label: topLowMargin.invoice_number,
+        first_step:
+          "Comparer prix facture, cout de revient et remise accordee ligne par ligne.",
+        success_metric: "Nouveau prix plancher ou regle de remise validee.",
+        decision_required: "Valider le prix plancher et la limite de remise."
+      })
+    );
+  }
+
+  if (accountingGap > 0.01) {
+    actions.push(
+      createPracticalAction({
+        id: "ceo-accounting-gap",
+        domain: "accounting",
+        priority: "critical",
+        title: "Corriger l'ecart comptable",
+        action: "Identifier les ecritures responsables et retablir l'equilibre.",
+        rationale: `Ecart detecte de ${roundAmount(accountingGap)} USD.`,
+        owner_role: "Responsable comptable",
+        deadline_days: 0,
+        amount_at_stake: accountingGap,
+        first_step:
+          "Extraire les journaux desequilibres et rapprocher les totaux debit-credit.",
+        success_metric: "Ecart de balance et de bilan egal a 0.",
+        decision_required: "Valider les ecritures de correction avant cloture."
+      })
+    );
+  }
+
+  return actions.slice(0, 6);
+}
+
 function buildCEOQuestion() {
   return `
 Tu es KABOT, assistant CEO de KIVU AGRO BIO.
@@ -215,6 +342,8 @@ Regles obligatoires :
 - Si une donnee manque, dis-le clairement.
 - Reponds en francais professionnel.
 - Sois concret, oriente decision, investisseur-ready.
+- Chaque action doit preciser: responsable, echeance, montant ou objet, premiere etape et indicateur de succes.
+- Distingue clairement ce qui doit etre fait aujourd'hui, cette semaine et ce qui exige une decision de direction.
 
 Format de sortie JSON strict :
 {
@@ -247,12 +376,17 @@ function buildFallbackCEOResponse(context) {
   const incomeStatement = accountingReporting.income_statement || {};
   const balanceSheet = accountingReporting.balance_sheet || {};
   const trialBalance = accountingReporting.trial_balance || {};
+  const actionPlan = buildCEOActionPlan(context);
+  const trialBalanceGap = roundAmount(
+    Number(trialBalance.total_debit || 0) -
+      Number(trialBalance.total_credit || 0)
+  );
 
   const summary =
     `Ventes ${roundAmount(kpis.total_sales_amount)} USD, encaissements ${roundAmount(
       kpis.total_collected_amount
     )} USD, creances ${roundAmount(kpis.total_receivables)} USD. ` +
-    `Resultat net ${roundAmount(incomeStatement.net_result)} USD et ecart de bilan ${roundAmount(balanceSheet.gap)} USD. ` +
+    `Resultat net ${roundAmount(incomeStatement.net_result)} USD et ecart debit-credit ${trialBalanceGap} USD. ` +
     `La direction doit surveiller en priorite la tresorerie, les encours clients, la coherence comptable et les alertes de stock.`;
 
   const analysis =
@@ -260,12 +394,7 @@ function buildFallbackCEOResponse(context) {
     `Les creances prioritaires et les produits a faible stock doivent etre traites immediatement pour proteger la continuite operationnelle. ` +
     `Le reporting comptable montre ${roundAmount(incomeStatement.total_revenue)} USD de produits, ${roundAmount(incomeStatement.total_expense)} USD de charges et un ecart de balance de ${roundAmount(Number(trialBalance.total_debit || 0) - Number(trialBalance.total_credit || 0))} USD a surveiller si non nul.`;
 
-  const recommendations = [
-    "Accelerer le recouvrement des creances les plus elevees.",
-    "Securiser les produits en alerte de stock.",
-    "Controler les ecarts comptables et les brouillons avant cloture.",
-    "Concentrer l'effort commercial sur les meilleures references."
-  ];
+  const recommendations = actionPlan.map(formatPracticalAction);
 
   return {
     intent: "ai_reasoning",
@@ -281,10 +410,7 @@ function buildFallbackCEOResponse(context) {
       total_expense: roundAmount(incomeStatement.total_expense),
       net_result: roundAmount(incomeStatement.net_result),
       balance_sheet_gap: roundAmount(balanceSheet.gap),
-      trial_balance_gap: roundAmount(
-        Number(trialBalance.total_debit || 0) -
-          Number(trialBalance.total_credit || 0)
-      )
+      trial_balance_gap: trialBalanceGap
     },
     drivers: [
       ...receivables.slice(0, 3).map(
@@ -298,6 +424,21 @@ function buildFallbackCEOResponse(context) {
       )
     ],
     recommendations,
+    action_plan: actionPlan,
+    decisions_required: actionPlan
+      .filter((item) => item.decision_required)
+      .map((item) => ({
+        action_id: item.id,
+        title: item.title,
+        decision: item.decision_required,
+        deadline: item.deadline
+      })),
+    management_rhythm: {
+      today: actionPlan.filter((item) => item.deadline_days <= 1),
+      this_week: actionPlan.filter((item) => item.deadline_days > 1),
+      closure_rule:
+        "Chaque action est cloturee avec un resultat chiffre ou une preuve de decision."
+    },
     priority_level: "HIGH",
     confidence_score: 0.65,
     generated_at: new Date().toISOString()
@@ -368,6 +509,17 @@ export async function getCEOBRIEF() {
   };
 
   const businessRules = await getBusinessRulesMap();
+  const useReasoning =
+    String(process.env.AI_REASONING_ENABLED || "true")
+      .trim()
+      .toLowerCase() !== "false";
+
+  if (!useReasoning) {
+    return {
+      rawData: context,
+      ai: buildFallbackCEOResponse(context)
+    };
+  }
 
   try {
     const reasoning = await withTimeout(
@@ -389,6 +541,7 @@ export async function getCEOBRIEF() {
       };
     }
 
+    const actionPlan = buildCEOActionPlan(context);
     const aiResult = {
       intent: "ai_reasoning",
       period: "global",
@@ -405,7 +558,24 @@ export async function getCEOBRIEF() {
           (item) => `Opportunite: ${item}`
         )
       ],
-      recommendations: reasoning.actions || reasoning.recommendations || [],
+      recommendations: actionPlan.map(formatPracticalAction),
+      narrative_recommendations:
+        reasoning.actions || reasoning.recommendations || [],
+      action_plan: actionPlan,
+      decisions_required: actionPlan
+        .filter((item) => item.decision_required)
+        .map((item) => ({
+          action_id: item.id,
+          title: item.title,
+          decision: item.decision_required,
+          deadline: item.deadline
+        })),
+      management_rhythm: {
+        today: actionPlan.filter((item) => item.deadline_days <= 1),
+        this_week: actionPlan.filter((item) => item.deadline_days > 1),
+        closure_rule:
+          "Chaque action est cloturee avec un resultat chiffre ou une preuve de decision."
+      },
       priority_level: reasoning.priority_level || "MEDIUM",
       confidence_score: reasoning.confidence_score || 0.95,
       generated_at: new Date().toISOString()

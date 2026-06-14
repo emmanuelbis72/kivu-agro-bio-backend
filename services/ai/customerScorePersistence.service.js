@@ -5,6 +5,40 @@ import {
   upsertCustomerScore
 } from "../../models/ai/customerScore.model.js";
 
+function enrichPersistedScore(row) {
+  const payload =
+    row?.score_payload && typeof row.score_payload === "object"
+      ? row.score_payload
+      : {};
+
+  return {
+    ...row,
+    ...payload,
+    score_id: row.id,
+    score_date: row.score_date,
+    source_agent: row.source_agent,
+    customer_segment: row.customer_segment,
+    churn_risk_score: Number(row.churn_risk_score || 0),
+    upsell_potential_score: Number(row.upsell_potential_score || 0),
+    payment_risk_score: Number(row.payment_risk_score || 0),
+    strategic_value_score: Number(row.strategic_value_score || 0),
+    collection_priority_score: Number(row.collection_priority_score || 0),
+    practical_action: {
+      owner_role: payload.owner_role || "Finance / Recouvrement",
+      deadline_days: Number(payload.deadline_days || 0),
+      first_step: payload.first_step || null,
+      target_collection_amount: Number(
+        payload.target_collection_amount || 0
+      ),
+      credit_decision: payload.credit_decision || null,
+      success_metric:
+        payload.target_collection_amount > 0
+          ? `Paiement ou engagement date sur ${payload.target_collection_amount} USD.`
+          : null
+    }
+  };
+}
+
 function inferSegment(row) {
   const sales = Number(row.total_sales_amount || 0);
   const receivable = Number(row.total_balance_due || 0);
@@ -79,8 +113,18 @@ export async function syncCustomerScoresSnapshot(scoreDate = new Date().toISOStr
     const churnRiskScore = inferChurnRisk(row);
     const upsellPotentialScore = inferUpsellPotential(row);
     const collectionPriorityScore = Math.max(
-      paymentRiskScore,
-      Number(row.total_balance_due || 0) > 0 ? paymentRiskScore : Math.round(paymentRiskScore * 0.6)
+      0,
+      Math.min(
+        100,
+        Math.round(
+          Number(
+            row.collection_priority_score ??
+              (Number(row.total_balance_due || 0) > 0
+                ? paymentRiskScore
+                : paymentRiskScore * 0.6)
+          )
+        )
+      )
     );
 
     const saved = await upsertCustomerScore({
@@ -94,16 +138,17 @@ export async function syncCustomerScoresSnapshot(scoreDate = new Date().toISOStr
       collection_priority_score: collectionPriorityScore,
       customer_segment: inferSegment(row),
       score_payload: row,
-      explanation:
-        "Score calcule a partir des ventes, des creances, des priorites geographiques et du profil de valeur client."
+      explanation: row.explanation ||
+        "Score explique par l'exposition, le retard, le comportement de paiement et la valeur commerciale."
     });
 
-    persisted.push(saved);
+    persisted.push(enrichPersistedScore(saved));
   }
 
   return persisted;
 }
 
 export async function getLatestPersistedCustomerScores(limit = 100) {
-  return getLatestCustomerScores(limit);
+  const rows = await getLatestCustomerScores(limit);
+  return rows.map(enrichPersistedScore);
 }

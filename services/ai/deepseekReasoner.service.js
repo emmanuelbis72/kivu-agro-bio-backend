@@ -366,6 +366,8 @@ Règles:
 - Si une donnée manque, dis-le clairement.
 - Réponse courte, niveau direction générale.
 - Priorise les risques et les actions.
+- Pour chaque action, indique le responsable, l'echeance, la premiere etape et l'indicateur de succes.
+- Reponds d'abord a la question posee, puis distingue les actions a faire aujourd'hui et cette semaine.
 - Maximum 5 éléments par tableau.
 - Integre les donnees comptables et de reporting si elles sont fournies.
 - Retourne uniquement un JSON valide.
@@ -415,6 +417,8 @@ Règles:
 - N'invente aucun chiffre.
 - Si une donnée manque, dis-le clairement.
 - Réponds en français professionnel, orienté décision.
+- Chaque action doit indiquer responsable, echeance, montant ou objet, premiere etape et indicateur de succes.
+- Distingue les actions du jour, celles de la semaine et les decisions a arbitrer par la direction.
 - Retourne uniquement un JSON valide.
 
 Business rules:
