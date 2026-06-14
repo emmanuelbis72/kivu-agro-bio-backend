@@ -12,6 +12,7 @@ import {
 } from "./budget.model.js";
 import { getCashForecast } from "./dashboard.model.js";
 import { ensurePurchaseInvoicesSchema } from "./purchaseInvoice.model.js";
+import { normalizeCustomerBalanceRow } from "../utils/customerBalance.util.js";
 
 function roundAmount(value) {
   return Math.round(Number(value || 0) * 100) / 100;
@@ -521,32 +522,25 @@ function buildStockStateFilters(filters = {}) {
 
 function buildCustomerLedgerFilters(filters = {}) {
   const invoiceConditions = [`i.status IN ('issued', 'partial', 'paid')`];
-  const paymentConditions = [];
   const values = [];
 
   if (filters.startDate) {
     values.push(filters.startDate);
     invoiceConditions.push(`i.invoice_date >= $${values.length}`);
-    paymentConditions.push(`p.payment_date >= $${values.length}`);
   }
 
   if (filters.endDate) {
     values.push(filters.endDate);
     invoiceConditions.push(`i.invoice_date <= $${values.length}`);
-    paymentConditions.push(`p.payment_date <= $${values.length}`);
   }
 
   if (filters.customerId) {
     values.push(filters.customerId);
     invoiceConditions.push(`i.customer_id = $${values.length}`);
-    paymentConditions.push(`i.customer_id = $${values.length}`);
   }
 
   return {
     invoiceWhereClause: `WHERE ${invoiceConditions.join(" AND ")}`,
-    paymentWhereClause: paymentConditions.length
-      ? `WHERE ${paymentConditions.join(" AND ")}`
-      : "",
     values
   };
 }
@@ -688,30 +682,40 @@ export async function getCustomerAgingReport({
 export async function getCustomerLedgerReport(filters = {}) {
   await ensureReportsSchema(pool);
 
-  const { invoiceWhereClause, paymentWhereClause, values } =
+  const { invoiceWhereClause, values } =
     buildCustomerLedgerFilters(filters);
 
   const query = `
-    WITH invoice_summary AS (
+    WITH filtered_invoices AS (
       SELECT
+        i.id,
         i.customer_id,
-        COUNT(i.id)::int AS invoices_count,
-        COALESCE(SUM(i.total_amount), 0) AS invoiced_amount,
-        MAX(i.invoice_date) AS last_invoice_date
+        i.invoice_date,
+        i.total_amount,
+        i.paid_amount,
+        i.balance_due
       FROM invoices i
       ${invoiceWhereClause}
-      GROUP BY i.customer_id
+    ),
+    invoice_summary AS (
+      SELECT
+        fi.customer_id,
+        COUNT(fi.id)::int AS invoices_count,
+        COALESCE(SUM(fi.total_amount), 0) AS invoiced_amount,
+        COALESCE(SUM(fi.paid_amount), 0) AS paid_amount,
+        COALESCE(SUM(fi.balance_due), 0) AS balance_due_amount,
+        MAX(fi.invoice_date) AS last_invoice_date
+      FROM filtered_invoices fi
+      GROUP BY fi.customer_id
     ),
     payment_summary AS (
       SELECT
-        i.customer_id,
+        fi.customer_id,
         COUNT(p.id)::int AS payments_count,
-        COALESCE(SUM(p.amount), 0) AS paid_amount,
         MAX(p.payment_date) AS last_payment_date
       FROM payments p
-      INNER JOIN invoices i ON i.id = p.invoice_id
-      ${paymentWhereClause}
-      GROUP BY i.customer_id
+      INNER JOIN filtered_invoices fi ON fi.id = p.invoice_id
+      GROUP BY fi.customer_id
     )
     SELECT
       c.id AS customer_id,
@@ -720,8 +724,9 @@ export async function getCustomerLedgerReport(filters = {}) {
       COALESCE(inv.invoices_count, 0) AS invoices_count,
       COALESCE(pay.payments_count, 0) AS payments_count,
       COALESCE(inv.invoiced_amount, 0) AS invoiced_amount,
-      COALESCE(pay.paid_amount, 0) AS paid_amount,
-      COALESCE(inv.invoiced_amount, 0) - COALESCE(pay.paid_amount, 0) AS balance_amount,
+      COALESCE(inv.paid_amount, 0) AS paid_amount,
+      COALESCE(inv.balance_due_amount, 0) AS balance_due_amount,
+      COALESCE(inv.balance_due_amount, 0) AS balance_amount,
       inv.last_invoice_date,
       pay.last_payment_date
     FROM customers c
@@ -733,14 +738,7 @@ export async function getCustomerLedgerReport(filters = {}) {
   `;
 
   const result = await pool.query(query, values);
-  const rows = result.rows.map((row) => ({
-    ...row,
-    invoices_count: Number(row.invoices_count || 0),
-    payments_count: Number(row.payments_count || 0),
-    invoiced_amount: roundAmount(row.invoiced_amount),
-    paid_amount: roundAmount(row.paid_amount),
-    balance_amount: roundAmount(row.balance_amount)
-  }));
+  const rows = result.rows.map(normalizeCustomerBalanceRow);
 
   const summary = rows.reduce(
     (acc, row) => {
@@ -2371,8 +2369,9 @@ export async function getMarginByCityReport(filters = {}, limit = 500) {
         i.id AS invoice_id,
         i.customer_id,
         i.warehouse_id,
-        i.paid_amount,
-        i.balance_due,
+        COALESCE(i.total_amount, 0) AS invoice_total_amount,
+        COALESCE(i.paid_amount, 0) AS invoice_paid_amount,
+        COALESCE(i.balance_due, 0) AS invoice_balance_due,
         ii.quantity,
         ii.line_total,
         (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
@@ -2382,6 +2381,31 @@ export async function getMarginByCityReport(filters = {}, limit = 500) {
       INNER JOIN customers c ON c.id = i.customer_id
       INNER JOIN products p ON p.id = ii.product_id
       ${whereClause}
+    ),
+    invoice_financials AS (
+      SELECT
+        customer_city,
+        invoice_id,
+        MAX(invoice_paid_amount) * CASE
+          WHEN MAX(invoice_total_amount) > 0
+            THEN LEAST(SUM(line_total) / MAX(invoice_total_amount), 1)
+          ELSE 0
+        END AS paid_amount,
+        MAX(invoice_balance_due) * CASE
+          WHEN MAX(invoice_total_amount) > 0
+            THEN LEAST(SUM(line_total) / MAX(invoice_total_amount), 1)
+          ELSE 0
+        END AS balance_due
+      FROM city_sales
+      GROUP BY customer_city, invoice_id
+    ),
+    city_financials AS (
+      SELECT
+        customer_city,
+        COALESCE(SUM(paid_amount), 0) AS total_collected_amount,
+        COALESCE(SUM(balance_due), 0) AS total_receivables
+      FROM invoice_financials
+      GROUP BY customer_city
     )
     SELECT
       cs.customer_city,
@@ -2392,10 +2416,11 @@ export async function getMarginByCityReport(filters = {}, limit = 500) {
       COALESCE(SUM(cs.line_total), 0) AS total_sales_amount,
       COALESCE(SUM(cs.line_cogs_amount), 0) AS total_cogs_amount,
       COALESCE(SUM(cs.gross_profit_amount), 0) AS gross_profit_amount,
-      COALESCE(SUM(cs.paid_amount), 0) AS total_collected_amount,
-      COALESCE(SUM(cs.balance_due), 0) AS total_receivables
+      COALESCE(cf.total_collected_amount, 0) AS total_collected_amount,
+      COALESCE(cf.total_receivables, 0) AS total_receivables
     FROM city_sales cs
-    GROUP BY cs.customer_city
+    LEFT JOIN city_financials cf ON cf.customer_city = cs.customer_city
+    GROUP BY cs.customer_city, cf.total_collected_amount, cf.total_receivables
     ORDER BY total_sales_amount DESC, customer_city ASC
     LIMIT $${finalValues.length};
   `;
@@ -2407,8 +2432,9 @@ export async function getMarginByCityReport(filters = {}, limit = 500) {
         i.id AS invoice_id,
         i.customer_id,
         i.warehouse_id,
-        i.paid_amount,
-        i.balance_due,
+        COALESCE(i.total_amount, 0) AS invoice_total_amount,
+        COALESCE(i.paid_amount, 0) AS invoice_paid_amount,
+        COALESCE(i.balance_due, 0) AS invoice_balance_due,
         ii.quantity,
         ii.line_total,
         (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
@@ -2418,6 +2444,24 @@ export async function getMarginByCityReport(filters = {}, limit = 500) {
       INNER JOIN customers c ON c.id = i.customer_id
       INNER JOIN products p ON p.id = ii.product_id
       ${whereClause}
+    ),
+    invoice_financials AS (
+      SELECT
+        invoice_id,
+        MAX(customer_id) AS customer_id,
+        MAX(warehouse_id) AS warehouse_id,
+        MAX(invoice_paid_amount) * CASE
+          WHEN MAX(invoice_total_amount) > 0
+            THEN LEAST(SUM(line_total) / MAX(invoice_total_amount), 1)
+          ELSE 0
+        END AS paid_amount,
+        MAX(invoice_balance_due) * CASE
+          WHEN MAX(invoice_total_amount) > 0
+            THEN LEAST(SUM(line_total) / MAX(invoice_total_amount), 1)
+          ELSE 0
+        END AS balance_due
+      FROM city_sales
+      GROUP BY invoice_id
     )
     SELECT
       COUNT(DISTINCT customer_city)::int AS total_cities,
@@ -2428,8 +2472,8 @@ export async function getMarginByCityReport(filters = {}, limit = 500) {
       COALESCE(SUM(line_total), 0) AS total_sales_amount,
       COALESCE(SUM(line_cogs_amount), 0) AS total_cogs_amount,
       COALESCE(SUM(gross_profit_amount), 0) AS gross_profit_amount,
-      COALESCE(SUM(paid_amount), 0) AS total_collected_amount,
-      COALESCE(SUM(balance_due), 0) AS total_receivables
+      (SELECT COALESCE(SUM(paid_amount), 0) FROM invoice_financials) AS total_collected_amount,
+      (SELECT COALESCE(SUM(balance_due), 0) FROM invoice_financials) AS total_receivables
     FROM city_sales;
   `;
 
@@ -2504,8 +2548,9 @@ export async function getMarginByCustomerReport(filters = {}, limit = 500) {
         COALESCE(NULLIF(TRIM(c.city), ''), 'Ville non precise') AS customer_city,
         i.id AS invoice_id,
         i.warehouse_id,
-        i.paid_amount,
-        i.balance_due,
+        COALESCE(i.total_amount, 0) AS invoice_total_amount,
+        COALESCE(i.paid_amount, 0) AS invoice_paid_amount,
+        COALESCE(i.balance_due, 0) AS invoice_balance_due,
         ii.quantity,
         ii.line_total,
         (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
@@ -2515,6 +2560,30 @@ export async function getMarginByCustomerReport(filters = {}, limit = 500) {
       INNER JOIN customers c ON c.id = i.customer_id
       INNER JOIN products p ON p.id = ii.product_id
       ${whereClause}
+    ),
+    customer_financials AS (
+      SELECT
+        customer_id,
+        COALESCE(SUM(paid_amount), 0) AS total_collected_amount,
+        COALESCE(SUM(balance_due), 0) AS total_receivables
+      FROM (
+        SELECT
+          customer_id,
+          invoice_id,
+          MAX(invoice_paid_amount) * CASE
+            WHEN MAX(invoice_total_amount) > 0
+              THEN LEAST(SUM(line_total) / MAX(invoice_total_amount), 1)
+            ELSE 0
+          END AS paid_amount,
+          MAX(invoice_balance_due) * CASE
+            WHEN MAX(invoice_total_amount) > 0
+              THEN LEAST(SUM(line_total) / MAX(invoice_total_amount), 1)
+            ELSE 0
+          END AS balance_due
+        FROM customer_sales
+        GROUP BY customer_id, invoice_id
+      ) invoice_financials
+      GROUP BY customer_id
     )
     SELECT
       cs.customer_id,
@@ -2526,10 +2595,16 @@ export async function getMarginByCustomerReport(filters = {}, limit = 500) {
       COALESCE(SUM(cs.line_total), 0) AS total_sales_amount,
       COALESCE(SUM(cs.line_cogs_amount), 0) AS total_cogs_amount,
       COALESCE(SUM(cs.gross_profit_amount), 0) AS gross_profit_amount,
-      COALESCE(SUM(cs.paid_amount), 0) AS total_collected_amount,
-      COALESCE(SUM(cs.balance_due), 0) AS total_receivables
+      COALESCE(cf.total_collected_amount, 0) AS total_collected_amount,
+      COALESCE(cf.total_receivables, 0) AS total_receivables
     FROM customer_sales cs
-    GROUP BY cs.customer_id, cs.customer_name, cs.customer_city
+    LEFT JOIN customer_financials cf ON cf.customer_id = cs.customer_id
+    GROUP BY
+      cs.customer_id,
+      cs.customer_name,
+      cs.customer_city,
+      cf.total_collected_amount,
+      cf.total_receivables
     ORDER BY total_sales_amount DESC, customer_name ASC
     LIMIT $${finalValues.length};
   `;
@@ -2540,8 +2615,9 @@ export async function getMarginByCustomerReport(filters = {}, limit = 500) {
         c.id AS customer_id,
         i.id AS invoice_id,
         i.warehouse_id,
-        i.paid_amount,
-        i.balance_due,
+        COALESCE(i.total_amount, 0) AS invoice_total_amount,
+        COALESCE(i.paid_amount, 0) AS invoice_paid_amount,
+        COALESCE(i.balance_due, 0) AS invoice_balance_due,
         ii.quantity,
         ii.line_total,
         (ii.quantity * COALESCE(p.cost_price, 0)) AS line_cogs_amount,
@@ -2551,6 +2627,24 @@ export async function getMarginByCustomerReport(filters = {}, limit = 500) {
       INNER JOIN customers c ON c.id = i.customer_id
       INNER JOIN products p ON p.id = ii.product_id
       ${whereClause}
+    ),
+    invoice_financials AS (
+      SELECT
+        invoice_id,
+        MAX(customer_id) AS customer_id,
+        MAX(warehouse_id) AS warehouse_id,
+        MAX(invoice_paid_amount) * CASE
+          WHEN MAX(invoice_total_amount) > 0
+            THEN LEAST(SUM(line_total) / MAX(invoice_total_amount), 1)
+          ELSE 0
+        END AS paid_amount,
+        MAX(invoice_balance_due) * CASE
+          WHEN MAX(invoice_total_amount) > 0
+            THEN LEAST(SUM(line_total) / MAX(invoice_total_amount), 1)
+          ELSE 0
+        END AS balance_due
+      FROM customer_sales
+      GROUP BY invoice_id
     )
     SELECT
       COUNT(DISTINCT customer_id)::int AS total_customers,
@@ -2560,8 +2654,8 @@ export async function getMarginByCustomerReport(filters = {}, limit = 500) {
       COALESCE(SUM(line_total), 0) AS total_sales_amount,
       COALESCE(SUM(line_cogs_amount), 0) AS total_cogs_amount,
       COALESCE(SUM(gross_profit_amount), 0) AS gross_profit_amount,
-      COALESCE(SUM(paid_amount), 0) AS total_collected_amount,
-      COALESCE(SUM(balance_due), 0) AS total_receivables
+      (SELECT COALESCE(SUM(paid_amount), 0) FROM invoice_financials) AS total_collected_amount,
+      (SELECT COALESCE(SUM(balance_due), 0) FROM invoice_financials) AS total_receivables
     FROM customer_sales;
   `;
 

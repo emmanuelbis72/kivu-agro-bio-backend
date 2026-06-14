@@ -5,6 +5,7 @@ import {
   normalizeCollectionInvoice
 } from "../utils/collectionStatus.util.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
+import { normalizeCustomerBalanceRow } from "../utils/customerBalance.util.js";
 import { ensurePurchaseInvoicesSchema } from "./purchaseInvoice.model.js";
 import { getAIForecasts } from "./ai/forecast.model.js";
 
@@ -651,6 +652,7 @@ export async function getCustomerBalanceBoard(filters = {}) {
         i.customer_id,
         COUNT(i.id)::int AS invoices_count,
         COALESCE(SUM(i.total_amount), 0) AS invoiced_amount,
+        COALESCE(SUM(i.paid_amount), 0) AS paid_amount,
         COALESCE(SUM(i.balance_due), 0) AS balance_due_amount
       FROM invoices i
       WHERE i.status IN ('issued', 'partial', 'paid')
@@ -663,11 +665,11 @@ export async function getCustomerBalanceBoard(filters = {}) {
       SELECT
         i.customer_id,
         COUNT(p.id)::int AS payments_count,
-        COALESCE(SUM(p.amount), 0) AS paid_amount,
         MAX(p.payment_date) AS last_payment_date
       FROM payments p
       INNER JOIN invoices i ON i.id = p.invoice_id
-      WHERE p.payment_date BETWEEN $1::date AND $2::date
+      WHERE i.status IN ('issued', 'partial', 'paid')
+        AND i.invoice_date BETWEEN $1::date AND $2::date
         AND ($3::int IS NULL OR i.warehouse_id = $3)
         AND ($4::int IS NULL OR i.customer_id = $4)
       GROUP BY i.customer_id
@@ -679,9 +681,9 @@ export async function getCustomerBalanceBoard(filters = {}) {
       COALESCE(inv.invoices_count, 0) AS invoices_count,
       COALESCE(pay.payments_count, 0) AS payments_count,
       COALESCE(inv.invoiced_amount, 0) AS invoiced_amount,
-      COALESCE(pay.paid_amount, 0) AS paid_amount,
+      COALESCE(inv.paid_amount, 0) AS paid_amount,
       COALESCE(inv.balance_due_amount, 0) AS balance_due_amount,
-      COALESCE(inv.invoiced_amount, 0) - COALESCE(pay.paid_amount, 0) AS balance_amount,
+      COALESCE(inv.balance_due_amount, 0) AS balance_amount,
       pay.last_payment_date
     FROM customers c
     LEFT JOIN invoice_summary inv ON inv.customer_id = c.id
@@ -745,15 +747,7 @@ export async function getCustomerBalanceBoard(filters = {}) {
     pool.query(query, values),
     pool.query(trendQuery, values)
   ]);
-  const rows = result.rows.map((row) => ({
-    ...row,
-    invoices_count: Number(row.invoices_count || 0),
-    payments_count: Number(row.payments_count || 0),
-    invoiced_amount: roundAmount(row.invoiced_amount),
-    paid_amount: roundAmount(row.paid_amount),
-    balance_due_amount: roundAmount(row.balance_due_amount),
-    balance_amount: roundAmount(row.balance_amount)
-  }));
+  const rows = result.rows.map(normalizeCustomerBalanceRow);
 
   const totals = rows.reduce(
     (acc, row) => {

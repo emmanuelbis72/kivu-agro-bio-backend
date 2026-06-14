@@ -1,5 +1,6 @@
 import { pool } from "../config/db.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
+import { isIncomeAccount } from "../utils/accountingAccount.util.js";
 
 function getExecutor(client) {
   return client || pool;
@@ -48,6 +49,39 @@ async function syncProductsIdSequence(executor = pool) {
   );
 }
 
+async function validateSalesAccount(executor, salesAccountId) {
+  if (salesAccountId === undefined || salesAccountId === null || salesAccountId === "") {
+    return;
+  }
+
+  const result = await executor.query(
+    `
+      SELECT
+        id,
+        account_number,
+        account_name,
+        account_class,
+        account_type,
+        is_postable,
+        is_active
+      FROM accounts
+      WHERE id = $1
+      LIMIT 1;
+    `,
+    [salesAccountId]
+  );
+
+  if (isIncomeAccount(result.rows[0])) {
+    return;
+  }
+
+  const error = new Error(
+    "Le compte de vente du produit doit etre un compte de produit actif et mouvementable (classe 7)."
+  );
+  error.status = 400;
+  throw error;
+}
+
 export async function createProduct(data) {
   const executor = getExecutor(data.client);
   const query = `
@@ -85,6 +119,7 @@ export async function createProduct(data) {
   ];
 
   await ensureProductsSchema(executor);
+  await validateSalesAccount(executor, data.sales_account_id);
   await syncProductsIdSequence(executor);
 
   try {
@@ -190,6 +225,7 @@ export async function updateProduct(id, data) {
   ];
 
   await ensureProductsSchema(executor);
+  await validateSalesAccount(executor, data.sales_account_id);
   const result = await executor.query(query, values);
   return result.rows[0] || null;
 }
