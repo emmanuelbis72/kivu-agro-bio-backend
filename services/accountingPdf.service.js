@@ -55,6 +55,21 @@ function drawSimpleRow(doc, y, values, widths, options = {}) {
   return y + rowHeight;
 }
 
+function drawPdfFooter(doc, text, marginX) {
+  const bottomMargin = doc.page.margins.bottom;
+
+  try {
+    doc.page.margins.bottom = 0;
+    doc.font("Helvetica").fontSize(9).fillColor("#6B7280");
+    doc.text(text, marginX, doc.page.height - 30, {
+      width: doc.page.width - marginX * 2,
+      align: "center"
+    });
+  } finally {
+    doc.page.margins.bottom = bottomMargin;
+  }
+}
+
 export function buildGeneralLedgerPdf(doc, ledger, filters = {}) {
   const pageWidth = doc.page.width;
   const marginX = 45;
@@ -140,15 +155,10 @@ export function buildGeneralLedgerPdf(doc, ledger, filters = {}) {
     .strokeColor("#D1D5DB")
     .stroke();
 
-  doc.font("Helvetica").fontSize(9).fillColor("#6B7280");
-  doc.text(
+  drawPdfFooter(
+    doc,
     "KIVU AGRO BIO - Grand livre généré automatiquement",
-    marginX,
-    doc.page.height - 45,
-    {
-      width: pageWidth - marginX * 2,
-      align: "center"
-    }
+    marginX
   );
 }
 
@@ -228,15 +238,10 @@ export function buildTrialBalancePdf(doc, balance, filters = {}) {
     .strokeColor("#D1D5DB")
     .stroke();
 
-  doc.font("Helvetica").fontSize(9).fillColor("#6B7280");
-  doc.text(
+  drawPdfFooter(
+    doc,
     "KIVU AGRO BIO - Balance générale générée automatiquement",
-    marginX,
-    doc.page.height - 45,
-    {
-      width: pageWidth - marginX * 2,
-      align: "center"
-    }
+    marginX
   );
 }
 

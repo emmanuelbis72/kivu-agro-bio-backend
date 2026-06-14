@@ -223,6 +223,24 @@ function drawPdfMetaLines(doc, lines, startX, startY, maxWidth) {
   return currentY;
 }
 
+function drawPdfFooter(doc, text, options = {}) {
+  const startX = options.startX || 40;
+  const width = options.width || doc.page.width - startX * 2;
+  const y = options.y || doc.page.height - 30;
+  const bottomMargin = doc.page.margins.bottom;
+
+  try {
+    doc.page.margins.bottom = 0;
+    doc.font("Helvetica").fontSize(8).fillColor("#6B7280");
+    doc.text(text, startX, y, {
+      width,
+      align: "center"
+    });
+  } finally {
+    doc.page.margins.bottom = bottomMargin;
+  }
+}
+
 function drawPdfSummaryBlock(doc, items, startY) {
   if (!Array.isArray(items) || items.length === 0) {
     return startY;
@@ -629,11 +647,7 @@ export async function createTabularReportPdfBuffer(reportDefinition, reportData,
     );
 
     if (currentY < doc.page.height - 40) {
-      doc.font("Helvetica").fontSize(8).fillColor("#6B7280");
-      doc.text("KIVU AGRO BIO - Export automatique", 40, doc.page.height - 38, {
-        width: doc.page.width - 80,
-        align: "center"
-      });
+      drawPdfFooter(doc, "KIVU AGRO BIO - Export automatique");
     }
 
     doc.end();
@@ -1406,11 +1420,7 @@ async function createCustomerBalanceStatementPdfBuffer(statement) {
     currentY = drawCustomerBalanceTable(doc, statement, currentY);
 
     if (currentY < doc.page.height - 28) {
-      doc.font("Helvetica").fontSize(8).fillColor("#6B7280");
-      doc.text("Etat de compte client - presentation bilan", 40, doc.page.height - 24, {
-        width: doc.page.width - 80,
-        align: "center"
-      });
+      drawPdfFooter(doc, "Etat de compte client - presentation bilan");
     }
 
     doc.end();
