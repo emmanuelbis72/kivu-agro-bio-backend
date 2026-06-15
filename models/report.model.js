@@ -1683,7 +1683,10 @@ export async function getBreakEvenReport(filters = {}) {
     WITH month_series AS (
       SELECT generate_series(
         DATE_TRUNC('month', COALESCE($${values.length + 1}::date, CURRENT_DATE - INTERVAL '5 months')),
-        DATE_TRUNC('month', COALESCE($${values.length + 2}::date, CURRENT_DATE)),
+        DATE_TRUNC(
+          'month',
+          LEAST(COALESCE($${values.length + 2}::date, CURRENT_DATE), CURRENT_DATE)
+        ),
         INTERVAL '1 month'
       )::date AS month_start
     ),
@@ -2816,7 +2819,13 @@ export async function getMarketingRatioReport(filters = {}) {
     WITH month_series AS (
       SELECT generate_series(
         DATE_TRUNC('month', COALESCE($${salesValues.length + 1}::date, CURRENT_DATE - INTERVAL '5 months')),
-        DATE_TRUNC('month', COALESCE($${salesValues.length + 2}::date, CURRENT_DATE)),
+        DATE_TRUNC(
+          'month',
+          LEAST(
+            COALESCE($${salesValues.length + 2}::date, CURRENT_DATE),
+            CURRENT_DATE
+          )
+        ),
         INTERVAL '1 month'
       )::date AS month_start
     ),

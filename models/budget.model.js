@@ -27,6 +27,20 @@ function getBudgetCategoryDefinitionMap() {
   );
 }
 
+function getElapsedMonthCount(fiscalYear, currentDate = new Date()) {
+  const currentYear = currentDate.getFullYear();
+
+  if (fiscalYear < currentYear) {
+    return 12;
+  }
+
+  if (fiscalYear > currentYear) {
+    return 0;
+  }
+
+  return currentDate.getMonth() + 1;
+}
+
 export async function ensureBudgetSchema(executor = pool) {
   await executor.query(`
     CREATE TABLE IF NOT EXISTS budgets (
@@ -415,7 +429,8 @@ export async function getBudgetVsActual(id) {
     );
   });
 
-  const monthRows = Array.from({ length: 12 }, (_, index) => ({
+  const elapsedMonthCount = getElapsedMonthCount(Number(budget.fiscal_year));
+  const monthRows = Array.from({ length: elapsedMonthCount }, (_, index) => ({
     month_number: index + 1,
     planned_total: 0,
     actual_total: 0,
