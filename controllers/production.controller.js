@@ -8,6 +8,10 @@ import {
   getProductionBatchById,
   createProductionBatch
 } from "../models/production.model.js";
+import {
+  convertStockQuantity,
+  normalizeStockUnit
+} from "../utils/stockUnit.util.js";
 
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
@@ -118,6 +122,14 @@ export async function createOrUpdateRecipeItemHandler(req, res, next) {
       });
     }
 
+    if (componentProduct.product_role === "packaging_material") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Les emballages sont geres separement et ne peuvent pas etre ajoutes comme ingredients de recette."
+      });
+    }
+
     const row = await createOrUpdateRecipeItem({
       finished_product_id,
       component_product_id,
@@ -207,6 +219,20 @@ export async function createProductionBatchHandler(req, res, next) {
       return res.status(404).json({
         success: false,
         message: "Produit fini introuvable."
+      });
+    }
+
+    try {
+      convertStockQuantity(
+        quantity_required,
+        quantity_unit,
+        normalizeStockUnit(componentProduct.stock_unit || componentProduct.unit)
+      );
+    } catch {
+      return res.status(400).json({
+        success: false,
+        message:
+          "L'unite de la recette est incompatible avec l'unite de stock du composant."
       });
     }
 

@@ -1,6 +1,10 @@
 import { getCashForecast } from "../models/dashboard.model.js";
 import { getMonthlyClosePack } from "../models/monthlyClose.model.js";
 import {
+  getBulkStockFlowComparison,
+  getStockInvoiceBulkReconciliation
+} from "../models/stock.model.js";
+import {
   getBudgetVsActualReport,
   getBreakEvenReport,
   getCategorySalesReport,
@@ -1726,6 +1730,111 @@ const reportDefinitions = {
         type: "number"
       }
     ]
+  },
+  "bulk-stock-flow": {
+    title: "Stock theorique en vrac",
+    subtitle:
+      "Entrees en vrac moins consommation calculee sur les produits finis factures",
+    tableTitle: "Reste theorique par depot et article",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `stock-vrac-${filters.start_date || "debut"}-${
+        filters.end_date || getTodayString()
+      }`,
+    columns: [
+      { key: "warehouse_name", header: "Depot", width: 72, xlsxWidth: 18 },
+      { key: "product_name", header: "Article vrac", width: 105, xlsxWidth: 28 },
+      { key: "sku", header: "SKU", width: 52, xlsxWidth: 14 },
+      { key: "reporting_unit", header: "Unite", width: 42, xlsxWidth: 10 },
+      { key: "opening_stock", header: "Ouverture", type: "number", width: 58, xlsxWidth: 14 },
+      { key: "bulk_entries", header: "Entrees", type: "number", width: 58, xlsxWidth: 14 },
+      { key: "transfer_in", header: "Transf. +", type: "number", width: 58, xlsxWidth: 14 },
+      { key: "transfer_out", header: "Transf. -", type: "number", width: 58, xlsxWidth: 14 },
+      { key: "invoice_consumption", header: "Conso. factures", type: "number", width: 70, xlsxWidth: 16 },
+      { key: "total_consumption", header: "Conso. totale", type: "number", width: 66, xlsxWidth: 16 },
+      { key: "theoretical_remaining", header: "Reste theorique", type: "number", width: 72, xlsxWidth: 18 },
+      { key: "shortage_quantity", header: "Manquant", type: "number", width: 58, xlsxWidth: 14 }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Lignes",
+        value: Number(summary.total_rows || 0),
+        rawValue: Number(summary.total_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Soldes negatifs",
+        value: Number(summary.shortage_rows || 0),
+        rawValue: Number(summary.shortage_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Unite filtree",
+        value: summary.reporting_unit || "Toutes",
+        rawValue: summary.reporting_unit || "Toutes"
+      }
+    ]
+  },
+  "stock-reconciliation": {
+    title: "Rapprochement stock factures / vrac",
+    subtitle:
+      "Comparaison entre le vrac introduit en stock et la consommation theorique des produits factures",
+    tableTitle: "Rapprochement par depot et article vrac",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `rapprochement-stock-${filters.start_date || "debut"}-${
+        filters.end_date || getTodayString()
+      }`,
+    columns: [
+      { key: "warehouse_name", header: "Depot", width: 68, xlsxWidth: 18 },
+      { key: "product_name", header: "Article vrac", width: 95, xlsxWidth: 26 },
+      { key: "sku", header: "SKU", width: 48, xlsxWidth: 14 },
+      { key: "reporting_unit", header: "Unite", width: 38, xlsxWidth: 10 },
+      { key: "invoices_count", header: "Fact.", type: "integer", width: 38, xlsxWidth: 10 },
+      { key: "finished_products_count", header: "Prod. finis", type: "integer", width: 52, xlsxWidth: 12 },
+      { key: "recipe_required_quantity", header: "Conso. theorique", type: "number", width: 70, xlsxWidth: 17 },
+      { key: "recorded_invoice_consumption", header: "Conso. compta.", type: "number", width: 70, xlsxWidth: 17 },
+      { key: "bulk_entries", header: "Entrees vrac", type: "number", width: 62, xlsxWidth: 15 },
+      { key: "transfer_in", header: "Transf. +", type: "number", width: 56, xlsxWidth: 14 },
+      { key: "transfer_out", header: "Transf. -", type: "number", width: 56, xlsxWidth: 14 },
+      { key: "available_bulk", header: "Vrac dispo.", type: "number", width: 62, xlsxWidth: 15 },
+      { key: "reconciliation_gap", header: "Ecart vrac", type: "number", width: 62, xlsxWidth: 15 },
+      { key: "recording_gap", header: "Ecart compta.", type: "number", width: 62, xlsxWidth: 15 },
+      { key: "status", header: "Statut", width: 58, xlsxWidth: 16 },
+      { key: "recording_status", header: "Compta.", width: 58, xlsxWidth: 16 }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Lignes",
+        value: Number(summary.total_rows || 0),
+        rawValue: Number(summary.total_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Manquants",
+        value: Number(summary.shortage_rows || 0),
+        rawValue: Number(summary.shortage_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Surplus",
+        value: Number(summary.surplus_rows || 0),
+        rawValue: Number(summary.surplus_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Non comptabilises",
+        value: Number(summary.unrecorded_rows || 0),
+        rawValue: Number(summary.unrecorded_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Produits sans recette",
+        value: Number(summary.unconfigured_invoice_items_count || 0),
+        rawValue: Number(summary.unconfigured_invoice_items_count || 0),
+        type: "integer"
+      }
+    ]
   }
 };
 
@@ -2282,6 +2391,73 @@ async function getStockStatePayload(query) {
   };
 }
 
+async function getBulkStockFlowPayload(query) {
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const productId = parsePositiveInteger(query.product_id);
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, getTodayString());
+  const reportingUnit = ["kg", "l", "unit"].includes(
+    String(query.unit || "").trim().toLowerCase()
+  )
+    ? String(query.unit).trim().toLowerCase()
+    : null;
+  const data = await getBulkStockFlowComparison({
+    warehouseId,
+    productId,
+    startDate,
+    endDate,
+    reportingUnit
+  });
+
+  return {
+    filters: {
+      warehouse_id: warehouseId,
+      product_id: productId,
+      start_date: startDate,
+      end_date: endDate,
+      unit: reportingUnit
+    },
+    summary: {
+      total_rows: data.rows.length,
+      shortage_rows: data.rows.filter(
+        (row) => Number(row.theoretical_remaining || 0) < 0
+      ).length,
+      reporting_unit: reportingUnit
+    },
+    ...data
+  };
+}
+
+async function getStockReconciliationPayload(query) {
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const productId = parsePositiveInteger(query.product_id);
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, getTodayString());
+  const reportingUnit = ["kg", "l", "unit"].includes(
+    String(query.unit || "").trim().toLowerCase()
+  )
+    ? String(query.unit).trim().toLowerCase()
+    : null;
+  const data = await getStockInvoiceBulkReconciliation({
+    warehouseId,
+    productId,
+    startDate,
+    endDate,
+    reportingUnit
+  });
+
+  return {
+    filters: {
+      warehouse_id: warehouseId,
+      product_id: productId,
+      start_date: startDate,
+      end_date: endDate,
+      unit: reportingUnit
+    },
+    ...data
+  };
+}
+
 async function getCashForecastPayload(query) {
   const detailLimit = parsePositiveLimit(query.detail_limit, 10, 200);
   const forecast = await getCashForecast(detailLimit);
@@ -2334,6 +2510,8 @@ const reportLoaders = {
   "product-ledger": getProductLedgerPayload,
   "product-sales": getProductSalesPayload,
   "stock-state": getStockStatePayload,
+  "bulk-stock-flow": getBulkStockFlowPayload,
+  "stock-reconciliation": getStockReconciliationPayload,
   "cash-forecast": getCashForecastPayload
 };
 
@@ -2449,6 +2627,14 @@ export function getCommissionDueReportHandler(req, res, next) {
 
 export function getStockStateReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "stock-state");
+}
+
+export function getBulkStockFlowReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "bulk-stock-flow");
+}
+
+export function getStockReconciliationReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "stock-reconciliation");
 }
 
 export async function getCashForecastReportHandler(req, res, next) {

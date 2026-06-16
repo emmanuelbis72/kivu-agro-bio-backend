@@ -3090,7 +3090,10 @@ export async function getStockStateReport(filters = {}, limit = 500) {
       p.name AS product_name,
       p.sku,
       p.category,
-      p.unit,
+      CASE
+        WHEN ws.stock_form = 'bulk' THEN COALESCE(p.stock_unit, p.unit, 'unit')
+        ELSE 'unit'
+      END AS unit,
       COALESCE(p.alert_threshold, 0) AS alert_threshold,
       COALESCE(p.cost_price, 0) AS unit_cost,
       (ws.quantity * COALESCE(p.cost_price, 0)) AS stock_value,

@@ -388,7 +388,9 @@ async function createPackagingConsumptionEntry(client, data) {
     notes:
       normalizeOptionalText(data.notes) ||
       `Consommation emballage par ${data.consumer_name}`,
-    created_by: data.created_by || null
+    created_by: data.created_by || null,
+    allow_negative:
+      normalizeOptionalText(data.source_type) === "invoice"
   });
 
   await client.query(

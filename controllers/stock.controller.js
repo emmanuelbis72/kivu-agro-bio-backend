@@ -6,6 +6,7 @@ import {
   getStockMovements,
   getStockTransfers,
   getStockTransferById,
+  getBulkStockFlowComparison,
   performStockEntry,
   performStockExit,
   performStockAdjustment,
@@ -14,9 +15,14 @@ import {
   performStockMixture
 } from "../models/stock.model.js";
 import { autoPostStockPurchaseEntry } from "../services/accountingAutoPost.service.js";
+import {
+  STOCK_UNITS,
+  normalizeStockUnit
+} from "../utils/stockUnit.util.js";
 
 const ALLOWED_STOCK_FORMS = ["bulk", "package"];
 const ALLOWED_UNITS = ["g", "kg", "ml", "l", "unit", "piece"];
+const ALLOWED_REPORTING_UNITS = ["kg", "l", "unit"];
 const FINISHED_PRODUCT_ROLE = "finished_product";
 const PACKAGING_ROLE = "packaging_material";
 
@@ -95,6 +101,12 @@ export async function createStockEntryHandler(req, res, next) {
     const warehouse_id = Number(req.body.warehouse_id);
     const product_id = Number(req.body.product_id);
     const quantity = Number(req.body.quantity);
+    const quantity_unit =
+      req.body.quantity_unit === undefined ||
+      req.body.quantity_unit === null ||
+      req.body.quantity_unit === ""
+        ? null
+        : normalizeStockUnit(req.body.quantity_unit, null);
     const variant = parseVariantPayload(req.body);
     const errors = [];
 
@@ -108,6 +120,13 @@ export async function createStockEntryHandler(req, res, next) {
 
     if (!isPositiveNumber(quantity)) {
       errors.push("Le champ 'quantity' doit être un nombre > 0.");
+    }
+
+    if (
+      req.body.quantity_unit !== undefined &&
+      !STOCK_UNITS.includes(String(req.body.quantity_unit).trim().toLowerCase())
+    ) {
+      errors.push("Le champ 'quantity_unit' est invalide.");
     }
 
     validateVariant(variant, errors);
@@ -127,6 +146,7 @@ export async function createStockEntryHandler(req, res, next) {
       warehouse_id,
       product_id,
       quantity,
+      quantity_unit,
       ...variant,
       unit_cost: Number(req.body.unit_cost ?? 0),
       reference_type: referenceType,
@@ -355,6 +375,15 @@ export async function createStockTransferHandler(req, res, next) {
         errors.push("Chaque ligne doit contenir une 'quantity' > 0.");
       }
 
+      if (
+        rawItem.quantity_unit !== undefined &&
+        !STOCK_UNITS.includes(
+          String(rawItem.quantity_unit).trim().toLowerCase()
+        )
+      ) {
+        errors.push("Chaque ligne doit contenir une 'quantity_unit' valide.");
+      }
+
       validateVariant(variant, errors);
 
       if (errors.length > 0) {
@@ -370,6 +399,12 @@ export async function createStockTransferHandler(req, res, next) {
       normalizedItems.push({
         product_id,
         quantity,
+        quantity_unit:
+          rawItem.quantity_unit === undefined ||
+          rawItem.quantity_unit === null ||
+          rawItem.quantity_unit === ""
+            ? null
+            : normalizeStockUnit(rawItem.quantity_unit, null),
         ...variant,
         unit_cost,
         notes: rawItem.notes?.trim() || null
@@ -823,6 +858,73 @@ export async function getStockTransferByIdHandler(req, res, next) {
     return res.status(200).json({
       success: true,
       data: transfer
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getBulkStockFlowComparisonHandler(req, res, next) {
+  try {
+    const warehouseId = req.query.warehouse_id
+      ? Number(req.query.warehouse_id)
+      : null;
+    const productId = req.query.product_id
+      ? Number(req.query.product_id)
+      : null;
+    const startDate =
+      req.query.start_date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.start_date)
+        ? req.query.start_date
+        : null;
+    const endDate =
+      req.query.end_date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.end_date)
+        ? req.query.end_date
+        : null;
+    const reportingUnit = req.query.unit
+      ? String(req.query.unit).trim().toLowerCase()
+      : null;
+
+    if (warehouseId !== null && !isPositiveInteger(warehouseId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'warehouse_id' est invalide."
+      });
+    }
+
+    if (productId !== null && !isPositiveInteger(productId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'product_id' est invalide."
+      });
+    }
+
+    if (reportingUnit && !ALLOWED_REPORTING_UNITS.includes(reportingUnit)) {
+      return res.status(400).json({
+        success: false,
+        message: "Le parametre 'unit' doit etre kg, l ou unit."
+      });
+    }
+
+    const report = await getBulkStockFlowComparison({
+      warehouseId,
+      productId,
+      startDate,
+      endDate,
+      reportingUnit
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters: {
+          warehouse_id: warehouseId,
+          product_id: productId,
+          start_date: startDate,
+          end_date: endDate,
+          unit: reportingUnit
+        },
+        ...report
+      }
     });
   } catch (error) {
     next(error);

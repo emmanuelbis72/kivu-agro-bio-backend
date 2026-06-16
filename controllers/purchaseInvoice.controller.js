@@ -14,6 +14,10 @@ import {
 } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
 import { normalizeBusinessDate } from "../utils/businessDate.util.js";
+import {
+  STOCK_UNITS,
+  normalizeStockUnit
+} from "../utils/stockUnit.util.js";
 
 const ALLOWED_PAYMENT_METHODS = [
   "cash",
@@ -62,6 +66,16 @@ function validatePurchaseInvoicePayload(body) {
 
     if (Number.isNaN(Number(item.unit_cost)) || Number(item.unit_cost) < 0) {
       errors.push("Chaque ligne doit avoir un cout unitaire valide.");
+      break;
+    }
+
+    if (
+      item.quantity_unit !== undefined &&
+      item.quantity_unit !== null &&
+      item.quantity_unit !== "" &&
+      !STOCK_UNITS.includes(String(item.quantity_unit).trim().toLowerCase())
+    ) {
+      errors.push("Chaque ligne doit avoir une unite de quantite valide.");
       break;
     }
   }
@@ -178,6 +192,12 @@ export async function createPurchaseInvoiceHandler(req, res, next) {
     const normalizedItems = req.body.items.map((item) => ({
       product_id: Number(item.product_id),
       quantity: Number(item.quantity),
+      quantity_unit:
+        item.quantity_unit === undefined ||
+        item.quantity_unit === null ||
+        item.quantity_unit === ""
+          ? null
+          : normalizeStockUnit(item.quantity_unit),
       unit_cost: Number(item.unit_cost),
       line_total: Number(item.quantity) * Number(item.unit_cost)
     }));
@@ -308,6 +328,12 @@ export async function updatePurchaseInvoiceHandler(req, res, next) {
     const normalizedItems = req.body.items.map((item) => ({
       product_id: Number(item.product_id),
       quantity: Number(item.quantity),
+      quantity_unit:
+        item.quantity_unit === undefined ||
+        item.quantity_unit === null ||
+        item.quantity_unit === ""
+          ? null
+          : normalizeStockUnit(item.quantity_unit),
       unit_cost: Number(item.unit_cost),
       line_total: Number(item.quantity) * Number(item.unit_cost)
     }));

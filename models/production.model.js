@@ -1,20 +1,47 @@
 import { pool } from "../config/db.js";
+import {
+  convertStockQuantity,
+  normalizeStockUnit
+} from "../utils/stockUnit.util.js";
 
-function normalizeUnitToBase(unit) {
-  const value = String(unit || "").trim().toLowerCase();
-
-  if (value === "kg") return "g";
-  if (value === "l") return "ml";
-  return value;
-}
-
-function convertToBaseQuantity(quantity, unit) {
-  const numeric = Number(quantity || 0);
-  const normalizedUnit = String(unit || "").trim().toLowerCase();
-
-  if (normalizedUnit === "kg") return numeric * 1000;
-  if (normalizedUnit === "l") return numeric * 1000;
-  return numeric;
+async function ensureProductionSchema(executor = pool) {
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS stock_unit VARCHAR(20) NOT NULL DEFAULT 'unit';
+  `);
+  await executor.query(`
+    ALTER TABLE product_recipes
+    ADD COLUMN IF NOT EXISTS quantity_unit VARCHAR(20);
+  `);
+  await executor.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'product_recipes'
+          AND column_name = 'unit'
+      ) THEN
+        EXECUTE '
+          UPDATE product_recipes
+          SET quantity_unit = COALESCE(quantity_unit, unit)
+          WHERE quantity_unit IS NULL
+        ';
+        EXECUTE 'ALTER TABLE product_recipes ALTER COLUMN unit DROP NOT NULL';
+      END IF;
+    END $$;
+  `);
+  await executor.query(`
+    ALTER TABLE product_recipes
+    ALTER COLUMN quantity_required TYPE NUMERIC(18,6)
+    USING quantity_required::NUMERIC;
+  `);
+  await executor.query(`
+    ALTER TABLE production_batch_items
+    ALTER COLUMN quantity_consumed TYPE NUMERIC(18,6)
+    USING quantity_consumed::NUMERIC;
+  `);
 }
 
 async function getProductById(client, productId) {
@@ -126,6 +153,7 @@ async function createStockMovement(client, data) {
 }
 
 export async function getRecipesByFinishedProduct(finishedProductId) {
+  await ensureProductionSchema(pool);
   const result = await pool.query(
     `
     SELECT
@@ -141,7 +169,8 @@ export async function getRecipesByFinishedProduct(finishedProductId) {
       fp.unit AS finished_product_unit,
       cp.name AS component_product_name,
       cp.sku AS component_product_sku,
-      cp.unit AS component_unit
+      cp.unit AS component_unit,
+      cp.stock_unit AS component_stock_unit
     FROM product_recipes pr
     INNER JOIN products fp ON fp.id = pr.finished_product_id
     INNER JOIN products cp ON cp.id = pr.component_product_id
@@ -155,6 +184,7 @@ export async function getRecipesByFinishedProduct(finishedProductId) {
 }
 
 export async function createOrUpdateRecipeItem(data) {
+  await ensureProductionSchema(pool);
   const result = await pool.query(
     `
     INSERT INTO product_recipes (
@@ -183,6 +213,7 @@ export async function createOrUpdateRecipeItem(data) {
 }
 
 export async function deleteRecipeItem(recipeId) {
+  await ensureProductionSchema(pool);
   const result = await pool.query(
     `
     DELETE FROM product_recipes
@@ -301,6 +332,7 @@ export async function createProductionBatch(data) {
 
   try {
     await client.query("BEGIN");
+    await ensureProductionSchema(client);
 
     const finishedProduct = await getProductById(client, data.finished_product_id);
 
@@ -377,16 +409,20 @@ export async function createProductionBatch(data) {
         throw error;
       }
 
-      const requiredQtyBase =
-        convertToBaseQuantity(recipe.quantity_required, recipe.quantity_unit) *
-        producedQty;
+      const componentStockUnit = normalizeStockUnit(
+        componentProduct.stock_unit || componentProduct.unit
+      );
+      let requiredStockQuantity;
 
-      const recipeBaseUnit = normalizeUnitToBase(recipe.quantity_unit);
-      const componentBaseUnit = normalizeUnitToBase(componentProduct.unit);
-
-      if (recipeBaseUnit !== componentBaseUnit) {
+      try {
+        requiredStockQuantity = convertStockQuantity(
+          Number(recipe.quantity_required || 0) * producedQty,
+          recipe.quantity_unit,
+          componentStockUnit
+        );
+      } catch {
         const error = new Error(
-          `Incohérence d'unité pour ${componentProduct.name}: recette en ${recipe.quantity_unit}, produit en ${componentProduct.unit}.`
+          `Incoherence d'unite pour ${componentProduct.name}: recette en ${recipe.quantity_unit}, stock en ${componentStockUnit}.`
         );
         error.statusCode = 400;
         throw error;
@@ -398,9 +434,9 @@ export async function createProductionBatch(data) {
         componentProduct.id
       );
 
-      if (Number(sourceStock.quantity) < Number(requiredQtyBase)) {
+      if (Number(sourceStock.quantity) < Number(requiredStockQuantity)) {
         const error = new Error(
-          `Stock vrac insuffisant pour ${componentProduct.name}. Requis: ${requiredQtyBase}, disponible: ${sourceStock.quantity}.`
+          `Stock vrac insuffisant pour ${componentProduct.name}. Requis: ${requiredStockQuantity} ${componentStockUnit}, disponible: ${sourceStock.quantity} ${componentStockUnit}.`
         );
         error.statusCode = 400;
         throw error;
@@ -409,7 +445,7 @@ export async function createProductionBatch(data) {
       await updateStockQuantity(
         client,
         sourceStock.id,
-        Number(sourceStock.quantity) - Number(requiredQtyBase)
+        Number(sourceStock.quantity) - Number(requiredStockQuantity)
       );
 
       const batchItemResult = await client.query(
@@ -427,8 +463,8 @@ export async function createProductionBatch(data) {
         [
           batch.id,
           componentProduct.id,
-          requiredQtyBase,
-          componentBaseUnit,
+          requiredStockQuantity,
+          componentStockUnit,
           Number(componentProduct.cost_price || 0)
         ]
       );
@@ -439,7 +475,8 @@ export async function createProductionBatch(data) {
         product_id: componentProduct.id,
         warehouse_id: data.warehouse_id,
         movement_type: "PRODUCTION_CONSUME",
-        quantity: requiredQtyBase,
+        quantity: requiredStockQuantity,
+        quantity_unit: componentStockUnit,
         unit_cost: Number(componentProduct.cost_price || 0),
         reference_type: "production_batch",
         reference_id: batch.id,

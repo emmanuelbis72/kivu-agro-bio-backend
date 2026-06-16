@@ -1,5 +1,9 @@
 import { pool } from "../config/db.js";
-import { performStockExit } from "./stock.model.js";
+import {
+  consumeStockForInvoiceItem,
+  ensureStockSchema,
+  reverseInvoiceStockConsumptions
+} from "./stock.model.js";
 import {
   consumePackagingForInvoice,
   reversePackagingConsumptionsBySource
@@ -36,6 +40,7 @@ async function ensureInvoicesSchema(executor = pool) {
 }
 
 export async function getInvoiceById(id) {
+  await ensureStockSchema(pool);
   const invoiceQuery = `
     WITH invoice_cogs AS (
       SELECT
@@ -113,9 +118,37 @@ export async function getInvoiceById(id) {
     WHERE ii.invoice_id = $1
     ORDER BY ii.id ASC;
   `;
+  const consumptionsQuery = `
+    SELECT
+      isc.id,
+      isc.invoice_id,
+      isc.invoice_item_id,
+      isc.sold_product_id,
+      sp.name AS sold_product_name,
+      isc.component_product_id,
+      cp.name AS component_product_name,
+      cp.sku AS component_product_sku,
+      isc.warehouse_id,
+      isc.consumption_mode,
+      isc.sold_quantity,
+      isc.recipe_quantity,
+      isc.recipe_unit,
+      isc.consumed_quantity,
+      isc.consumed_unit,
+      isc.stock_form,
+      isc.movement_id,
+      isc.reversal_movement_id,
+      isc.reversed_at,
+      isc.created_at
+    FROM invoice_stock_consumptions isc
+    INNER JOIN products sp ON sp.id = isc.sold_product_id
+    INNER JOIN products cp ON cp.id = isc.component_product_id
+    WHERE isc.invoice_id = $1
+    ORDER BY isc.id ASC;
+  `;
 
   await ensureInvoicesSchema(pool);
-  const [invoiceResult, itemsResult] = await Promise.all([
+  const [invoiceResult, itemsResult, consumptionsResult] = await Promise.all([
     queryWithSchemaOrColumnRetry({
       executor: (sql, values = []) => pool.query(sql, values),
       ensureSchema: () => ensureInvoicesSchema(pool),
@@ -127,7 +160,8 @@ export async function getInvoiceById(id) {
       ensureSchema: () => ensureInvoicesSchema(pool),
       query: itemsQuery,
       values: [id]
-    })
+    }),
+    pool.query(consumptionsQuery, [id])
   ]);
 
   const invoice = invoiceResult.rows[0] || null;
@@ -141,7 +175,8 @@ export async function getInvoiceById(id) {
     items: itemsResult.rows.map((item) => ({
       ...item,
       unit_cost: Number(item.cost_price ?? 0)
-    }))
+    })),
+    stock_consumptions: consumptionsResult.rows
   };
 }
 
@@ -228,6 +263,7 @@ export async function getNextInvoiceNumberForDate(invoiceDate) {
 }
 
 export async function createInvoiceWithItems(data) {
+  await ensureStockSchema(pool);
   const client = await pool.connect();
 
   try {
@@ -277,21 +313,6 @@ export async function createInvoiceWithItems(data) {
     const insertedItems = [];
 
     for (const item of data.items) {
-      const exitResult = await performStockExit({
-        warehouse_id: data.warehouse_id,
-        product_id: item.product_id,
-        quantity: item.quantity,
-        stock_form: item.stock_form || undefined,
-        package_size: item.package_size ?? undefined,
-        package_unit: item.package_unit ?? undefined,
-        unit_cost: item.unit_cost ?? 0,
-        reference_type: "invoice",
-        reference_id: invoice.id,
-        notes: `Sortie liee a la facture ${data.invoice_number}`,
-        created_by: data.created_by || null,
-        client
-      });
-
       const itemQuery = `
         INSERT INTO invoice_items (
           invoice_id,
@@ -311,21 +332,60 @@ export async function createInvoiceWithItems(data) {
         invoice.id,
         item.product_id,
         item.quantity,
-        exitResult.movement.stock_form || null,
-        exitResult.movement.package_size ?? null,
-        exitResult.movement.package_unit ?? null,
+        null,
+        null,
+        null,
         item.unit_price,
         item.line_total
       ];
 
       const itemResult = await client.query(itemQuery, itemValues);
+      const insertedItem = itemResult.rows[0];
+      const productResult = await client.query(
+        `SELECT * FROM products WHERE id = $1 LIMIT 1;`,
+        [item.product_id]
+      );
+      const soldProduct = productResult.rows[0];
+      const stockConsumption = await consumeStockForInvoiceItem({
+        client,
+        invoice,
+        invoiceItem: insertedItem,
+        soldProduct,
+        created_by: data.created_by || null,
+        schema_ready: true
+      });
+
+      if (stockConsumption.mode === "direct") {
+        await client.query(
+          `
+          UPDATE invoice_items
+          SET
+            stock_form = $1,
+            package_size = $2,
+            package_unit = $3
+          WHERE id = $4;
+          `,
+          [
+            stockConsumption.stock_form,
+            stockConsumption.package_size,
+            stockConsumption.package_unit,
+            insertedItem.id
+          ]
+        );
+      }
 
       insertedItems.push({
-        ...itemResult.rows[0],
-        unit_cost: Number(item.unit_cost ?? 0),
-        stock_form: exitResult.movement.stock_form || null,
-        package_size: exitResult.movement.package_size ?? null,
-        package_unit: exitResult.movement.package_unit ?? null
+        ...insertedItem,
+        unit_cost:
+          Number(insertedItem.quantity || 0) > 0
+            ? Number(stockConsumption.total_cost || 0) /
+              Number(insertedItem.quantity)
+            : 0,
+        stock_form: stockConsumption.stock_form,
+        package_size: stockConsumption.package_size,
+        package_unit: stockConsumption.package_unit,
+        stock_consumption_mode: stockConsumption.mode,
+        stock_consumptions: stockConsumption.consumptions
       });
     }
 
@@ -352,6 +412,18 @@ export async function createInvoiceWithItems(data) {
 }
 
 async function reverseInvoiceStock(client, invoice, reason = "Correction facture") {
+  const reversedConsumptions = await reverseInvoiceStockConsumptions({
+    client,
+    invoice,
+    reason,
+    created_by: invoice.created_by || null,
+    schema_ready: true
+  });
+
+  if (reversedConsumptions > 0) {
+    return;
+  }
+
   const itemsResult = await client.query(
     `
     SELECT *
@@ -511,6 +583,7 @@ async function ensureInvoiceCanBeChanged(client, invoiceId) {
 }
 
 export async function updateInvoiceWithItems(id, data) {
+  await ensureStockSchema(pool);
   const client = await pool.connect();
 
   try {
@@ -575,21 +648,6 @@ export async function updateInvoiceWithItems(id, data) {
     const insertedItems = [];
 
     for (const item of data.items) {
-      const exitResult = await performStockExit({
-        warehouse_id: data.warehouse_id,
-        product_id: item.product_id,
-        quantity: item.quantity,
-        stock_form: item.stock_form || undefined,
-        package_size: item.package_size ?? undefined,
-        package_unit: item.package_unit ?? undefined,
-        unit_cost: item.unit_cost ?? 0,
-        reference_type: "invoice",
-        reference_id: id,
-        notes: `Sortie liee a la facture modifiee ${updatedInvoice.invoice_number}`,
-        created_by: data.created_by || invoice.created_by || null,
-        client
-      });
-
       const itemResult = await client.query(
         `
         INSERT INTO invoice_items (
@@ -609,15 +667,60 @@ export async function updateInvoiceWithItems(id, data) {
           id,
           item.product_id,
           item.quantity,
-          exitResult.movement.stock_form || null,
-          exitResult.movement.package_size ?? null,
-          exitResult.movement.package_unit ?? null,
+          null,
+          null,
+          null,
           item.unit_price,
           item.line_total
         ]
       );
 
-      insertedItems.push(itemResult.rows[0]);
+      const insertedItem = itemResult.rows[0];
+      const productResult = await client.query(
+        `SELECT * FROM products WHERE id = $1 LIMIT 1;`,
+        [item.product_id]
+      );
+      const stockConsumption = await consumeStockForInvoiceItem({
+        client,
+        invoice: updatedInvoice,
+        invoiceItem: insertedItem,
+        soldProduct: productResult.rows[0],
+        created_by: data.created_by || invoice.created_by || null,
+        schema_ready: true
+      });
+
+      if (stockConsumption.mode === "direct") {
+        await client.query(
+          `
+          UPDATE invoice_items
+          SET
+            stock_form = $1,
+            package_size = $2,
+            package_unit = $3
+          WHERE id = $4;
+          `,
+          [
+            stockConsumption.stock_form,
+            stockConsumption.package_size,
+            stockConsumption.package_unit,
+            insertedItem.id
+          ]
+        );
+      }
+
+      insertedItems.push({
+        ...insertedItem,
+        unit_cost:
+          Number(insertedItem.quantity || 0) > 0
+            ? Number(stockConsumption.total_cost || 0) /
+              Number(insertedItem.quantity)
+            : 0,
+        stock_form: stockConsumption.stock_form,
+        package_size: stockConsumption.package_size,
+        package_unit: stockConsumption.package_unit,
+        stock_consumption_mode: stockConsumption.mode,
+        stock_consumptions: stockConsumption.consumptions
+      });
     }
 
     await consumePackagingForInvoice({
@@ -648,6 +751,7 @@ export async function deleteInvoiceById(
   id,
   { archived_by = null, reason = null } = {}
 ) {
+  await ensureStockSchema(pool);
   const client = await pool.connect();
 
   try {

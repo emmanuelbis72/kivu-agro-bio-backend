@@ -13,6 +13,18 @@ async function ensureProductsSchema(executor = pool) {
   `);
   await executor.query(`
     ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS stock_unit VARCHAR(20) NOT NULL DEFAULT 'unit';
+  `);
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS pack_size NUMERIC(14,2);
+  `);
+  await executor.query(`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS pack_unit VARCHAR(20);
+  `);
+  await executor.query(`
+    ALTER TABLE products
       ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS archived_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       ADD COLUMN IF NOT EXISTS archive_reason TEXT;
@@ -92,6 +104,9 @@ export async function createProduct(data) {
       barcode,
       product_role,
       unit,
+      stock_unit,
+      pack_size,
+      pack_unit,
       cost_price,
       selling_price,
       alert_threshold,
@@ -99,7 +114,7 @@ export async function createProduct(data) {
       description,
       sales_account_id
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
     RETURNING *;
   `;
 
@@ -110,6 +125,9 @@ export async function createProduct(data) {
     data.barcode || null,
     data.product_role || "finished_product",
     data.unit || "piece",
+    data.stock_unit || "unit",
+    data.pack_size ?? null,
+    data.pack_unit || null,
     data.cost_price ?? 0,
     data.selling_price ?? 0,
     data.alert_threshold ?? 0,
@@ -196,14 +214,17 @@ export async function updateProduct(id, data) {
       barcode = $4,
       product_role = $5,
       unit = $6,
-      cost_price = $7,
-      selling_price = $8,
-      alert_threshold = $9,
-      is_active = $10,
-      description = $11,
-      sales_account_id = $12,
+      stock_unit = $7,
+      pack_size = $8,
+      pack_unit = $9,
+      cost_price = $10,
+      selling_price = $11,
+      alert_threshold = $12,
+      is_active = $13,
+      description = $14,
+      sales_account_id = $15,
       updated_at = NOW()
-    WHERE id = $13
+    WHERE id = $16
       AND archived_at IS NULL
     RETURNING *;
   `;
@@ -215,6 +236,9 @@ export async function updateProduct(id, data) {
     data.barcode || null,
     data.product_role || "finished_product",
     data.unit || "piece",
+    data.stock_unit || "unit",
+    data.pack_size ?? null,
+    data.pack_unit || null,
     data.cost_price ?? 0,
     data.selling_price ?? 0,
     data.alert_threshold ?? 0,

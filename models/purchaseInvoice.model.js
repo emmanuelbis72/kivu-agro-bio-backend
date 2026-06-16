@@ -1,5 +1,9 @@
 import { pool } from "../config/db.js";
-import { performStockEntry, performStockExit } from "./stock.model.js";
+import {
+  ensureStockSchema,
+  performStockEntry,
+  performStockExit
+} from "./stock.model.js";
 import { ensureSuppliersSchema } from "./supplier.model.js";
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 
@@ -51,7 +55,8 @@ export async function ensurePurchaseInvoicesSchema(executor = pool) {
       id SERIAL PRIMARY KEY,
       purchase_invoice_id INTEGER NOT NULL REFERENCES purchase_invoices(id) ON DELETE CASCADE,
       product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
-      quantity NUMERIC(14,2) NOT NULL,
+      quantity NUMERIC(18,6) NOT NULL,
+      quantity_unit VARCHAR(20),
       stock_form VARCHAR(20),
       package_size NUMERIC(14,2),
       package_unit VARCHAR(20),
@@ -91,6 +96,14 @@ export async function ensurePurchaseInvoicesSchema(executor = pool) {
   await executor.query(`
     ALTER TABLE purchase_invoices
     ADD COLUMN IF NOT EXISTS purchase_order_id INTEGER;
+  `);
+  await executor.query(`
+    ALTER TABLE purchase_invoice_items
+    ADD COLUMN IF NOT EXISTS quantity_unit VARCHAR(20);
+  `);
+  await executor.query(`
+    ALTER TABLE purchase_invoice_items
+    ALTER COLUMN quantity TYPE NUMERIC(18,6) USING quantity::NUMERIC;
   `);
 
   await executor.query(`
@@ -178,6 +191,7 @@ export async function getPurchaseInvoiceById(id) {
       pii.purchase_invoice_id,
       pii.product_id,
       pii.quantity,
+      pii.quantity_unit,
       pii.stock_form,
       pii.package_size,
       pii.package_unit,
@@ -348,6 +362,7 @@ async function reversePurchaseInvoiceStock(client, purchaseInvoice, reason) {
       warehouse_id: purchaseInvoice.warehouse_id,
       product_id: item.product_id,
       quantity: item.quantity,
+      quantity_unit: item.quantity_unit || undefined,
       stock_form: item.stock_form || undefined,
       package_size: item.package_size ?? undefined,
       package_unit: item.package_unit ?? undefined,
@@ -400,6 +415,7 @@ async function ensurePurchaseInvoiceCanBeChanged(client, purchaseInvoiceId) {
 
 export async function createPurchaseInvoiceWithItems(data) {
   await ensurePurchaseInvoicesSchema(pool);
+  await ensureStockSchema(pool);
   const { client, shouldManageTransaction } = await getClient(data.client);
 
   try {
@@ -451,6 +467,7 @@ export async function createPurchaseInvoiceWithItems(data) {
         warehouse_id: data.warehouse_id,
         product_id: item.product_id,
         quantity: item.quantity,
+        quantity_unit: item.quantity_unit || undefined,
         stock_form: item.stock_form || undefined,
         package_size: item.package_size ?? undefined,
         package_unit: item.package_unit ?? undefined,
@@ -468,19 +485,21 @@ export async function createPurchaseInvoiceWithItems(data) {
           purchase_invoice_id,
           product_id,
           quantity,
+          quantity_unit,
           stock_form,
           package_size,
           package_unit,
           unit_cost,
           line_total
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         RETURNING *;
         `,
         [
           purchaseInvoice.id,
           item.product_id,
           item.quantity,
+          item.quantity_unit || null,
           entryResult.movement.stock_form || null,
           entryResult.movement.package_size ?? null,
           entryResult.movement.package_unit ?? null,
@@ -522,6 +541,7 @@ export async function createPurchaseInvoiceWithItems(data) {
 
 export async function updatePurchaseInvoiceWithItems(id, data) {
   await ensurePurchaseInvoicesSchema(pool);
+  await ensureStockSchema(pool);
   const client = await pool.connect();
 
   try {
@@ -588,6 +608,7 @@ export async function updatePurchaseInvoiceWithItems(id, data) {
         warehouse_id: data.warehouse_id,
         product_id: item.product_id,
         quantity: item.quantity,
+        quantity_unit: item.quantity_unit || undefined,
         stock_form: item.stock_form || undefined,
         package_size: item.package_size ?? undefined,
         package_unit: item.package_unit ?? undefined,
@@ -605,18 +626,20 @@ export async function updatePurchaseInvoiceWithItems(id, data) {
           purchase_invoice_id,
           product_id,
           quantity,
+          quantity_unit,
           stock_form,
           package_size,
           package_unit,
           unit_cost,
           line_total
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8);
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);
         `,
         [
           id,
           item.product_id,
           item.quantity,
+          item.quantity_unit || null,
           entryResult.movement.stock_form || null,
           entryResult.movement.package_size ?? null,
           entryResult.movement.package_unit ?? null,
@@ -649,6 +672,7 @@ export async function updatePurchaseInvoiceWithItems(id, data) {
 
 export async function deletePurchaseInvoiceById(id) {
   await ensurePurchaseInvoicesSchema(pool);
+  await ensureStockSchema(pool);
   const client = await pool.connect();
 
   try {

@@ -10,13 +10,15 @@ import {
   getStockMovementsHandler,
   createStockTransferHandler,
   getStockTransfersHandler,
-  getStockTransferByIdHandler
+  getStockTransferByIdHandler,
+  getBulkStockFlowComparisonHandler
 } from "../controllers/stock.controller.js";
 
 const router = express.Router();
 
 router.get("/", getAllStockSummaryHandler);
 router.get("/movements", getStockMovementsHandler);
+router.get("/bulk-flow-report", getBulkStockFlowComparisonHandler);
 router.get("/warehouse/:warehouseId", getWarehouseStockHandler);
 
 router.post("/transfer", createStockTransferHandler);

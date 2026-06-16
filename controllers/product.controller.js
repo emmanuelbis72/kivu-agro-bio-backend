@@ -7,12 +7,17 @@ import {
   deleteProduct
 } from "../models/product.model.js";
 import { safeRecordAuditEvent } from "../services/audit.service.js";
+import {
+  STOCK_UNITS,
+  normalizeStockUnit
+} from "../utils/stockUnit.util.js";
 
 const ALLOWED_PRODUCT_ROLES = [
   "finished_product",
   "raw_material",
   "packaging_material"
 ];
+const ALLOWED_STOCK_UNITS = new Set(STOCK_UNITS);
 
 function validateProductPayload(body) {
   const errors = [];
@@ -57,6 +62,33 @@ function validateProductPayload(body) {
   }
 
   if (
+    body.stock_unit !== undefined &&
+    !ALLOWED_STOCK_UNITS.has(String(body.stock_unit).trim().toLowerCase())
+  ) {
+    errors.push(
+      "Le champ 'stock_unit' est invalide. Valeurs autorisees: g, kg, ml, l, unit, piece."
+    );
+  }
+
+  if (
+    body.pack_size !== undefined &&
+    body.pack_size !== null &&
+    body.pack_size !== "" &&
+    (!Number.isFinite(Number(body.pack_size)) || Number(body.pack_size) <= 0)
+  ) {
+    errors.push("Le champ 'pack_size' doit etre un nombre > 0 ou nul.");
+  }
+
+  if (
+    body.pack_unit !== undefined &&
+    body.pack_unit !== null &&
+    body.pack_unit !== "" &&
+    !ALLOWED_STOCK_UNITS.has(String(body.pack_unit).trim().toLowerCase())
+  ) {
+    errors.push("Le champ 'pack_unit' est invalide.");
+  }
+
+  if (
     body.sales_account_id !== undefined &&
     body.sales_account_id !== null &&
     body.sales_account_id !== "" &&
@@ -96,6 +128,19 @@ export async function createProductHandler(req, res, next) {
       product_role:
         req.body.product_role?.trim().toLowerCase() || "finished_product",
       unit: req.body.unit?.trim(),
+      stock_unit: normalizeStockUnit(req.body.stock_unit || req.body.unit),
+      pack_size:
+        req.body.pack_size === undefined ||
+        req.body.pack_size === null ||
+        req.body.pack_size === ""
+          ? null
+          : Number(req.body.pack_size),
+      pack_unit:
+        req.body.pack_unit === undefined ||
+        req.body.pack_unit === null ||
+        req.body.pack_unit === ""
+          ? null
+          : normalizeStockUnit(req.body.pack_unit),
       cost_price: Number(req.body.cost_price ?? 0),
       selling_price: Number(req.body.selling_price ?? 0),
       alert_threshold: Number(req.body.alert_threshold ?? 0),
@@ -227,6 +272,21 @@ export async function updateProductHandler(req, res, next) {
       product_role:
         mergedPayload.product_role?.trim().toLowerCase() || "finished_product",
       unit: mergedPayload.unit?.trim(),
+      stock_unit: normalizeStockUnit(
+        mergedPayload.stock_unit || mergedPayload.unit
+      ),
+      pack_size:
+        mergedPayload.pack_size === undefined ||
+        mergedPayload.pack_size === null ||
+        mergedPayload.pack_size === ""
+          ? null
+          : Number(mergedPayload.pack_size),
+      pack_unit:
+        mergedPayload.pack_unit === undefined ||
+        mergedPayload.pack_unit === null ||
+        mergedPayload.pack_unit === ""
+          ? null
+          : normalizeStockUnit(mergedPayload.pack_unit),
       cost_price: Number(mergedPayload.cost_price ?? 0),
       selling_price: Number(mergedPayload.selling_price ?? 0),
       alert_threshold: Number(mergedPayload.alert_threshold ?? 0),

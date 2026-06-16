@@ -23,6 +23,8 @@ import {
   getSupplierAgingReportHandler,
   getSalesDetailReportHandler,
   getTreasuryStatementReportHandler,
+  getBulkStockFlowReportHandler,
+  getStockReconciliationReportHandler,
   getStockStateReportHandler
 } from "../controllers/report.controller.js";
 
@@ -49,6 +51,8 @@ router.get("/commission-due", getCommissionDueReportHandler);
 router.get("/product-ledger", getProductLedgerReportHandler);
 router.get("/product-sales", getProductSalesReportHandler);
 router.get("/stock-state", getStockStateReportHandler);
+router.get("/bulk-stock-flow", getBulkStockFlowReportHandler);
+router.get("/stock-reconciliation", getStockReconciliationReportHandler);
 router.get("/cash-forecast", getCashForecastReportHandler);
 router.get("/monthly-close", getMonthlyCloseReportHandler);
 router.get("/:reportKey/export/:format", exportReportHandler);
