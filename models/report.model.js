@@ -771,6 +771,132 @@ export async function getCustomerLedgerReport(filters = {}) {
   };
 }
 
+export async function getCustomerActivityReport(filters = {}, limit = 500) {
+  await ensureReportsSchema(pool);
+
+  const invoiceConditions = [`i.status IN ('issued', 'partial', 'paid')`];
+  const paymentConditions = [`i.status IN ('issued', 'partial', 'paid')`];
+  const values = [];
+
+  if (filters.startDate) {
+    values.push(filters.startDate);
+    invoiceConditions.push(`i.invoice_date >= $${values.length}`);
+    paymentConditions.push(`p.payment_date >= $${values.length}`);
+  }
+
+  if (filters.endDate) {
+    values.push(filters.endDate);
+    invoiceConditions.push(`i.invoice_date <= $${values.length}`);
+    paymentConditions.push(`p.payment_date <= $${values.length}`);
+  }
+
+  if (filters.customerId) {
+    values.push(filters.customerId);
+    invoiceConditions.push(`i.customer_id = $${values.length}`);
+    paymentConditions.push(`i.customer_id = $${values.length}`);
+  }
+
+  const movementsCte = `
+    WITH movements AS (
+      SELECT
+        CONCAT('invoice-', i.id) AS movement_id,
+        'invoice' AS movement_type,
+        i.invoice_date AS movement_date,
+        c.id AS customer_id,
+        c.business_name AS customer_name,
+        c.city AS customer_city,
+        i.invoice_number AS reference,
+        i.invoice_number,
+        'Facture emise' AS description,
+        COALESCE(i.total_amount, 0) AS invoiced_amount,
+        0::numeric AS received_amount,
+        NULL::varchar AS payment_method,
+        i.status AS document_status,
+        i.accounting_status
+      FROM invoices i
+      INNER JOIN customers c ON c.id = i.customer_id
+      WHERE ${invoiceConditions.join(" AND ")}
+
+      UNION ALL
+
+      SELECT
+        CONCAT('payment-', p.id) AS movement_id,
+        'payment' AS movement_type,
+        p.payment_date AS movement_date,
+        c.id AS customer_id,
+        c.business_name AS customer_name,
+        c.city AS customer_city,
+        COALESCE(NULLIF(TRIM(p.reference), ''), i.invoice_number) AS reference,
+        i.invoice_number,
+        CONCAT('Paiement recu pour la facture ', i.invoice_number) AS description,
+        0::numeric AS invoiced_amount,
+        COALESCE(p.amount, 0) AS received_amount,
+        p.payment_method,
+        i.status AS document_status,
+        p.accounting_status
+      FROM payments p
+      INNER JOIN invoices i ON i.id = p.invoice_id
+      INNER JOIN customers c ON c.id = i.customer_id
+      WHERE ${paymentConditions.join(" AND ")}
+    )
+  `;
+
+  const movementValues = [...values];
+  let movementWhereClause = "";
+
+  if (["invoice", "payment"].includes(filters.movementType)) {
+    movementValues.push(filters.movementType);
+    movementWhereClause = `WHERE movement_type = $${movementValues.length}`;
+  }
+
+  const finalValues = [...movementValues, limit];
+  const rowsQuery = `
+    ${movementsCte}
+    SELECT *
+    FROM movements
+    ${movementWhereClause}
+    ORDER BY movement_date DESC, movement_type ASC, movement_id DESC
+    LIMIT $${finalValues.length};
+  `;
+  const summaryQuery = `
+    ${movementsCte}
+    SELECT
+      COUNT(DISTINCT customer_id)::int AS total_customers,
+      COUNT(*) FILTER (WHERE movement_type = 'invoice')::int AS invoices_count,
+      COUNT(*) FILTER (WHERE movement_type = 'payment')::int AS payments_count,
+      COALESCE(SUM(invoiced_amount), 0) AS invoiced_amount,
+      COALESCE(SUM(received_amount), 0) AS received_amount
+    FROM movements
+    ${movementWhereClause};
+  `;
+
+  const [rowsResult, summaryResult] = await Promise.all([
+    pool.query(rowsQuery, finalValues),
+    pool.query(summaryQuery, movementValues)
+  ]);
+
+  const rows = rowsResult.rows.map((row) => ({
+    ...row,
+    invoiced_amount: roundAmount(row.invoiced_amount),
+    received_amount: roundAmount(row.received_amount)
+  }));
+  const summaryRow = summaryResult.rows[0] || {};
+  const invoicedAmount = roundAmount(summaryRow.invoiced_amount);
+  const receivedAmount = roundAmount(summaryRow.received_amount);
+
+  return {
+    summary: {
+      total_customers: Number(summaryRow.total_customers || 0),
+      invoices_count: Number(summaryRow.invoices_count || 0),
+      payments_count: Number(summaryRow.payments_count || 0),
+      invoiced_amount: invoicedAmount,
+      received_amount: receivedAmount,
+      period_difference: roundAmount(invoicedAmount - receivedAmount)
+    },
+    rows
+  };
+}
+
 export async function getSupplierAgingReport({
   asOfDate,
   warehouseId = null

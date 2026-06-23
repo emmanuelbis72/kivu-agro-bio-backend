@@ -10,6 +10,7 @@ import {
   getCategorySalesReportHandler,
   getCommercialSalesReportHandler,
   getCollectionsReportHandler,
+  getCustomerActivityReportHandler,
   getCustomerAgingReportHandler,
   getCustomerLedgerReportHandler,
   getIncomeStatementReportHandler,
@@ -17,6 +18,7 @@ import {
   getMarginByCustomerReportHandler,
   getMarketingRatioReportHandler,
   getMonthlyCloseReportHandler,
+  getProductConsumptionReportHandler,
   getProductLedgerReportHandler,
   getProductSalesReportHandler,
   getReceiptsJournalReportHandler,
@@ -32,6 +34,7 @@ const router = express.Router();
 
 router.get("/collections", getCollectionsReportHandler);
 router.get("/customer-aging", getCustomerAgingReportHandler);
+router.get("/customer-activity", getCustomerActivityReportHandler);
 router.get("/customer-ledger", getCustomerLedgerReportHandler);
 router.get("/supplier-aging", getSupplierAgingReportHandler);
 router.get("/sales-detail", getSalesDetailReportHandler);
@@ -53,6 +56,7 @@ router.get("/product-sales", getProductSalesReportHandler);
 router.get("/stock-state", getStockStateReportHandler);
 router.get("/bulk-stock-flow", getBulkStockFlowReportHandler);
 router.get("/stock-reconciliation", getStockReconciliationReportHandler);
+router.get("/product-consumption", getProductConsumptionReportHandler);
 router.get("/cash-forecast", getCashForecastReportHandler);
 router.get("/monthly-close", getMonthlyCloseReportHandler);
 router.get("/:reportKey/export/:format", exportReportHandler);

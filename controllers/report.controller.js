@@ -2,6 +2,7 @@ import { getCashForecast } from "../models/dashboard.model.js";
 import { getMonthlyClosePack } from "../models/monthlyClose.model.js";
 import {
   getBulkStockFlowComparison,
+  getProductConsumptionReport,
   getStockInvoiceBulkReconciliation
 } from "../models/stock.model.js";
 import {
@@ -11,6 +12,7 @@ import {
   getCommissionDueReport,
   getCommercialSalesReport,
   getCollectionsReport,
+  getCustomerActivityReport,
   getCustomerAgingReport,
   getCustomerLedgerReport,
   getExpenseCategoryReport,
@@ -534,6 +536,65 @@ const reportDefinitions = {
       }
     ]
   },
+  "customer-activity": {
+    title: "Activite facturation et paiements clients",
+    subtitle:
+      "Factures emises et paiements reellement recus pendant la periode choisie",
+    tableTitle: "Mouvements clients",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `activite-clients-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+    columns: [
+      { key: "movement_type", header: "Type", width: 48, xlsxWidth: 13 },
+      { key: "movement_date", header: "Date", type: "date", width: 58, xlsxWidth: 14 },
+      { key: "customer_name", header: "Client", width: 100, xlsxWidth: 26 },
+      { key: "invoice_number", header: "Facture", width: 68, xlsxWidth: 17 },
+      { key: "reference", header: "Reference", width: 72, xlsxWidth: 19 },
+      { key: "description", header: "Designation", width: 120, xlsxWidth: 32 },
+      { key: "invoiced_amount", header: "Facture", type: "money", width: 68, xlsxWidth: 16 },
+      { key: "received_amount", header: "Recu", type: "money", width: 68, xlsxWidth: 16 },
+      { key: "payment_method", header: "Mode", width: 55, xlsxWidth: 14 },
+      { key: "accounting_status", header: "Compta", width: 52, xlsxWidth: 13 }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Clients",
+        value: Number(summary.total_customers || 0),
+        rawValue: Number(summary.total_customers || 0),
+        type: "integer"
+      },
+      {
+        label: "Factures",
+        value: Number(summary.invoices_count || 0),
+        rawValue: Number(summary.invoices_count || 0),
+        type: "integer"
+      },
+      {
+        label: "Paiements",
+        value: Number(summary.payments_count || 0),
+        rawValue: Number(summary.payments_count || 0),
+        type: "integer"
+      },
+      {
+        label: "Total facture",
+        value: Number(summary.invoiced_amount || 0),
+        rawValue: Number(summary.invoiced_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Total recu",
+        value: Number(summary.received_amount || 0),
+        rawValue: Number(summary.received_amount || 0),
+        type: "money"
+      },
+      {
+        label: "Ecart periode",
+        value: Number(summary.period_difference || 0),
+        rawValue: Number(summary.period_difference || 0),
+        type: "money"
+      }
+    ]
+  },
   "sales-detail": {
     title: "Etat commercial detaille",
     subtitle: "Ventes facturees, couts et profit brut",
@@ -643,13 +704,13 @@ const reportDefinitions = {
     ]
   },
   "product-ledger": {
-    title: "Compte courant produits",
+    title: "Historique des ventes produits",
     subtitle:
-      "Lignes facturees par produit, client, depot et facture, avec lecture quantite, chiffre d'affaires et profit",
-    tableTitle: "Compte courant produits",
+      "Produits vendus par date, client, depot et facture, avec quantite, chiffre d'affaires et profit",
+    tableTitle: "Historique des ventes produits",
     pdfLayout: "landscape",
     buildFilename: (filters) =>
-      `compte-courant-produits-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
+      `historique-ventes-produits-${filters.start_date || "debut"}-${filters.end_date || "fin"}`,
     columns: [
       { key: "invoice_number", header: "Facture", width: 62, xlsxWidth: 16 },
       {
@@ -1835,6 +1896,65 @@ const reportDefinitions = {
         type: "integer"
       }
     ]
+  },
+  "product-consumption": {
+    title: "Consommation produits",
+    subtitle:
+      "Consommation post-facture filtree par periode, depot, client et article",
+    tableTitle: "Consommation par depot, client et produit",
+    pdfLayout: "landscape",
+    buildFilename: (filters) =>
+      `consommation-produits-${filters.start_date || "debut"}-${
+        filters.end_date || getTodayString()
+      }`,
+    columns: [
+      { key: "warehouse_name", header: "Depot", width: 68, xlsxWidth: 18 },
+      { key: "customer_name", header: "Client", width: 86, xlsxWidth: 24 },
+      { key: "product_name", header: "Produit consomme", width: 95, xlsxWidth: 26 },
+      { key: "sku", header: "SKU", width: 48, xlsxWidth: 14 },
+      { key: "sold_product_name", header: "Produit facture", width: 95, xlsxWidth: 26 },
+      { key: "invoices_count", header: "Fact.", type: "integer", width: 38, xlsxWidth: 10 },
+      { key: "consumed_quantity", header: "Qte origine", type: "number", width: 58, xlsxWidth: 14 },
+      { key: "consumed_unit", header: "Unite", width: 38, xlsxWidth: 10 },
+      { key: "consumed_reporting_quantity", header: "Qte convertie", type: "number", width: 62, xlsxWidth: 15 },
+      { key: "reporting_unit", header: "Unite conv.", width: 45, xlsxWidth: 12 },
+      { key: "consumed_kg", header: "Qte kg", type: "number", width: 58, xlsxWidth: 14 },
+      { key: "kg_conversion_status", header: "Conversion kg", width: 64, xlsxWidth: 16 },
+      { key: "first_invoice_date", header: "Debut", type: "date", width: 58, xlsxWidth: 14 },
+      { key: "last_invoice_date", header: "Fin", type: "date", width: 58, xlsxWidth: 14 }
+    ],
+    summaryItems: (summary) => [
+      {
+        label: "Lignes",
+        value: Number(summary.total_rows || 0),
+        rawValue: Number(summary.total_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Factures",
+        value: Number(summary.invoices_count || 0),
+        rawValue: Number(summary.invoices_count || 0),
+        type: "integer"
+      },
+      {
+        label: "Total kg",
+        value: Number(summary.total_consumed_kg || 0),
+        rawValue: Number(summary.total_consumed_kg || 0),
+        type: "number"
+      },
+      {
+        label: "Convertibles kg",
+        value: Number(summary.kg_rows || 0),
+        rawValue: Number(summary.kg_rows || 0),
+        type: "integer"
+      },
+      {
+        label: "Non convertibles",
+        value: Number(summary.non_convertible_rows || 0),
+        rawValue: Number(summary.non_convertible_rows || 0),
+        type: "integer"
+      }
+    ]
   }
 };
 
@@ -1925,6 +2045,36 @@ async function getCustomerLedgerPayload(query) {
       start_date: startDate,
       end_date: endDate,
       customer_id: customerId
+    },
+    ...data
+  };
+}
+
+async function getCustomerActivityPayload(query) {
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, null);
+  const customerId = parsePositiveInteger(query.customer_id);
+  const movementType = ["invoice", "payment"].includes(query.movement_type)
+    ? query.movement_type
+    : null;
+  const limit = parsePositiveLimit(query.limit, 500, 5000);
+  const data = await getCustomerActivityReport(
+    {
+      startDate,
+      endDate,
+      customerId,
+      movementType
+    },
+    limit
+  );
+
+  return {
+    filters: {
+      start_date: startDate,
+      end_date: endDate,
+      customer_id: customerId,
+      movement_type: movementType,
+      limit
     },
     ...data
   };
@@ -2458,6 +2608,32 @@ async function getStockReconciliationPayload(query) {
   };
 }
 
+async function getProductConsumptionPayload(query) {
+  const warehouseId = parsePositiveInteger(query.warehouse_id);
+  const customerId = parsePositiveInteger(query.customer_id);
+  const productId = parsePositiveInteger(query.product_id);
+  const startDate = parseDateFilter(query.start_date, null);
+  const endDate = parseDateFilter(query.end_date, getTodayString());
+  const data = await getProductConsumptionReport({
+    warehouseId,
+    customerId,
+    productId,
+    startDate,
+    endDate
+  });
+
+  return {
+    filters: {
+      warehouse_id: warehouseId,
+      customer_id: customerId,
+      product_id: productId,
+      start_date: startDate,
+      end_date: endDate
+    },
+    ...data
+  };
+}
+
 async function getCashForecastPayload(query) {
   const detailLimit = parsePositiveLimit(query.detail_limit, 10, 200);
   const forecast = await getCashForecast(detailLimit);
@@ -2492,6 +2668,7 @@ const reportLoaders = {
   collections: getCollectionsPayload,
   "customer-aging": getCustomerAgingPayload,
   "supplier-aging": getSupplierAgingPayload,
+  "customer-activity": getCustomerActivityPayload,
   "customer-ledger": getCustomerLedgerPayload,
   "sales-detail": getSalesDetailPayload,
   "sales-by-category": getCategorySalesPayload,
@@ -2512,6 +2689,7 @@ const reportLoaders = {
   "stock-state": getStockStatePayload,
   "bulk-stock-flow": getBulkStockFlowPayload,
   "stock-reconciliation": getStockReconciliationPayload,
+  "product-consumption": getProductConsumptionPayload,
   "cash-forecast": getCashForecastPayload
 };
 
@@ -2559,6 +2737,10 @@ export function getSupplierAgingReportHandler(req, res, next) {
 
 export function getCustomerLedgerReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "customer-ledger");
+}
+
+export function getCustomerActivityReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "customer-activity");
 }
 
 export function getSalesDetailReportHandler(req, res, next) {
@@ -2635,6 +2817,10 @@ export function getBulkStockFlowReportHandler(req, res, next) {
 
 export function getStockReconciliationReportHandler(req, res, next) {
   return respondWithTableReport(req, res, next, "stock-reconciliation");
+}
+
+export function getProductConsumptionReportHandler(req, res, next) {
+  return respondWithTableReport(req, res, next, "product-consumption");
 }
 
 export async function getCashForecastReportHandler(req, res, next) {

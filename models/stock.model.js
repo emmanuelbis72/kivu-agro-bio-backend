@@ -6,6 +6,7 @@ import {
   convertStockQuantity,
   convertToReportingQuantity,
   getReportingStockUnit,
+  getStockUnitFamily,
   normalizeStockUnit
 } from "../utils/stockUnit.util.js";
 
@@ -1646,6 +1647,148 @@ export async function getStockInvoiceBulkReconciliation(filters = {}) {
       unconfigured_products_count: Number(unconfigured.products_count || 0),
       unconfigured_sold_quantity: roundStockQuantity(
         unconfigured.sold_quantity || 0
+      )
+    },
+    summary_by_unit: summaryByUnit,
+    rows
+  };
+}
+
+export async function getProductConsumptionReport(filters = {}) {
+  await ensureStockSchema(pool);
+  const conditions = [
+    `i.status IN ('issued', 'partial', 'paid')`
+  ];
+  const values = [];
+
+  if (filters.warehouseId) {
+    values.push(filters.warehouseId);
+    conditions.push(`i.warehouse_id = $${values.length}`);
+  }
+
+  if (filters.customerId) {
+    values.push(filters.customerId);
+    conditions.push(`i.customer_id = $${values.length}`);
+  }
+
+  if (filters.productId) {
+    values.push(filters.productId);
+    conditions.push(`pr.component_product_id = $${values.length}`);
+  }
+
+  if (filters.startDate) {
+    values.push(filters.startDate);
+    conditions.push(`i.invoice_date >= $${values.length}`);
+  }
+
+  if (filters.endDate) {
+    values.push(filters.endDate);
+    conditions.push(`i.invoice_date <= $${values.length}`);
+  }
+
+  const result = await pool.query(
+    `
+    SELECT
+      i.warehouse_id,
+      w.name AS warehouse_name,
+      w.city AS warehouse_city,
+      i.customer_id,
+      c.business_name AS customer_name,
+      pr.component_product_id AS product_id,
+      cp.name AS product_name,
+      cp.sku,
+      cp.stock_unit,
+      pr.quantity_unit AS consumed_unit,
+      ii.product_id AS sold_product_id,
+      sp.name AS sold_product_name,
+      ARRAY_AGG(DISTINCT i.id) AS invoice_ids,
+      COUNT(DISTINCT i.id)::int AS invoices_count,
+      COUNT(DISTINCT ii.id)::int AS invoice_items_count,
+      COALESCE(SUM(ii.quantity), 0) AS sold_quantity,
+      COALESCE(SUM(ii.quantity * pr.quantity_required), 0) AS consumed_quantity,
+      MIN(i.invoice_date) AS first_invoice_date,
+      MAX(i.invoice_date) AS last_invoice_date
+    FROM invoices i
+    INNER JOIN invoice_items ii ON ii.invoice_id = i.id
+    INNER JOIN product_recipes pr ON pr.finished_product_id = ii.product_id
+    INNER JOIN customers c ON c.id = i.customer_id
+    INNER JOIN warehouses w ON w.id = i.warehouse_id
+    INNER JOIN products cp ON cp.id = pr.component_product_id
+    INNER JOIN products sp ON sp.id = ii.product_id
+    WHERE ${conditions.join(" AND ")}
+    GROUP BY
+      i.warehouse_id,
+      w.name,
+      w.city,
+      i.customer_id,
+      c.business_name,
+      pr.component_product_id,
+      cp.name,
+      cp.sku,
+      cp.stock_unit,
+      pr.quantity_unit,
+      ii.product_id,
+      sp.name
+    ORDER BY w.name ASC, c.business_name ASC, cp.name ASC, sp.name ASC;
+    `,
+    values
+  );
+
+  const invoiceIds = new Set();
+  const rows = result.rows.map((row) => {
+    (row.invoice_ids || []).forEach((id) => invoiceIds.add(Number(id)));
+    const sourceUnit = normalizeStockUnit(
+      row.consumed_unit || row.stock_unit,
+      normalizeStockUnit(row.stock_unit)
+    );
+    const reportingUnit = getReportingStockUnit(sourceUnit);
+    const consumedQuantity = roundStockQuantity(row.consumed_quantity);
+    const convertedQuantity = roundStockQuantity(
+      convertToReportingQuantity(consumedQuantity, sourceUnit).quantity
+    );
+    const consumedKg =
+      getStockUnitFamily(sourceUnit) === "mass"
+        ? roundStockQuantity(convertStockQuantity(consumedQuantity, sourceUnit, "kg"))
+        : null;
+
+    return {
+      ...row,
+      consumed_quantity: consumedQuantity,
+      consumed_unit: sourceUnit,
+      reporting_unit: reportingUnit,
+      consumed_reporting_quantity: convertedQuantity,
+      consumed_kg: consumedKg,
+      kg_conversion_status: consumedKg === null ? "non_convertible" : "ok",
+      invoice_ids: undefined,
+      sold_quantity: roundStockQuantity(row.sold_quantity)
+    };
+  });
+
+  const summaryByUnit = Object.values(
+    rows.reduce((acc, row) => {
+      const unit = row.reporting_unit;
+      acc[unit] ||= {
+        reporting_unit: unit,
+        consumed_reporting_quantity: 0,
+        rows_count: 0
+      };
+      acc[unit].consumed_reporting_quantity = roundStockQuantity(
+        acc[unit].consumed_reporting_quantity + row.consumed_reporting_quantity
+      );
+      acc[unit].rows_count += 1;
+
+      return acc;
+    }, {})
+  );
+
+  return {
+    summary: {
+      total_rows: rows.length,
+      invoices_count: invoiceIds.size,
+      kg_rows: rows.filter((row) => row.consumed_kg !== null).length,
+      non_convertible_rows: rows.filter((row) => row.consumed_kg === null).length,
+      total_consumed_kg: roundStockQuantity(
+        rows.reduce((sum, row) => sum + Number(row.consumed_kg || 0), 0)
       )
     },
     summary_by_unit: summaryByUnit,
