@@ -4,7 +4,8 @@ import {
   deleteInvoiceHandler,
   getAllInvoicesHandler,
   getInvoiceByIdHandler,
-  updateInvoiceHandler
+  updateInvoiceHandler,
+  updateInvoiceTitleHandler
 } from "../controllers/invoice.controller.js";
 import {
   ROLE_GROUPS,
@@ -24,6 +25,7 @@ router.post(
 );
 router.get("/", getAllInvoicesHandler);
 router.get("/:id", getInvoiceByIdHandler);
+router.patch('/:id/title', requireConfiguredRoles(...ROLE_GROUPS.executive,...ROLE_GROUPS.finance,...ROLE_GROUPS.commercial), updateInvoiceTitleHandler);
 router.put(
   "/:id",
   requireConfiguredRoles(

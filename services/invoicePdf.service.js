@@ -65,6 +65,7 @@ function getCustomerLines(invoice) {
 
   return [
     invoice.customer_name,
+    invoice.customer_title,
     invoice.customer_address,
     invoice.customer_phone,
     invoice.customer_email
@@ -74,7 +75,7 @@ function getCustomerLines(invoice) {
         value && String(value).trim() && String(value).trim() !== "-"
     )
     .filter((value, index) => {
-      if (index === 0) {
+      if (index === 0 || (invoice.customer_title && value === invoice.customer_title)) {
         return true;
       }
 
@@ -143,7 +144,7 @@ export function buildInvoicePdf(doc, invoice) {
 
   customerLines.forEach((line) => {
     doc.text(String(line), marginX, customerY, { width: 240 });
-    customerY += 14;
+    customerY = doc.y + 4;
   });
 
   const infoX = pageWidth - 160;

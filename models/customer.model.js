@@ -6,6 +6,7 @@ function roundAmount(value) {
 }
 
 async function ensureCustomersSchema(executor = pool) {
+  await executor.query('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_title VARCHAR(160)');
   await executor.query(`
     ALTER TABLE customers
     ADD COLUMN IF NOT EXISTS warehouse_id INTEGER REFERENCES warehouses(id) ON DELETE SET NULL;
@@ -195,6 +196,7 @@ export async function getCustomerAccountStatement(customerId) {
     SELECT
       i.id,
       i.invoice_number,
+      i.customer_title,
       i.invoice_date,
       i.due_date,
       i.status,
@@ -266,7 +268,7 @@ export async function getCustomerAccountStatement(customerId) {
       movement_date: invoice.invoice_date,
       due_date: invoice.due_date,
       reference: invoice.invoice_number,
-      description: `Facture ${invoice.invoice_number}`,
+      description: `Facture ${invoice.invoice_number}${invoice.customer_title ? ' — '+invoice.customer_title : ''}`,
       debit: roundAmount(invoice.total_amount),
       credit: 0,
       document_status: invoice.status,

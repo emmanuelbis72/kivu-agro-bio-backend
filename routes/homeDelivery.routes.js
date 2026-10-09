@@ -1,0 +1,12 @@
+import express from 'express';
+import { ROLE_GROUPS, requireConfiguredRoles } from '../middlewares/auth.middleware.js';
+import { listHomeDeliveriesHandler,getHomeDeliveryHandler,saveHomeDeliveryHandler,cancelHomeDeliveryHandler } from '../controllers/homeDelivery.controller.js';
+const router=express.Router();
+const write=requireConfiguredRoles(...ROLE_GROUPS.executive,...ROLE_GROUPS.finance,...ROLE_GROUPS.commercial);
+router.get('/',listHomeDeliveriesHandler);
+router.get('/export/pdf',listHomeDeliveriesHandler);
+router.get('/:id',getHomeDeliveryHandler);
+router.post('/',write,saveHomeDeliveryHandler);
+router.put('/:id',write,saveHomeDeliveryHandler);
+router.post('/:id/cancel',requireConfiguredRoles(...ROLE_GROUPS.executive,...ROLE_GROUPS.finance),cancelHomeDeliveryHandler);
+export default router;

@@ -7,15 +7,32 @@ import {
   getNextInvoiceNumberForDate,
   createInvoiceWithItems,
   updateInvoiceWithItems,
+  updateInvoiceTitle,
   deleteInvoiceById
 } from "../models/invoice.model.js";
 import { autoPostInvoiceEntry } from "../services/accountingAutoPost.service.js";
 import { persistAccountingStatus } from "../services/accountingStatus.service.js";
 import { safeRecordAuditEvent } from "../services/audit.service.js";
 import { normalizeBusinessDate } from "../utils/businessDate.util.js";
+import { normalizeInvoiceTitle } from "../utils/invoiceTitle.util.js";
 
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
+}
+
+export async function updateInvoiceTitleHandler(req,res,next) {
+  try {
+    const id=Number(req.params.id);
+    if(!isPositiveInteger(id))return res.status(400).json({success:false,message:'ID facture invalide.'});
+    const title=normalizeInvoiceTitle(req.body.customer_title);
+    if(title===undefined)return res.status(400).json({success:false,message:'Le champ customer_title est obligatoire (texte vide pour effacer).'});
+    const old=await getInvoiceById(id);
+    const invoice=await updateInvoiceTitle(id,title);
+    if(!invoice)return res.status(404).json({success:false,message:'Facture introuvable.'});
+    await safeRecordAuditEvent({req,module:'invoices',action_type:'update',entity_type:'invoice',entity_id:id,
+      document_reference:invoice.invoice_number,old_value:{customer_title:old?.customer_title},new_value:{customer_title:title}});
+    res.json({success:true,data:invoice});
+  }catch(e){next(e);}
 }
 
 function isNonNegativeNumber(value) {
@@ -66,6 +83,7 @@ function findDuplicateInvoiceProductId(items = []) {
 
 export async function createInvoiceHandler(req, res, next) {
   try {
+    const customer_title = normalizeInvoiceTitle(req.body.customer_title);
     const customer_id = Number(req.body.customer_id);
     const warehouse_id = Number(req.body.warehouse_id);
     const items = Array.isArray(req.body.items) ? req.body.items : [];
@@ -268,6 +286,7 @@ export async function createInvoiceHandler(req, res, next) {
       paid_amount: 0,
       balance_due: total_amount,
       notes: req.body.notes?.trim(),
+      customer_title,
       created_by: req.user?.id || null,
       items: normalizedItems
     });
@@ -336,6 +355,7 @@ export async function createInvoiceHandler(req, res, next) {
 
 export async function updateInvoiceHandler(req, res, next) {
   try {
+    const customer_title = normalizeInvoiceTitle(req.body.customer_title);
     const id = Number(req.params.id);
 
     if (!isPositiveInteger(id)) {
@@ -552,6 +572,7 @@ export async function updateInvoiceHandler(req, res, next) {
       total_amount,
       notes: req.body.notes?.trim(),
       created_by: req.user?.id || existingInvoice.created_by || null,
+      customer_title,
       items: normalizedItems
     });
 

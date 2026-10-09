@@ -199,6 +199,11 @@ export async function getCustomerAccountStatementHandler(req, res, next) {
       });
     }
 
+    if (/LIVRAISON.*DOMICILE/i.test(statement.customer?.business_name || '')) {
+      const { listHomeDeliveries } = await import('../models/homeDelivery.model.js');
+      statement.home_deliveries = (await listHomeDeliveries({customer_id:id})).summary;
+    }
+
     return res.status(200).json({
       success: true,
       data: statement

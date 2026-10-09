@@ -11,6 +11,7 @@ import {
 import { queryWithSchemaOrColumnRetry } from "../utils/schemaSelfHealing.util.js";
 
 async function ensureInvoicesSchema(executor = pool) {
+  await executor.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_title VARCHAR(160);`);
   await executor.query(`
     ALTER TABLE products
     ADD COLUMN IF NOT EXISTS product_role VARCHAR(30) NOT NULL DEFAULT 'finished_product';
@@ -66,6 +67,7 @@ export async function getInvoiceById(id) {
       i.paid_amount,
       i.balance_due,
       i.notes,
+      i.customer_title,
       i.accounting_status,
       i.accounting_entry_id,
       i.accounting_message,
@@ -205,6 +207,7 @@ export async function getAllInvoices() {
       i.paid_amount,
       i.balance_due,
       i.notes,
+      i.customer_title,
       i.accounting_status,
       i.accounting_entry_id,
       i.accounting_message,
@@ -240,6 +243,13 @@ export async function getNextInvoiceNumber() {
   return getNextInvoiceNumberForDate(new Date().toISOString().split("T")[0]);
 }
 
+export async function updateInvoiceTitle(id, customerTitle) {
+  await ensureInvoicesSchema(pool);
+  const result = await pool.query(`UPDATE invoices SET customer_title=$2, updated_at=NOW()
+    WHERE id=$1 AND archived_at IS NULL RETURNING *`,[id,customerTitle]);
+  return result.rows[0] || null;
+}
+
 export async function getNextInvoiceNumberForDate(invoiceDate) {
   const date = new Date(invoiceDate);
   const year = date.getFullYear();
@@ -263,6 +273,7 @@ export async function getNextInvoiceNumberForDate(invoiceDate) {
 }
 
 export async function createInvoiceWithItems(data) {
+  await ensureInvoicesSchema(pool);
   await ensureStockSchema(pool);
   const client = await pool.connect();
 
@@ -284,9 +295,10 @@ export async function createInvoiceWithItems(data) {
         paid_amount,
         balance_due,
         notes,
-        created_by
+        created_by,
+        customer_title
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING *;
     `;
 
@@ -304,7 +316,8 @@ export async function createInvoiceWithItems(data) {
       data.paid_amount,
       data.balance_due,
       data.notes || null,
-      data.created_by || null
+      data.created_by || null,
+      data.customer_title || null
     ];
 
     const invoiceResult = await client.query(invoiceInsertQuery, invoiceValues);
@@ -583,6 +596,7 @@ async function ensureInvoiceCanBeChanged(client, invoiceId) {
 }
 
 export async function updateInvoiceWithItems(id, data) {
+  await ensureInvoicesSchema(pool);
   await ensureStockSchema(pool);
   const client = await pool.connect();
 
@@ -623,6 +637,7 @@ export async function updateInvoiceWithItems(id, data) {
         balance_due = $8,
         status = 'issued',
         notes = $9,
+        customer_title = $11,
         accounting_status = NULL,
         accounting_entry_id = NULL,
         accounting_message = NULL,
@@ -640,7 +655,8 @@ export async function updateInvoiceWithItems(id, data) {
         data.tax_amount,
         data.total_amount,
         data.notes || null,
-        id
+        id,
+        data.customer_title === undefined ? invoice.customer_title : data.customer_title || null
       ]
     );
 

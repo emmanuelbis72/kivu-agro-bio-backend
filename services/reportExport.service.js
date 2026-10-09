@@ -1279,7 +1279,7 @@ function drawCustomerBalanceTable(doc, statement, startY) {
     const payment = payments[index] || null;
     const values = [
       invoice ? formatDate(invoice.invoice_date) : "",
-      invoice ? invoice.invoice_number || "-" : "",
+      invoice ? [invoice.invoice_number || "-", invoice.customer_title].filter(Boolean).join('\n') : "",
       invoice ? formatMoney(invoice.total_amount) : "",
       payment ? formatDate(payment.payment_date) : "",
       payment ? payment.reference || payment.invoice_number || `PAY-${payment.id}` : "",
